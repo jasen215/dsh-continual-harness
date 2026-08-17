@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/jasen215/dsh-continual-harness#readme
+    about: Read the README for setup and usage instructions
