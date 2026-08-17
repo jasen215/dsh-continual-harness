@@ -4,7 +4,7 @@
 
 DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个插件为 agent 提供「持久记忆 + 定期复盘精修 + 全局共享知识 + 失败自动回滚」闭环（plan → validate → apply → rollback），并以 dsh 的插件机制（session 事件、agent 作用域事件、pre-step 瀑布、tools 服务）实现。
 
-设计灵感来自 [Prime Intellect 开源的 prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)，一个自改进的编码 harness。
+设计灵感来自 Prime Intellect 开源的 [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)，一个自改进的编码 harness。
 
 ## 一个插件就够
 
