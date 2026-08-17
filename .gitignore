@@ -1,0 +1,8 @@
+node_modules/
+lib/
+*.tsbuildinfo
+pnpm-debug.log
+coverage/
+.DS_Store
+tmp/
+*.log

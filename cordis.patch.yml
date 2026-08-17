@@ -1,0 +1,23 @@
+# cordis.patch.yml — dsh profile overlay mounting dsh-continual-harness
+#
+# A profile patch layer is a top-level YAML ARRAY of loader patch entries
+# (PatchOptions): an `insert` row appends plugin entries; an id-targeted row
+# overrides an existing row's config. The dsh core, tools, agents, session,
+# systemPrompt, and llm capabilities must load before this plugin (its
+# `inject` list enforces that).
+#
+# Install by placing this file at ~/.dsh/profiles/<name>/cordis.patch.yml and
+# running:
+#   pnpm dsh --profile <name> "…"
+- insert:
+    - id: continual-harness
+      name: dsh-continual-harness
+      config:
+        defaultGlobal: true
+        # harnessRoot: /absolute/path/to/harness   # override the default dsh data dir
+        # maxTrajectoryChars: 80000
+        # plannerMaxTokens: 32000
+        # autoRefine:
+        #   turnInterval: 25
+        #   compact: true
+        #   cooldownMs: 1200000

@@ -1,0 +1,69 @@
+{
+  "name": "dsh-continual-harness",
+  "version": "0.1.0",
+  "description": "Standalone DeepSeek Harness plugin: continual harness self-evolution. The agent persists and refines reusable prompt notes, memories, skill contracts, and subagent specs through small evidence-backed edits, with automatic refinement gates, rollback, and prompt injection.",
+  "keywords": [
+    "deepseek-harness",
+    "plugin",
+    "self-improvement",
+    "continual-harness",
+    "agent"
+  ],
+  "type": "module",
+  "main": "lib/types/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/types/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/types/invariant.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/types/**/*"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jasen215/dsh-continual-harness.git"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-home-paths": ">=0.0.1-rc.3",
+    "@deepseek-ai/dsh-invariants": ">=0.0.1-rc.1",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1",
+    "@deepseek-ai/dsh-session": ">=0.0.1-rc.1",
+    "@deepseek-ai/dsh-system-prompt": ">=0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "link:../deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent": "link:../deepseek-harness/packages/core/agent",
+    "@deepseek-ai/dsh-home-paths": "link:../deepseek-harness/packages/util/home-paths",
+    "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",
+    "@deepseek-ai/dsh-llm": "link:../deepseek-harness/packages/llm/llm",
+    "@deepseek-ai/dsh-session": "link:../deepseek-harness/packages/core/session",
+    "@deepseek-ai/dsh-system-prompt": "link:../deepseek-harness/packages/core/system-prompt",
+    "@deepseek-ai/dsh-tools": "link:../deepseek-harness/packages/core/tools",
+    "@deepseek-ai/schemastery": "link:../deepseek-harness/vendor/schemastery",
+    "@types/node": "^22.20.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.8",
+    "@deepseek-ai/cosmokit": "link:../deepseek-harness/vendor/cosmokit"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  }
+}
