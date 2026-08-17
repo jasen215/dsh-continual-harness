@@ -1,9 +1,16 @@
 /**
- * Digest-tracked harness-state projection: keeps a compact overview in the
- * model's context as a durable user message, republished only when the state
- * digest changes. The overview is model-visible and logged as a
+ * Digest-tracked harness-state projection: keeps exactly one compact overview
+ * in the model's context as a durable user message, republished only when the
+ * state digest changes. The overview is model-visible and logged as a
  * `harness-state` source user message, so it satisfies the model-visible ⟺
  * logged rule.
+ *
+ * Replacement, not accumulation: on a digest change the previously injected
+ * block is shadowed in place through a session surface `replace`, so the
+ * transcript never holds a stale harness-state snapshot. The first injection
+ * lands at the tail of the step's messages (after the assembled system-prompt
+ * context), so the current-state reminder is the most recent system-level
+ * content before the model call; subsequent updates keep that stable position.
  * @module dsh-continual-harness
  */
 
@@ -11,7 +18,7 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { HARNESS_STATE_SOURCE } from './domain.ts'
 import type { HarnessStore } from './store.ts'
 
@@ -32,17 +39,33 @@ function harnessMessage(overview: string, digest: string): UserMessage {
   })
 }
 
+/** Seq of the last visible harness-state message, or undefined when none. */
+function findHarnessStateSeq(session: Session): number | undefined {
+  const surface = new Set(session.surface.nodes)
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index]
+    if (event?.type !== 'user/message') continue
+    if (event.data.source?.kind !== HARNESS_STATE_SOURCE) continue
+    // Only nodes still on the model-visible surface count; a block shadowed by
+    // a previous replace or by compaction is already gone.
+    if (!surface.has(event.seq)) continue
+    return event.seq
+  }
+  return undefined
+}
+
 /**
- * Register the pre-step projection. The overview is injected after the
- * claimed input batch of a step when the digest differs from the last
- * injected one and the store has content (or content was previously shown,
- * so an emptied store retires its names).
+ * Register the pre-step projection. The overview is injected when the digest
+ * differs from the last injected one and the store has content (or content
+ * was previously shown, so an emptied store retires its names). An existing
+ * block is replaced in place; otherwise the block is appended at the tail of
+ * the step's messages, after the assembled system-prompt context.
  */
 export function registerHarnessProjection(ctx: Context, store: HarnessStore): void {
   const injectedDigests = new WeakMap<Agent, string>()
 
   ctx.on('agent/pre-step', async (
-    { agent, messages, step, signal },
+    { agent, step, signal },
     next,
   ): Promise<PreStepDecision> => {
     const decision = await next()
@@ -56,11 +79,26 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
     if (digest === lastDigest || (!hasContent && lastDigest === undefined)) return decision
     if (signal.aborted) return decision
     injectedDigests.set(agent, digest)
-    if (decision.messages.some(message => message.source.kind === HARNESS_STATE_SOURCE)) return decision
-    if (step === 1 && decision.messages.length === 0) return decision
     const desired = harnessMessage(overview, digest)
-    const lastClaimedIndex = decision.messages.findLastIndex(message => messages.includes(message))
-    const entered = decision.messages.toSpliced(lastClaimedIndex + 1, 0, desired)
-    return { kind: 'enter', messages: entered }
+
+    // A committed block already exists: shadow it in place with the fresh
+    // snapshot. The replacement is appended to the session log immediately,
+    // so it is part of this step's derived transcript without re-entering the
+    // decision messages (no double block).
+    const existingSeq = findHarnessStateSeq(agent.session)
+    if (existingSeq !== undefined) {
+      agent.session.append('user/message', desired, {
+        surfaceOp: { op: 'replace', start: existingSeq, end: existingSeq },
+        sourceEventSeqs: [existingSeq],
+      })
+      return decision
+    }
+
+    // First injection: skip a vacuous first step, then land the block at the
+    // tail of the step's messages — after the claimed batch and the assembled
+    // system-prompt context — so it reads as the most recent system-level
+    // reminder before the model call.
+    if (step === 1 && decision.messages.length === 0) return decision
+    return { kind: 'enter', messages: [...decision.messages, desired] }
   })
 }

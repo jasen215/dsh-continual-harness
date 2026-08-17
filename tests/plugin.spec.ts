@@ -157,4 +157,60 @@ describe('harness-state projection', () => {
     const secondHarness = second.messages.filter(message => message.source.kind === HARNESS_STATE_SOURCE)
     expect(secondHarness).toHaveLength(0)
   })
+
+  it('replaces the previous harness-state block on digest change instead of accumulating', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, { defaultGlobal: true, harnessRoot: home })
+
+    const { agent, session } = stubAgent('projected-replace')
+    const seeder = new HarnessStore(ctx, { harnessRoot: home })
+    seeder.applyRefinement(agent, {
+      id: 'refine_p1',
+      summary: 'seed one',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'durable' }],
+    }, {})
+    const signal = new AbortController().signal
+    const claimed1 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prompt one' }] })]
+
+    const first = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed1, turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed1 }),
+    )
+    expect(first.kind).toBe('enter')
+    if (first.kind !== 'enter') throw new Error('expected enter decision')
+    const firstBlock = first.messages.find(message => message.source.kind === HARNESS_STATE_SOURCE)
+    expect(firstBlock).toBeDefined()
+
+    // The agent loop commits every decision message to the session log.
+    for (const message of first.messages) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // State changes -> digest changes -> the next pre-step must replace, not add.
+    seeder.applyRefinement(agent, {
+      id: 'refine_p2',
+      summary: 'seed two',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact2', content: 'more' }],
+    }, {})
+    const claimed2 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prompt two' }] })]
+    const second = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed2, turn: 1, step: 2, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed2 }),
+    )
+    if (second.kind !== 'enter') throw new Error('expected enter decision')
+    // The replacement is committed directly to the session; the decision carries no block.
+    expect(second.messages.some(message => message.source.kind === HARNESS_STATE_SOURCE)).toBe(false)
+
+    // Exactly one harness-state block remains on the surface, with the new digest.
+    const derived = session.deriveMessages()
+    const blocks = derived.filter(message => message.source?.kind === HARNESS_STATE_SOURCE)
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
+  })
 })
