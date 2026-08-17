@@ -4,7 +4,7 @@ English | [中文](docs/readme/README.zh.md)
 
 A **continual self-refinement plugin** for DeepSeek Harness: one plugin gives the agent a closed loop of *persistent memory + periodic review-and-refine + cross-session shared knowledge + automatic rollback on failure* (plan → validate → apply → rollback), implemented through dsh's plugin mechanisms (session events, agent-scoped events, pre-step waterfall, tools service).
 
-The design is inspired by [Prime Intellect's open-source prime-agent](https://github.com/PrimeIntellect-ai/prime-agent), a self-improving coding harness.
+The design is inspired by the open-source [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) from Prime Intellect, a self-improving coding harness.
 
 ## One plugin is enough
 
