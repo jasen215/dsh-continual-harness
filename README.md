@@ -132,6 +132,4 @@ run the same steps. `peerDependencies` declare the semver ranges consumers
 - `compaction/end` is not part of the plugin's type union; the driver triggers it via string comparison after type narrowing, and the gate is silently skipped when the compaction capability is not loaded.
 - Projection dedup is an in-process `WeakMap<Agent, digest>`: the first step after a session restart re-injects (stateless and idempotent, but one extra injection).
 - Concurrent writes are last-writer-wins: multiple processes refining the same directory concurrently may overwrite each other; baseline conflict detection during planning can only catch read-after-write races, not serialize them.
-- Skill materialization targets only the ids touched by a commit, so a skill deleted while its file was hand-edited elsewhere is not reconciled until the next commit touches it.
-- There is no dedicated skill-creator UI/flow: the model generates skills through the refinement loop, and the dsh skill provider must be mounted in the profile for the generated SKILL.md files to be discovered and callable.
 - A failed automatic refinement degrades silently (only logged) and never interrupts the session.
