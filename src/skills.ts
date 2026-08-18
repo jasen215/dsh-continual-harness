@@ -15,13 +15,19 @@ import type { HarnessEntry } from './types.ts'
 /** Length cap for the single-line frontmatter description. */
 export const MAX_DESCRIPTION_CHARS = 200
 
+/** Provenance marker: this plugin authored the materialized skill. */
+export const SKILL_AUTHOR = 'dsh-continual-harness'
+/** Provenance marker: the skill came out of the experience-solidification loop. */
+export const SKILL_SOURCE = 'esp'
+
 /** Skill entries may carry the optional one-line description. */
 export type SkillEntryLike = HarnessEntry & { description?: string }
 
 /**
  * Render one skill entry as a `<name>/SKILL.md` bundle body: YAML frontmatter
- * with the dsh-required `name` and `description` keys plus the markdown body
- * verbatim. The description falls back to the first line of the body.
+ * with the dsh-required `name` and `description` keys, a `metadata` provenance
+ * block marking the author and source, plus the markdown body verbatim. The
+ * description falls back to the first line of the body.
  */
 export function renderSkillMarkdown(entry: SkillEntryLike): string {
   const description = entry.description !== undefined
@@ -33,6 +39,9 @@ export function renderSkillMarkdown(entry: SkillEntryLike): string {
   return `---
 name: ${entry.id}
 description: ${safe}
+metadata:
+  author: ${SKILL_AUTHOR}
+  source: ${SKILL_SOURCE}
 ---
 
 ${entry.content}
