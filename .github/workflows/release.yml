@@ -1,0 +1,42 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm run typecheck
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm run build
+      - name: Verify version matches the tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          VER="v$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$VER" ]; then
+            echo "::error::tag $TAG does not match package version $VER"
+            exit 1
+          fi
+      # Trusted publishing (OIDC) — no long-lived NODE_AUTH_TOKEN required;
+      # npm >= 11.5.1 exchanges the Actions OIDC token for a short-lived
+      # publish credential and attaches provenance automatically.
+      - name: Publish to npm
+        run: npm publish --provenance --access public

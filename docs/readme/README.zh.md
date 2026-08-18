@@ -105,14 +105,9 @@ pnpm dsh --profile <name> "…"
 | `plannerMaxTokens` | 32000 | 规划器 LLM 调用的最大 token 数 |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | 自动精修：turn 间隔门、压缩结束门、冷却时间、禁用开关 |
 
-## 开发（pre-release 现状）
+## 开发
 
-npm 上已发布的 `@deepseek-ai/dsh-*` 各包版本互相矛盾（如 `dsh-agent@0.1.0-rc.6` 声明 peer `dsh-invariants@^0.1.0-rc.6`，但实际只发布了 `0.0.1-rc.1`），无法直接互相安装。因此开发期：
-
-- `package.json` 的 `devDependencies` 用 `link:../deepseek-harness/packages/…` 指向 monorepo 源码；
-- `peerDependencies` 声明语义化版本范围，供正式发布后的消费者使用；
-- `tsconfig.json`（typecheck）与 `tsconfig.src.json`（vitest）是同一组 paths 的双 facade：前者指向 monorepo 已构建的 `lib/types/*.d.ts`，后者指向 `src`，vitest 通过 vite 原生 `resolve.alias`（全部 160 条映射）让整个依赖图跑源码平面（monorepo 检出根默认取同级 `../deepseek-harness`，可用 `DEEPSEEK_HARNESS_ROOT` 环境变量覆盖）；
-- 运行：`pnpm run typecheck`、`pnpm test`、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物；运行时仍需 dsh 各包发布一致版本，见上）。
+插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（47 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
 
 ## Known Limitations and Deferred Work
 

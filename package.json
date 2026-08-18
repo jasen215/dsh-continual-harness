@@ -1,6 +1,7 @@
 {
   "name": "dsh-continual-harness",
   "version": "0.1.0",
+  "packageManager": "pnpm@11.21.0",
   "description": "Standalone DeepSeek Harness plugin: continual harness self-evolution. The agent persists and refines reusable prompt notes, memories, skill contracts, and subagent specs through small evidence-backed edits, with automatic refinement gates, rollback, and prompt injection.",
   "keywords": [
     "deepseek-harness",
@@ -51,21 +52,21 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "link:../deepseek-harness/vendor/cordis",
-    "@deepseek-ai/dsh-agent": "link:../deepseek-harness/packages/core/agent",
-    "@deepseek-ai/dsh-home-paths": "link:../deepseek-harness/packages/util/home-paths",
-    "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",
-    "@deepseek-ai/dsh-llm": "link:../deepseek-harness/packages/llm/llm",
-    "@deepseek-ai/dsh-session": "link:../deepseek-harness/packages/core/session",
-    "@deepseek-ai/dsh-system-prompt": "link:../deepseek-harness/packages/core/system-prompt",
-    "@deepseek-ai/dsh-tools": "link:../deepseek-harness/packages/core/tools",
-    "@deepseek-ai/schemastery": "link:../deepseek-harness/vendor/schemastery",
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/cosmokit": "1.8.2",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-home-paths": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-scope": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.7",
+    "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "^22.20.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "vite-tsconfig-paths": "^6.1.1",
-    "vitest": "^4.1.8",
-    "@deepseek-ai/cosmokit": "link:../deepseek-harness/vendor/cosmokit"
+    "vitest": "^4.1.8"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

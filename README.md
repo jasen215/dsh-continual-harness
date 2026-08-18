@@ -113,14 +113,15 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `plannerMaxTokens` | 32000 | Max tokens for the planner LLM call |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | Auto-refine: turn-interval gate, compaction-end gate, cooldown, disable switch |
 
-## Development (pre-release status)
+## Development
 
-The published `@deepseek-ai/dsh-*` package versions are mutually inconsistent (e.g. `dsh-agent@0.1.0-rc.6` declares peer `dsh-invariants@^0.1.0-rc.6`, but only `0.0.1-rc.1` is published), so they cannot be installed against each other. During development:
-
-- `devDependencies` in `package.json` point at the monorepo source via `link:../deepseek-harness/packages/…`;
-- `peerDependencies` declare semver ranges for consumers after a real release;
-- `tsconfig.json` (typecheck) and `tsconfig.src.json` (vitest) are two facades over the same paths: the former points at the monorepo's built `lib/types/*.d.ts`, the latter at `src`; vitest runs the whole dependency graph on the source plane through Vite's native `resolve.alias` (all 160 mappings). The monorepo checkout root defaults to the sibling `../deepseek-harness`; override it with the `DEEPSEEK_HARNESS_ROOT` environment variable for other layouts or CI;
-- Run: `pnpm run typecheck`, `pnpm test`, `pnpm run build` (tsc emits `lib/types/*.js + *.d.ts`; the `"."` and `"./invariant"` exports point at the artifacts). Runtime still requires consistently released dsh packages, as above.
+The plugin is self-contained: `devDependencies` pin the published
+`@deepseek-ai/*` packages (rc versions), so `pnpm install`, `pnpm run
+typecheck`, `pnpm test` (47 cases), and `pnpm run build` (tsc emits
+`lib/types/*.js + *.d.ts`; the `"."` and `"./invariant"` exports point at the
+artifacts) all work in a clean checkout — CI and the OIDC release workflow
+run the same steps. `peerDependencies` declare the semver ranges consumers
+(host dsh installations) must satisfy.
 
 ## Known Limitations and Deferred Work
 
