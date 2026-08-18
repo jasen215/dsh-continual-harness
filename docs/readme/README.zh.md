@@ -110,7 +110,7 @@ pnpm dsh --profile <name> "…"
 
 ## 开发
 
-插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（47 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
+插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（55 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
 
 ## Known Limitations and Deferred Work
 
@@ -118,6 +118,4 @@ pnpm dsh --profile <name> "…"
 - `compaction/end` 事件不在插件类型联合内，driver 以类型收窄后的字符串比较触发；compaction 能力未加载时该门静默跳过。
 - 投影去重是进程内 `WeakMap<Agent, digest>`：会话重启后首步会重新注入（无状态、幂等，但多一次注入）。
 - 并发写入是 last-writer-wins：同目录多进程同时精修可能互相覆盖，规划期的基线冲突检测只能拦截「读后写」竞争，不能串行化。
-- skill 物化只处理提交触及的 id：若某 skill 的文件被手工编辑过、而后续没有提交再触及它，不会被重新协调。
-- 没有专门的 skill 创建器 UI/流程：模型通过精修循环生成 skill，且 profile 需挂载 dsh 的 skill provider，生成的 SKILL.md 才会被发现并可调用。
 - 自动精修失败静默降级（只记日志），不打断会话。
