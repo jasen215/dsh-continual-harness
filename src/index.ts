@@ -40,6 +40,12 @@ export interface Config {
   /** Harness home; defaults under the dsh home directory. */
   harnessRoot?: string
   /**
+   * Directory where skill entries materialize as dsh SKILL.md bundles.
+   * Defaults to the dsh user skills root (`$DSH_HOME/skills`), which dsh's
+   * filesystem skill provider scans live.
+   */
+  skillsDir?: string
+  /**
    * Required deployment choice for the store the tool targets when a call
    * omits `global`: local keeps lessons session-scoped, global makes them
    * cross-session.
@@ -56,6 +62,7 @@ export interface Config {
 /** Schemastery configuration for the continual harness plugin. */
 export const Config: z<Config> = z.object({
   harnessRoot: z.string(),
+  skillsDir: z.string(),
   defaultGlobal: z.boolean().required(),
   maxTrajectoryChars: z.number().step(1).min(1).default(DEFAULT_TRAJECTORY_MAX_CHARS),
   plannerMaxTokens: z.number().step(1).min(1).default(DEFAULT_PLANNER_MAX_TOKENS),
@@ -75,7 +82,10 @@ export const Config: z<Config> = z.object({
  * @param config - validated plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
-  const store = new HarnessStore(ctx, config.harnessRoot === undefined ? {} : { harnessRoot: config.harnessRoot })
+  const store = new HarnessStore(ctx, {
+    ...(config.harnessRoot === undefined ? {} : { harnessRoot: config.harnessRoot }),
+    ...(config.skillsDir === undefined ? {} : { skillsDir: config.skillsDir }),
+  })
   registerHarnessTool(ctx, store, {
     defaultGlobal: config.defaultGlobal,
     maxTrajectoryChars: config.maxTrajectoryChars,

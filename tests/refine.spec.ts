@@ -23,9 +23,12 @@ describe('validateEdit', () => {
       .toBe('the base system prompt is immutable')
   })
 
-  it('requires skill edits to carry a python reference and arguments', () => {
-    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c' })).toContain('reference')
-    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', reference: 'r' })).toContain('arguments')
+  it('validates skill edits: kebab-case id, content required, description optional', () => {
+    expect(validateEdit({ action: 'create', kind: 'skill', id: 'Not Kebab', content: 'c' })).toContain('kebab-case')
+    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', description: 'summary' }))
+      .toBeUndefined()
+    expect(validateEdit({ action: 'delete', kind: 'skill', id: 's' })).toBeUndefined()
+    // legacy python-contract fields remain tolerated for state compatibility
     expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', reference: 'r', arguments: '{}' }))
       .toBeUndefined()
   })
@@ -41,7 +44,7 @@ describe('applyRefinementProposal', () => {
     summary: 'remember the pattern',
     edits: [
       { action: 'create', kind: 'memory', id: 'pin-versions', content: 'always pin versions' },
-      { action: 'create', kind: 'skill', id: 'repro', content: 'repro skill', reference: 'repro', arguments: '{}' },
+      { action: 'create', kind: 'skill', id: 'repro', content: 'repro skill', description: 'reproduce a bug fast' },
       { action: 'update', kind: 'memory', id: 'missing', content: 'x' },
       { action: 'delete', kind: 'memory', id: 'stale', content: '' },
     ],
@@ -58,7 +61,7 @@ describe('applyRefinementProposal', () => {
     expect(result.id).toBe('refine_1')
     expect(result.scope).toBe('local')
     expect(next.entries.memory['pin-versions']?.content).toBe('always pin versions')
-    expect(next.entries.skill['repro']?.reference).toBe('repro')
+    expect(next.entries.skill['repro']?.description).toBe('reproduce a bug fast')
     expect(next.entries.memory['stale']).toBeUndefined()
     expect(next.refinements).toHaveLength(1)
     const applied = result.appliedEdits.filter(edit => edit.applied).map(edit => edit.id)

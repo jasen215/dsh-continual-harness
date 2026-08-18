@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -51,9 +51,14 @@ function stubAgent(rawId: string): StubAgent {
 }
 
 describe('HarnessStore', () => {
+  /** Hermetic store: harness root + skills dir both inside one temp home. */
+  function testStore(ctx: Context, root: string): HarnessStore {
+    return new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+  }
+
   it('applies a refinement locally: state file, session event, and merged view', () => {
     const ctx = new Context()
-    const store = new HarnessStore(ctx, { harnessRoot: tempHome() })
+    const store = testStore(ctx, tempHome())
     const { agent, session } = stubAgent('agent-1')
     const plan: RefinementProposal = {
       id: 'refine_1',
@@ -69,7 +74,7 @@ describe('HarnessStore', () => {
 
   it('rolls back a refinement from the merged history', () => {
     const ctx = new Context()
-    const store = new HarnessStore(ctx, { harnessRoot: tempHome() })
+    const store = testStore(ctx, tempHome())
     const { agent } = stubAgent('agent-2')
     const plan: RefinementProposal = {
       id: 'refine_2',
@@ -85,7 +90,7 @@ describe('HarnessStore', () => {
   it('applies globally and persists the cross-session history', () => {
     const ctx = new Context()
     const home = tempHome()
-    const store = new HarnessStore(ctx, { harnessRoot: home })
+    const store = testStore(ctx, home)
     const { agent } = stubAgent('agent-3')
     const plan: RefinementProposal = {
       id: 'refine_3',
@@ -99,10 +104,30 @@ describe('HarnessStore', () => {
   })
 
   it('renders an empty overview when nothing is stored', () => {
-    const store = new HarnessStore(new Context(), { harnessRoot: tempHome() })
+    const store = testStore(new Context(), tempHome())
     const { agent } = stubAgent('agent-4')
     expect(store.render(agent)).toContain('# Continual Harness State')
     expect(store.render(agent)).toContain('- none')
+  })
+
+  it('materializes skill edits as SKILL.md bundles and restores them on rollback', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('agent-5')
+    const bundle = join(home, 'skills', 'repro', 'SKILL.md')
+    store.applyRefinement(agent, {
+      id: 'refine_skill',
+      summary: 'add repro skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'repro', content: 'repro body', description: 'reproduce fast' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(true)
+    expect(readFileSync(bundle, 'utf8')).toContain('name: repro')
+    expect(readFileSync(bundle, 'utf8')).toContain('repro body')
+
+    store.rollbackRefinement(agent, 'refine_skill', {})
+    expect(existsSync(bundle)).toBe(false)
+    expect(store.state(agent).entries.skill['repro']).toBeUndefined()
   })
 })
 
