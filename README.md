@@ -54,7 +54,7 @@ tests/           7 specs, 46 cases (storage / refine / planner / store / driver 
 - Merged view: local entries win; a shadowed global entry remains visible under the `local:<id>` prefix.
 - Baseline validation on apply: an edit is rejected if the entry changed concurrently during planning (`entry changed during refinement planning`).
 - `base_system_prompt` is a protected id; any edit to it is rejected.
-- **Skills are real dsh skills.** Every applied skill edit materializes the effective merged entry as a `<name>/SKILL.md` bundle (YAML `name` + `description` frontmatter, kebab-case id) under `Config.skillsDir` (default `$DSH_HOME/skills`), where dsh's filesystem skill provider (`dsh-skill-filesystem`) discovers it live and `dsh-tool-skill` exposes it to the model. Deletes remove the bundle; rollbacks restore it. Only ids touched by a commit are written or removed, so user-owned skills in the same directory are never touched.
+- **Skills are real dsh skills.** Every applied skill edit materializes the effective merged entry as a `<name>/SKILL.md` bundle (YAML `name` + `description` frontmatter, kebab-case id) under `Config.skillsDir` (default `$DSH_HOME/skills`), where dsh's filesystem skill provider (`dsh-skill-filesystem`) discovers it live and `dsh-tool-skill` exposes it to the model. Deletes remove the bundle; rollbacks restore it. Only ids touched by a commit are written or removed, so user-owned skills in the same directory are never touched. Each bundle stamps a `metadata` provenance block (`author: dsh-continual-harness`, `source: esp`) so generated skills are distinguishable from hand-written ones.
 
 ### Experience Solidification Protocol (ESP)
 

@@ -31,8 +31,13 @@ function skillEntry(id: string, content: string, description?: string): HarnessE
 describe('renderSkillMarkdown', () => {
   it('renders the dsh SKILL.md bundle: name + description frontmatter and verbatim body', () => {
     const markdown = renderSkillMarkdown(skillEntry('repro', '## Steps\n1. Run `pnpm test`\n2. Read the failure', 'Reproduce a bug fast'))
-    expect(markdown).toContain('---\nname: repro\ndescription: Reproduce a bug fast\n---')
+    expect(markdown).toContain('---\nname: repro\ndescription: Reproduce a bug fast\nmetadata:')
     expect(markdown).toContain('## Steps\n1. Run `pnpm test`\n2. Read the failure')
+  })
+
+  it('stamps the provenance metadata block (author + esp source)', () => {
+    const markdown = renderSkillMarkdown(skillEntry('repro', 'body', 'summary'))
+    expect(markdown).toContain('metadata:\n  author: dsh-continual-harness\n  source: esp')
   })
 
   it('falls back to the first line of the body when description is missing', () => {
