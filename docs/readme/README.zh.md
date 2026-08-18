@@ -26,6 +26,7 @@ src/
   types.ts       HarnessState / RefinementProposal / RefinementResult 等类型
   storage.ts     状态与历史的磁盘读写（原子写、损坏降级、local/global 合并、jsonl 历史）
   refine.ts      校验、应用、回滚（基线冲突检测、版本递增、内容收窄守卫）
+  skills.ts      SKILL.md 渲染 + 文件协调（生成的 skill 是真正的 dsh skill）
   render.ts      面向模型的概览 / 摘要 / 历史渲染
   planner.ts     LLM 规划提示词与 JSON 解析（plan / auto-refine review 两条提示词）
   store.ts       HarnessStore：组合存储 + 事件发布（session 事件 + agent 作用域事件）
@@ -53,6 +54,7 @@ tests/           7 个 spec，46 个用例（storage / refine / planner / store 
 - 合并视图：本地条目优先；被遮蔽的全局条目以 `local:<id>` 前缀保留可见。
 - 应用时校验基线：规划期间条目被并发修改则拒绝该编辑（`entry changed during refinement planning`）。
 - `base_system_prompt` 为受保护 id，任何编辑都会被拒绝。
+- **skill 是真正的 dsh skill**：每次应用的 skill 编辑都会把生效（合并后）的条目物化为 `<name>/SKILL.md` 目录束（YAML `name` + `description` frontmatter、kebab-case id），写入 `Config.skillsDir`（默认 `$DSH_HOME/skills`）——dsh 的文件系统 skill provider（`dsh-skill-filesystem`）实时发现它，`dsh-tool-skill` 把它暴露给模型。删除会移除目录束，回滚会还原；只处理提交触及的 id，不会碰同目录下用户自有的 skill。
 
 ### 经验固化协议 (ESP)
 
@@ -100,6 +102,7 @@ pnpm dsh --profile <name> "…"
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `harnessRoot` | dsh 数据目录 `harness/` | 状态根目录（测试用临时目录） |
+| `skillsDir` | `$DSH_HOME/skills` | skill 条目物化为 dsh SKILL.md 目录束的目录（dsh 用户 skill 根） |
 | `defaultGlobal` | 必填 | 工具未显式指定 `global` 时的目标作用域 |
 | `maxTrajectoryChars` | 80000 | 复盘轨迹的最大字符数（tail-biased 截断） |
 | `plannerMaxTokens` | 32000 | 规划器 LLM 调用的最大 token 数 |
@@ -115,5 +118,6 @@ pnpm dsh --profile <name> "…"
 - `compaction/end` 事件不在插件类型联合内，driver 以类型收窄后的字符串比较触发；compaction 能力未加载时该门静默跳过。
 - 投影去重是进程内 `WeakMap<Agent, digest>`：会话重启后首步会重新注入（无状态、幂等，但多一次注入）。
 - 并发写入是 last-writer-wins：同目录多进程同时精修可能互相覆盖，规划期的基线冲突检测只能拦截「读后写」竞争，不能串行化。
-- skill 条目目前只是「描述 + 参数」的文本记录，不含可执行代码；要成为可调用技能需后续接入 dsh 的 skill 注册机制。
+- skill 物化只处理提交触及的 id：若某 skill 的文件被手工编辑过、而后续没有提交再触及它，不会被重新协调。
+- 没有专门的 skill 创建器 UI/流程：模型通过精修循环生成 skill，且 profile 需挂载 dsh 的 skill provider，生成的 SKILL.md 才会被发现并可调用。
 - 自动精修失败静默降级（只记日志），不打断会话。

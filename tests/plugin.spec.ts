@@ -81,13 +81,18 @@ function resultJson(result: ToolExecutionResult): Record<string, unknown> {
   return JSON.parse(block.text) as Record<string, unknown>
 }
 
+/** Hermetic plugin config: harness root + skills dir inside one temp home. */
+function pluginConfig(root: string) {
+  return { defaultGlobal: true, harnessRoot: root, skillsDir: join(root, 'skills') }
+}
+
 describe('plugin registration', () => {
   it('mounts the plugin and registers the harness_refine tool', async () => {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(plugin, { defaultGlobal: true, harnessRoot: tempHome() })
+    await ctx.plugin(plugin, pluginConfig(tempHome()))
     expect(ctx.tools.get('harness_refine')?.name).toBe('harness_refine')
   })
 
@@ -97,9 +102,9 @@ describe('plugin registration', () => {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(plugin, { defaultGlobal: true, harnessRoot: home })
+    await ctx.plugin(plugin, pluginConfig(home))
 
-    const seeder = new HarnessStore(new Context(), { harnessRoot: home })
+    const seeder = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     seeder.applyRefinement(stubAgent('seeder').agent, {
       id: 'refine_seed',
       summary: 'seed a global memory',
@@ -112,7 +117,7 @@ describe('plugin registration', () => {
     expect(json.scope).toBe('global')
     expect(json.applied).toBe(1)
 
-    const fresh = new HarnessStore(new Context(), { harnessRoot: home })
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.globalState().entries.memory['seed']).toBeUndefined()
   })
 })
@@ -124,10 +129,10 @@ describe('harness-state projection', () => {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(plugin, { defaultGlobal: true, harnessRoot: home })
+    await ctx.plugin(plugin, pluginConfig(home))
 
     const { agent, session } = stubAgent('projected')
-    const seeder = new HarnessStore(ctx, { harnessRoot: home })
+    const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
     seeder.applyRefinement(agent, {
       id: 'refine_p',
       summary: 'seed',
@@ -164,10 +169,10 @@ describe('harness-state projection', () => {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
-    await ctx.plugin(plugin, { defaultGlobal: true, harnessRoot: home })
+    await ctx.plugin(plugin, pluginConfig(home))
 
     const { agent, session } = stubAgent('projected-replace')
-    const seeder = new HarnessStore(ctx, { harnessRoot: home })
+    const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
     seeder.applyRefinement(agent, {
       id: 'refine_p1',
       summary: 'seed one',

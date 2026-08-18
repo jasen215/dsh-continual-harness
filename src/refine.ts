@@ -20,18 +20,16 @@ export const REFINEMENT_ACTIONS = ['create', 'update', 'delete'] as const
 /** Identifier of the immutable base system prompt; never an editable id. */
 export const BASE_SYSTEM_PROMPT_ID = 'base_system_prompt'
 
+/** Kebab-case pattern dsh requires for skill names (and the safe path form). */
+export const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
 /** Validate one edit; returns the failure reason or undefined when valid. */
 export function validateEdit(edit: RefinementEdit): string | undefined {
   if (!REFINEMENT_KINDS.includes(edit.kind)) return `unknown kind: ${edit.kind}`
   if (!REFINEMENT_ACTIONS.includes(edit.action)) return `unknown action: ${edit.action}`
   if (edit.id === BASE_SYSTEM_PROMPT_ID) return 'the base system prompt is immutable'
   if (!edit.id) return 'edit id is required'
-  if (edit.kind === 'skill') {
-    if (edit.action === 'delete') return undefined
-    if (!edit.reference) return 'skill edits require a python reference'
-    if (!edit.arguments) return 'skill edits require arguments'
-    return undefined
-  }
+  if (edit.kind === 'skill' && !KEBAB_CASE_PATTERN.test(edit.id)) return 'skill ids must be kebab-case'
   if (edit.action !== 'delete' && edit.content === undefined) return 'non-delete edits require content'
   return undefined
 }
@@ -103,8 +101,9 @@ export function applyRefinementProposal(
             kind: edit.kind,
             version: 1,
             content,
-            reference: edit.reference!,
-            arguments: edit.arguments!,
+            ...(edit.description === undefined ? {} : { description: edit.description }),
+            ...(edit.reference === undefined ? {} : { reference: edit.reference }),
+            ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
             updatedAt: now,
           }
         : {

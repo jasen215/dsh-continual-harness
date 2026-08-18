@@ -26,6 +26,7 @@ src/
   types.ts       HarnessState / RefinementProposal / RefinementResult and other types
   storage.ts     disk read/write of state and history (atomic writes, corruption degradation, local/global merge, jsonl history)
   refine.ts      validation, application, rollback (baseline conflict detection, version increments, content-shrink guard)
+  skills.ts      SKILL.md rendering + file reconciliation (generated skills are real dsh skills)
   render.ts      model-facing overview / summary / history rendering
   planner.ts     LLM planning prompts and JSON parsing (plan / auto-refine review prompts)
   store.ts       HarnessStore: combined storage + event publishing (session events + agent-scoped events)
@@ -53,6 +54,7 @@ tests/           7 specs, 46 cases (storage / refine / planner / store / driver 
 - Merged view: local entries win; a shadowed global entry remains visible under the `local:<id>` prefix.
 - Baseline validation on apply: an edit is rejected if the entry changed concurrently during planning (`entry changed during refinement planning`).
 - `base_system_prompt` is a protected id; any edit to it is rejected.
+- **Skills are real dsh skills.** Every applied skill edit materializes the effective merged entry as a `<name>/SKILL.md` bundle (YAML `name` + `description` frontmatter, kebab-case id) under `Config.skillsDir` (default `$DSH_HOME/skills`), where dsh's filesystem skill provider (`dsh-skill-filesystem`) discovers it live and `dsh-tool-skill` exposes it to the model. Deletes remove the bundle; rollbacks restore it. Only ids touched by a commit are written or removed, so user-owned skills in the same directory are never touched.
 
 ### Experience Solidification Protocol (ESP)
 
@@ -108,6 +110,7 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | Field | Default | Description |
 | --- | --- | --- |
 | `harnessRoot` | dsh data dir `harness/` | State root directory (temporary dir in tests) |
+| `skillsDir` | `$DSH_HOME/skills` | Directory where skill entries materialize as dsh SKILL.md bundles (dsh's user skill root) |
 | `defaultGlobal` | required | Target scope when the tool call omits `global` |
 | `maxTrajectoryChars` | 80000 | Max characters of the review trajectory (tail-biased truncation) |
 | `plannerMaxTokens` | 32000 | Max tokens for the planner LLM call |
@@ -129,5 +132,6 @@ run the same steps. `peerDependencies` declare the semver ranges consumers
 - `compaction/end` is not part of the plugin's type union; the driver triggers it via string comparison after type narrowing, and the gate is silently skipped when the compaction capability is not loaded.
 - Projection dedup is an in-process `WeakMap<Agent, digest>`: the first step after a session restart re-injects (stateless and idempotent, but one extra injection).
 - Concurrent writes are last-writer-wins: multiple processes refining the same directory concurrently may overwrite each other; baseline conflict detection during planning can only catch read-after-write races, not serialize them.
-- `skill` entries are currently text records of "description + arguments" without executable code; making them callable skills requires wiring into dsh's skill registration mechanism later.
+- Skill materialization targets only the ids touched by a commit, so a skill deleted while its file was hand-edited elsewhere is not reconciled until the next commit touches it.
+- There is no dedicated skill-creator UI/flow: the model generates skills through the refinement loop, and the dsh skill provider must be mounted in the profile for the generated SKILL.md files to be discovered and callable.
 - A failed automatic refinement degrades silently (only logged) and never interrupts the session.

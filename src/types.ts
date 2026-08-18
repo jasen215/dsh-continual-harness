@@ -32,13 +32,19 @@ export interface MemoryEntry extends HarnessEntry {
   kind: 'memory'
 }
 
-/** A reusable Python REPL skill description with an execution contract. */
+/**
+ * A reusable dsh skill. The entry is the versioned source of truth in
+ * `harness_state.json`; on every applied edit the effective merged entry is
+ * also materialized as a `SKILL.md` bundle under the configured skills
+ * directory, where dsh's filesystem skill provider discovers it live.
+ */
 export interface SkillEntry extends HarnessEntry {
   kind: 'skill'
-  /** The runnable skill reference the Python REPL resolves. */
-  reference: string
-  /** JSON arguments the skill accepts. */
-  arguments: string
+  /** One-line summary rendered into the SKILL.md frontmatter. */
+  description?: string
+  /** Legacy execution-contract fields from the pre-file era; kept for state compatibility. */
+  reference?: string
+  arguments?: string
 }
 
 /** A reusable delegation spec. */
@@ -52,6 +58,9 @@ export interface RefinementEdit {
   kind: RefinementKind
   id: string
   content?: string
+  /** One-line summary; used by `skill` edits as the SKILL.md description. */
+  description?: string
+  /** Legacy fields, tolerated for state compatibility. */
   reference?: string
   arguments?: string
 }

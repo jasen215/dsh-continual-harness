@@ -96,6 +96,11 @@ function turnEnd(session: Session, seq: number): void {
 
 let ctx: Context
 
+/** Hermetic store: harness root + skills dir both inside one temp home. */
+function testStore(root: string): HarnessStore {
+  return new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+}
+
 describe('registerHarnessDriver', () => {
   it('applies a reviewed plan once the turn interval is reached', async () => {
     ctx = new Context()
@@ -106,7 +111,7 @@ describe('registerHarnessDriver', () => {
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
     ctx.provide('agents', agents as never)
-    const store = new HarnessStore(ctx, { harnessRoot: tempHome() })
+    const store = testStore(tempHome())
     registerHarnessDriver(ctx, store, {
       enabled: true,
       turnInterval: 2,
@@ -133,7 +138,7 @@ describe('registerHarnessDriver', () => {
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
     ctx.provide('agents', agents as never)
-    const store = new HarnessStore(ctx, { harnessRoot: tempHome() })
+    const store = testStore(tempHome())
     registerHarnessDriver(ctx, store, {
       enabled: true,
       turnInterval: 1,
@@ -162,7 +167,7 @@ describe('registerHarnessDriver', () => {
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
     ctx.provide('agents', agents as never)
-    const store = new HarnessStore(ctx, { harnessRoot: tempHome() })
+    const store = testStore(tempHome())
     registerHarnessDriver(ctx, store, {
       enabled: true,
       turnInterval: 1,
@@ -189,7 +194,7 @@ describe('registerHarnessDriver', () => {
     const llm = makeLlm([{ approved: true, rationale: 'interval reached' }])
     ctx.provide('llm', llm as never)
     ctx.provide('agents', makeAgents() as never)
-    const store = new HarnessStore(ctx, { harnessRoot: tempHome() })
+    const store = testStore(tempHome())
     registerHarnessDriver(ctx, store, {
       enabled: true,
       turnInterval: 1,

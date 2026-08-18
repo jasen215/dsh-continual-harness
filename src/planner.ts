@@ -26,14 +26,14 @@ You receive the current harness state, the recent refinement history, a tail-bia
 - ids are lowercase kebab-case, unique within (scope, kind).
 - 'prompt' entries are supplemental prompt notes; the base system prompt is immutable and never edited.
 - 'memory' entries are durable facts, decisions, failures, preferences, and outcomes.
-- 'skill' entries MUST include a python \`reference\` (the runnable skill the Python REPL resolves) and \`arguments\` (a JSON description of accepted arguments).
+- 'skill' entries are real dsh skills, materialized as SKILL.md bundles: "description" is a one-line summary, "content" is the markdown body (step-by-step instructions), and the id must be kebab-case.
 - 'subagent' entries are reusable delegation specs: purpose, instructions, when to invoke.
 - Prefer 'update' over creating near-duplicates; 'delete' entries that are stale, contradicted, or never useful.
 - If nothing durable is worth persisting, return edits: [].
 - The summary is one line.
 
 Respond with ONLY a JSON object:
-{"id":"refine_<timestamp>","summary":"one line","edits":[{"action":"create|update|delete","kind":"prompt|memory|skill|subagent","id":"kebab-case","content":"...","reference":"...","arguments":"..."}]}`
+{"id":"refine_<timestamp>","summary":"one line","edits":[{"action":"create|update|delete","kind":"prompt|memory|skill|subagent","id":"kebab-case","content":"...","description":"..."}]}`
 
 /** System prompt for the automatic refinement review gate. */
 export const AUTO_REFINE_REVIEW_SYSTEM_PROMPT = `You are the gatekeeper of an agent's continual harness. Given the current harness state, the recent refinement history, and a tail-biased trajectory excerpt, decide whether persisting a refinement NOW would materially help future steps of this session.

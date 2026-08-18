@@ -19,11 +19,14 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
-function formatEntry(entry: { id: string; version: number; content: string; reference?: string; arguments?: string }, max: number): string {
-  const contract = entry.reference !== undefined && entry.arguments !== undefined
+function formatEntry(entry: { id: string; version: number; content: string; description?: string; reference?: string; arguments?: string }, max: number): string {
+  const summary = entry.description !== undefined && entry.description !== ''
+    ? entry.description
+    : entry.content
+  const legacy = entry.reference !== undefined && entry.arguments !== undefined
     ? ` | reference: ${entry.reference} | arguments: ${entry.arguments}`
     : ''
-  return `- ${entry.id} v${entry.version}: ${truncate(entry.content, max)}${contract}`
+  return `- ${entry.id} v${entry.version}: ${truncate(summary, max)}${legacy}`
 }
 
 /** Render the full `# Continual Harness State` overview block. */

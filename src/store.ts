@@ -8,10 +8,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, rollbackProposal } from './refine.ts'
 import { formatHarnessStateForPrompt } from './render.ts'
+import { reconcileSkillFiles } from './skills.ts'
 import {
   appendGlobalRefinement,
   defaultHarnessHome,
@@ -40,12 +42,15 @@ export interface CommitOptions {
 export class HarnessStore {
   /** Harness home directory (defaults under the dsh home). */
   readonly home: string
+  /** Skills directory where effective skill entries materialize as SKILL.md. */
+  readonly skillsDir: string
 
   constructor(
     private readonly ctx: Context,
-    options: { harnessRoot?: string } = {},
+    options: { harnessRoot?: string; skillsDir?: string } = {},
   ) {
     this.home = options.harnessRoot ?? defaultHarnessHome()
+    this.skillsDir = options.skillsDir ?? dshHomePath('skills')
   }
 
   /** The session-local state for an agent. */
@@ -102,8 +107,27 @@ export class HarnessStore {
       saveHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)), state)
     }
     agent.session.append(HARNESS_REFINEMENT_EVENT, result)
+    this.materializeSkills(agent, result)
     agentEvents(this.ctx, agent).emit('harness/refined', { result })
     return result
+  }
+
+  /**
+   * Materialize the SKILL.md bundles for skill ids touched by a committed
+   * refinement, from the effective merged view, so dsh's filesystem skill
+   * provider picks the generated skills up live. A materialization failure
+   * logs and never fails the already-persisted commit.
+   */
+  private materializeSkills(agent: Agent, result: RefinementResult): void {
+    const touched = result.appliedEdits
+      .filter(edit => edit.applied && edit.kind === 'skill')
+      .map(edit => edit.id)
+    if (touched.length === 0) return
+    try {
+      reconcileSkillFiles(this.skillsDir, this.state(agent).entries.skill, touched)
+    } catch (error) {
+      this.ctx.logger('harness').warn(`skill materialization failed: ${String(error)}`)
+    }
   }
 
   /** Roll back a committed refinement by id from the merged history. */
