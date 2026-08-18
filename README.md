@@ -76,7 +76,22 @@ Any dsh plugin can read and write experience through this protocol (write state 
 
 ## Mounting (dsh profile)
 
-Overlay it onto a dsh profile as `cordis.patch.yml` (e.g. `~/.dsh/profiles/<name>/cordis.patch.yml`); see the [cordis.patch.yml](cordis.patch.yml) example in this repo. A patch layer must be a **top-level YAML array** (`insert` rows append plugin entries; id-targeted rows override an existing row):
+Install into a profile in one line (published to npm):
+
+```sh
+dsh plugin --profile <name> add dsh-continual-harness
+```
+
+The package declares `dsh.bundle`, so `dsh plugin` installs it as a profile
+layer: the dependency is added and its `cordis.patch.yml` is applied as that
+bundle's patch. The plugin's runtime imports of `@deepseek-ai/*` resolve
+through the profile's flat fallback `node_modules` directory. Update with
+`dsh plugin --profile <name> update dsh-continual-harness@latest`.
+
+Manual overlay (before publish, or to pin a local checkout): apply
+[cordis.patch.yml](cordis.patch.yml) onto the profile, e.g.
+`~/.dsh/profiles/<name>/cordis.patch.yml`; a patch layer must be a
+**top-level YAML array** (`insert` rows append plugin entries; id-targeted rows override an existing row):
 
 ```yaml
 - insert:
@@ -84,13 +99,6 @@ Overlay it onto a dsh profile as `cordis.patch.yml` (e.g. `~/.dsh/profiles/<name
       name: dsh-continual-harness
       config:
         defaultGlobal: true
-```
-
-Install:
-
-```sh
-pnpm add dsh-continual-harness        # or link: to this repo's source (see below)
-pnpm dsh --profile <name> "…"
 ```
 
 Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capability plugins must load before this plugin (its `inject` declaration enforces that; mounting is deferred until they load).
