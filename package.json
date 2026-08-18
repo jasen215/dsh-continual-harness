@@ -12,6 +12,11 @@
   "type": "module",
   "main": "lib/types/index.js",
   "types": "lib/types/index.d.ts",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
@@ -21,10 +26,12 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/types/invariant.js"
     },
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "files": [
+    "cordis.patch.yml",
     "lib/types/**/*"
   ],
   "license": "MIT",
