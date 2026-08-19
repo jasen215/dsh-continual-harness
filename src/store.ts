@@ -16,7 +16,7 @@ import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForP
 import { reconcileSkillFiles } from './skills.ts'
 import {
   appendGlobalRefinement,
-  appendUsageEvent,
+  appendUsageEvents,
   defaultHarnessHome,
   getGlobalHarnessStateDir,
   getLocalHarnessStateDir,
@@ -28,7 +28,7 @@ import {
   saveHarnessState,
 } from './storage.ts'
 import { aggregateUsage } from './usage.ts'
-import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult, SkillEntry } from './types.ts'
+import type { HarnessEntry, HarnessState, RefinementKind, RefinementProposal, RefinementResult, SkillEntry } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
@@ -75,14 +75,21 @@ export class HarnessStore {
     this.maxInjectedEntriesPerKind = options.maxInjectedEntriesPerKind ?? DEFAULT_ENTRIES_PER_KIND
   }
 
-  /** The session-local state for an agent. */
+  /** The session-local state for an agent; migration diagnostics are logged. */
   localState(agent: Agent): HarnessState {
-    return loadHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)))
+    return loadHarnessState(
+      getLocalHarnessStateDir(this.home, String(agent.session.id)),
+      diagnostics => this.logMigration(diagnostics),
+    )
   }
 
-  /** The cross-session global state. */
+  /** The cross-session global state; migration diagnostics are logged. */
   globalState(): HarnessState {
-    return loadHarnessState(getGlobalHarnessStateDir(this.home))
+    return loadHarnessState(getGlobalHarnessStateDir(this.home), diagnostics => this.logMigration(diagnostics))
+  }
+
+  private logMigration(diagnostics: string[]): void {
+    for (const diagnostic of diagnostics) this.ctx.logger('harness').warn(`state migration: ${diagnostic}`)
   }
 
   /** The merged view the model sees: local shadows same-id global entries. */
@@ -100,8 +107,8 @@ export class HarnessStore {
 
   /** Structured overview + injected keys for prompt injection. */
   render(agent: Agent): { overview: string; injectedKeys: string[] } {
-    const state = this.state(agent)
     const local = this.localState(agent)
+    const state = mergeHarnessStates(this.globalState(), local)
     return formatHarnessStateForPromptStructured(state, buildQueryFromSession(agent.session), {
       maxPerKind: this.maxInjectedEntriesPerKind,
       sessionId: String(agent.session.id),
@@ -122,18 +129,19 @@ export class HarnessStore {
     return this.usage
   }
 
-  /** Record one injection per key: append the event and update memory; never blocks injection. */
+  /** Record one injection per key: batch-append the events and update memory; never blocks injection. */
   recordInjections(agent: Agent, injectedKeys: string[]): void {
     void agent
     if (injectedKeys.length === 0) return
     const now = new Date().toISOString()
     const stats = this.usageStats()
-    for (const key of injectedKeys) {
-      try {
-        appendUsageEvent(this.home, { key, at: now })
-      } catch (error) {
-        this.ctx.logger('harness').warn(`usage append failed: ${String(error)}`)
-      }
+    const events = injectedKeys.map(key => ({ key, at: now }))
+    try {
+      appendUsageEvents(this.home, events)
+    } catch (error) {
+      this.ctx.logger('harness').warn(`usage append failed: ${String(error)}`)
+    }
+    for (const { key } of events) {
       const current = stats[key] ?? { injectionCount: 0 }
       current.injectionCount += 1
       current.lastInjectedAt = now
@@ -188,25 +196,17 @@ export class HarnessStore {
   promoteEntry(agent: Agent, id: string): { applied: boolean; error?: string } {
     const local = this.localState(agent)
     const global = this.globalState()
-    const hit = (Object.keys(local.entries) as RefinementKind[])
+    const hits = (Object.keys(local.entries) as RefinementKind[])
       .map(kind => ({ kind, entry: local.entries[kind][id] }))
-      .find(candidate => candidate.entry !== undefined)
-    if (hit === undefined) return { applied: false, error: `local entry not found: ${id}` }
-    if (global.entries[hit.kind][id] !== undefined) return { applied: false, error: 'global id conflict' }
-    const entry = hit.entry!
+      .filter(candidate => candidate.entry !== undefined)
+    if (hits.length === 0) return { applied: false, error: `local entry not found: ${id}` }
+    if (hits.length > 1) return { applied: false, error: `ambiguous local id: ${id}` }
+    const { kind, entry } = hits[0]!
+    if (global.entries[kind][id] !== undefined) return { applied: false, error: 'global id conflict' }
     this.applyRefinement(agent, {
       id: `promote_${Date.now()}`,
-      summary: `Promote local ${hit.kind}:${id} to global`,
-      edits: [{
-        action: 'create', kind: hit.kind, id,
-        content: entry.content,
-        ...(entry.title === undefined ? {} : { title: entry.title }),
-        ...(hit.kind === 'skill' && (entry as SkillEntry).description === undefined ? {} : { description: (entry as SkillEntry).description }),
-        ...(hit.kind === 'skill' && (entry as SkillEntry).reference === undefined ? {} : { reference: (entry as SkillEntry).reference }),
-        ...(hit.kind === 'skill' && (entry as SkillEntry).arguments === undefined ? {} : { arguments: (entry as SkillEntry).arguments }),
-        ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
-        reason: 'promote from session wrap-up',
-      }],
+      summary: `Promote local ${kind}:${id} to global`,
+      edits: [{ action: 'create', kind, id, ...promoteFields(entry!), reason: 'promote from session wrap-up' }],
     }, { global: true })
     return { applied: true }
   }
@@ -246,6 +246,20 @@ export class HarnessStore {
       rollbackOf: rollbackId,
     })
   }
+}
+
+/** Copy the persisted fields of a local entry into a promote create-edit. */
+function promoteFields(entry: HarnessEntry): Record<string, unknown> {
+  const fields: Record<string, unknown> = { content: entry.content }
+  if (entry.title !== undefined) fields.title = entry.title
+  if (entry.metadata !== undefined) fields.metadata = entry.metadata
+  if (entry.kind === 'skill') {
+    const skill = entry as SkillEntry
+    if (skill.description !== undefined) fields.description = skill.description
+    if (skill.reference !== undefined) fields.reference = skill.reference
+    if (skill.arguments !== undefined) fields.arguments = skill.arguments
+  }
+  return fields
 }
 
 /** Serialize a session's user/assistant text turns, tail-biased. */

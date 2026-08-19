@@ -204,6 +204,23 @@ describe('HarnessStore', () => {
     expect(store.globalState().entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} })
   })
 
+  it('rejects an ambiguous id shared by multiple kinds instead of picking one', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-ambig')
+    store.applyRefinement(agent, {
+      id: 'rp-a', summary: 'seed memory',
+      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'm' }],
+    }, {})
+    store.applyRefinement(agent, {
+      id: 'rp-b', summary: 'seed skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'same', content: 's' }],
+    }, {})
+    expect(store.promoteEntry(agent, 'same')).toEqual({ applied: false, error: 'ambiguous local id: same' })
+    expect(store.globalState().entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} })
+  })
+
   it('promote conflicts when the global id already exists and leaves everything unchanged', () => {
     const ctx = new Context()
     const home = tempHome()

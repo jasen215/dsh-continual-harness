@@ -13,6 +13,7 @@ import {
   HARNESS_SCHEMA_VERSION,
   HARNESS_STATE_FILE_NAME,
   REFINEMENT_HISTORY_FILE_NAME,
+  REFINEMENT_KINDS,
   USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
 import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
@@ -70,12 +71,14 @@ export function migrateHarnessState(parsed: unknown): { state: HarnessState; dia
 }
 
 /** Read one store file: missing → empty; corrupt/future → empty and never overwritten; old version → migrate. */
-export function loadHarnessState(dir: string): HarnessState {
+export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: string[]) => void): HarnessState {
   const file = join(dir, HARNESS_STATE_FILE_NAME)
   if (!existsSync(file)) return emptyHarnessState()
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
-    return migrateHarnessState(parsed).state
+    const migrated = migrateHarnessState(parsed)
+    if (migrated.diagnostics.length > 0) onDiagnostics?.(migrated.diagnostics)
+    return migrated.state
   } catch {
     return emptyHarnessState()
   }
@@ -158,6 +161,14 @@ export function appendUsageEvent(home: string, event: { key: string; at: string 
   appendFileSync(join(home, USAGE_EVENTS_FILE_NAME), `${JSON.stringify(event)}\n`, 'utf8')
 }
 
+/** Append many telemetry events in one open/write (batch, same timestamp). */
+export function appendUsageEvents(home: string, events: Array<{ key: string; at: string }>): void {
+  if (events.length === 0) return
+  mkdirSync(home, { recursive: true })
+  const lines = events.map(event => `${JSON.stringify(event)}\n`).join('')
+  appendFileSync(join(home, USAGE_EVENTS_FILE_NAME), lines, 'utf8')
+}
+
 /** Read the injection telemetry log; missing file → empty, bad lines skipped. */
 export function loadUsageEvents(home: string): Array<{ key: string; at: string }> {
   const file = join(home, USAGE_EVENTS_FILE_NAME)
@@ -204,7 +215,7 @@ export function isHarnessEntry(value: unknown): value is HarnessEntry {
   if (!isPlainObject(value)) return false
   const entry = value as Record<string, unknown>
   if (typeof entry.id !== 'string'
-    || !['prompt', 'memory', 'skill', 'subagent'].includes(entry.kind as string)
+    || !REFINEMENT_KINDS.includes(entry.kind as (typeof REFINEMENT_KINDS)[number])
     || typeof entry.version !== 'number'
     || typeof entry.content !== 'string'
     || typeof entry.updatedAt !== 'string') return false

@@ -6,6 +6,7 @@
 
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { HarnessEntry, HarnessState, RefinementKind, RefinementResult } from './types.ts'
+import { usageKey } from './usage.ts'
 
 /** Default per-kind entry cap in the full overview. */
 export const DEFAULT_ENTRIES_PER_KIND = 6
@@ -78,7 +79,9 @@ export function formatHarnessStateForPromptStructured(state: HarnessState, query
     else {
       for (const entry of selected) {
         lines.push(formatEntry(entry, DEFAULT_CONTENT_MAX_CHARS))
-        injectedKeys.push(opts.isLocal(kind, entry.id) ? `local:${opts.sessionId}:${kind}:${entry.id}` : `global:${kind}:${entry.id}`)
+        injectedKeys.push(opts.isLocal(kind, entry.id)
+          ? usageKey('local', kind, entry.id, opts.sessionId)
+          : usageKey('global', kind, entry.id))
       }
       if (active.length > maxPerKind) lines.push(`- … ${active.length - maxPerKind} more`)
     }

@@ -4,7 +4,7 @@
  * @module dsh-continual-harness
  */
 
-import { HARNESS_SCHEMA_VERSION } from './domain.ts'
+import { HARNESS_SCHEMA_VERSION, REFINEMENT_KINDS } from './domain.ts'
 import type {
   AppliedRefinementEdit,
   BlastRadius,
@@ -18,7 +18,7 @@ import type {
 } from './types.ts'
 
 /** Kind names accepted by the harness layer. */
-export const REFINEMENT_KINDS = ['prompt', 'memory', 'skill', 'subagent'] as const
+export { REFINEMENT_KINDS }
 /** Actions accepted by the harness layer. */
 export const REFINEMENT_ACTIONS = ['create', 'update', 'delete'] as const
 /** Identifier of the immutable base system prompt; never an editable id. */
@@ -349,11 +349,6 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
     summary: `Rollback of ${target.id}`,
     edits,
   }
-}
-
-/** Infer the scope of a result absent an explicit one. */
-export function inferRefinementResultScope(result: RefinementResult): 'local' | 'global' {
-  return result.scope
 }
 
 /** A fresh empty entries map at the current schema version. */
