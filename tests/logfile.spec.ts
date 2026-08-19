@@ -17,13 +17,6 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-/**
- * Cordis drops warn/debug messages before they reach exporters unless the
- * logger facade's level allows them. `LoggerLevel.DEBUG` is a type-only const
- * enum in @deepseek-ai/cordis (no runtime export), so use its numeric value.
- */
-const DEBUG_LEVEL = 3
-
 /** Parse every JSON line of a log file. */
 function readRecords(file: string): Array<Record<string, unknown>> {
   if (!existsSync(file)) return []
@@ -64,9 +57,7 @@ describe('plugin-owned file log', () => {
     const file = join(home, PLUGIN_LOG_FILE_NAME)
     attachFileLog(ctx, { file, maxBytes: 0 })
 
-    const other = ctx.logger('other')
-    other.level = DEBUG_LEVEL
-    other.warn('x')
+    ctx.logger('other').warn('x')
 
     ctx.logger('harness').info('kept')
 
@@ -75,14 +66,27 @@ describe('plugin-owned file log', () => {
     expect(records[0]?.message).toBe('kept')
   })
 
+  it('captures all severities without any facade-level manipulation', () => {
+    const home = tempHome()
+    const file = join(home, PLUGIN_LOG_FILE_NAME)
+    attachFileLog(ctx, { file, maxBytes: 0 })
+
+    ctx.logger('harness').error('err')
+    ctx.logger('harness').warn('warn-msg')
+    ctx.logger('harness').info('info-msg')
+    ctx.logger('harness').debug('debug-msg')
+
+    const records = readRecords(file)
+    expect(records.map(record => record.level).sort()).toEqual(['debug', 'error', 'info', 'warn'])
+    expect(records.map(record => record.message).sort()).toEqual(['debug-msg', 'err', 'info-msg', 'warn-msg'])
+  })
+
   it('also captures the plugin logger name', () => {
     const home = tempHome()
     const file = join(home, PLUGIN_LOG_FILE_NAME)
     attachFileLog(ctx, { file, maxBytes: 0 })
 
-    const pluginLogger = ctx.logger('continual-harness')
-    pluginLogger.level = DEBUG_LEVEL
-    pluginLogger.warn('plugin-level warn')
+    ctx.logger('continual-harness').warn('plugin-level warn')
 
     const records = readRecords(file)
     expect(records).toHaveLength(1)
@@ -94,9 +98,7 @@ describe('plugin-owned file log', () => {
     const file = join(home, PLUGIN_LOG_FILE_NAME)
     attachFileLog(ctx, { file, maxBytes: 0 })
 
-    const harness = ctx.logger('harness')
-    harness.level = DEBUG_LEVEL
-    harness.warn('boom', new Error('bang'))
+    ctx.logger('harness').warn('boom', new Error('bang'))
 
     const records = readRecords(file)
     expect(records).toHaveLength(1)

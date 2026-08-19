@@ -35,6 +35,13 @@ export interface FileLogOptions {
  */
 export function attachFileLog(ctx: Context, options: FileLogOptions): void {
   ctx.logger.exporter({
+    // Raise the exporter's per-name threshold to DEBUG (3) so every severity
+    // (error/info/warn/debug) of this plugin's loggers reaches `export()`.
+    // Cordis drops messages with `targetLevel < level` before exporters see
+    // them, so without this the host's default INFO threshold would silently
+    // discard warn/debug. `LoggerLevel.DEBUG` is a type-only const enum (no
+    // runtime export), hence the numeric 3.
+    levels: { default: 3 },
     export(message) {
       try {
         if (!PLUGIN_LOG_NAMES.has(message.name)) return
