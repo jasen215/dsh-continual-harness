@@ -10,3 +10,6 @@ tmp/
 .pnpm-store/
 # 本地设计文档（brainstorming 产物，不进版本库）
 docs/superpowers/
+
+# Subagent-driven development workspace (never commit)
+.superpowers/
