@@ -11,9 +11,11 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
+import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
@@ -124,4 +126,10 @@ export function apply(ctx: Context, config: Config): void {
     maxTrajectoryChars: config.maxTrajectoryChars,
     auditReviews: config.auditReviews,
   })
+  if (config.logToFile) {
+    attachFileLog(ctx, {
+      file: join(store.home, PLUGIN_LOG_FILE_NAME),
+      maxBytes: config.logMaxBytes,
+    })
+  }
 }
