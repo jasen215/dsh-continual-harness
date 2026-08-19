@@ -85,6 +85,54 @@ describe('applyRefinementProposal', () => {
   })
 })
 
+describe('full entry snapshots and rollback', () => {
+  it('records beforeEntry/afterEntry on update and restores metadata on rollback', () => {
+    const state = freshState()
+    state.entries.memory['m'] = {
+      id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z',
+      title: 'old title', metadata: { sourceSession: 's1', lifecycleState: 'active' },
+    }
+    const { result, state: next } = applyRefinementProposal(state, {
+      id: 'r1', summary: 'update',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'new' }],
+    }, { id: 'r1', scope: 'local', baselineState: state })
+    const edit = result.appliedEdits[0]!
+    expect(edit.applied).toBe(true)
+    expect(edit.beforeEntry?.content).toBe('old')
+    expect(edit.beforeEntry?.title).toBe('old title')
+    expect(edit.afterEntry?.content).toBe('new')
+    expect(edit.afterEntry?.version).toBe(2)
+
+    const rollback = rollbackProposal(result)
+    expect(rollback.edits[0]).toMatchObject({
+      action: 'update', kind: 'memory', id: 'm', content: 'old', title: 'old title',
+    })
+  })
+
+  it('flags rollbackDegraded when the source edit lacks full snapshots', () => {
+    const legacy: RefinementResult = {
+      id: 'r2', summary: 'legacy', scope: 'local', committedAt: 't',
+      appliedEdits: [{ action: 'update', kind: 'memory', id: 'm', before: 'old', after: 'new', blastRadius: 'general', applied: true }],
+    }
+    const rollback = rollbackProposal(legacy)
+    expect(rollback.edits[0]).toMatchObject({ action: 'update', kind: 'memory', id: 'm', content: 'old' })
+    expect(rollback.edits[0]).toHaveProperty('rollbackDegraded', true)
+  })
+
+  it('detects a baseline mismatch on metadata change, not just content', () => {
+    const baseline = freshState()
+    baseline.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'same', updatedAt: 't' }
+    const state = structuredClone(baseline)
+    state.entries.memory['m'] = { ...baseline.entries.memory['m']!, metadata: { pinned: true } }
+    const { result } = applyRefinementProposal(state, {
+      id: 'r3', summary: 'update',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'same' }],
+    }, { id: 'r3', scope: 'local', baselineState: baseline })
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toBe('entry changed during refinement planning')
+  })
+})
+
 describe('rollbackProposal', () => {
   it('reverses applied edits in reverse order', () => {
     const state = freshState()

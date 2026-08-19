@@ -8,6 +8,7 @@ import { HARNESS_SCHEMA_VERSION } from './domain.ts'
 import type {
   AppliedRefinementEdit,
   BlastRadius,
+  HarnessEntry,
   HarnessState,
   RefinementEdit,
   RefinementKind,
@@ -26,6 +27,17 @@ export const BLAST_RADIUS_VALUES: readonly BlastRadius[] = ['general', 'project'
 
 /** Kebab-case pattern dsh requires for skill names (and the safe path form). */
 export const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/** Canonical serialization of an entry for baseline conflict detection. */
+export function entryFingerprint(entry: HarnessEntry): string {
+  return JSON.stringify({
+    version: entry.version,
+    content: entry.content,
+    title: entry.title,
+    metadata: entry.metadata,
+    protection: entry.protection,
+  })
+}
 
 /** Validate one edit; returns the failure reason or undefined when valid. */
 export function validateEdit(edit: RefinementEdit): string | undefined {
@@ -48,7 +60,14 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
 /** Stamp the shared reason/blastRadius fields onto an applied edit record. */
 function stampAppliedEdit(
   edit: RefinementEdit,
-  fields: { applied: boolean; error?: string; before?: string; after?: string },
+  fields: {
+    applied: boolean
+    error?: string
+    before?: string
+    after?: string
+    beforeEntry?: HarnessEntry
+    afterEntry?: HarnessEntry
+  },
 ): AppliedRefinementEdit {
   const radius = edit.blastRadius
   // parseProposal does no field validation, so an out-of-enum value must be
@@ -148,7 +167,7 @@ export function applyRefinementProposal(
     const baseline = options.baselineState.entries[edit.kind][edit.id]
     const baselineMatches = edit.action === 'create'
       ? baseline === undefined
-      : baseline !== undefined && baseline.content === current!.content
+      : baseline !== undefined && entryFingerprint(baseline) === entryFingerprint(current!)
     if (!baselineMatches) {
       appliedEdits.push(stampAppliedEdit(edit, {
         applied: false,
@@ -157,7 +176,7 @@ export function applyRefinementProposal(
       continue
     }
     if (edit.action === 'delete') {
-      appliedEdits.push(stampAppliedEdit(edit, { before: current!.content, applied: true }))
+      appliedEdits.push(stampAppliedEdit(edit, { before: current!.content, beforeEntry: structuredClone(current!), applied: true }))
       delete next.entries[edit.kind][edit.id]
       continue
     }
@@ -188,19 +207,22 @@ export function applyRefinementProposal(
             updatedAt: now,
           }
       next.entries[edit.kind][edit.id] = entry
-      appliedEdits.push(stampAppliedEdit(edit, { after: content, applied: true }))
+      appliedEdits.push(stampAppliedEdit(edit, { after: content, afterEntry: structuredClone(entry), applied: true }))
       continue
     }
     const currentEntry = current!
-    next.entries[edit.kind][edit.id] = {
+    const nextEntry = {
       ...currentEntry,
       version: currentEntry.version + 1,
       content,
       updatedAt: now,
     }
+    next.entries[edit.kind][edit.id] = nextEntry
     appliedEdits.push(stampAppliedEdit(edit, {
       before: currentEntry.content,
+      beforeEntry: structuredClone(currentEntry),
       after: content,
+      afterEntry: structuredClone(nextEntry),
       applied: true,
     }))
   }
@@ -216,9 +238,8 @@ export function applyRefinementProposal(
   return { result, state: next }
 }
 
-/** Revert a committed result from its snapshots: reverse edit order, restoring
- * `before` content or deleting created entries.
- */
+/** Revert a committed result: reverse edit order, restoring full entries from
+ * snapshots when available; legacy content-only records degrade and are marked. */
 export function rollbackProposal(target: RefinementResult): RefinementProposal {
   const edits: RefinementEdit[] = []
   for (const edit of [...target.appliedEdits].reverse()) {
@@ -227,10 +248,25 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
     if (edit.action === 'create') {
       edits.push({ action: 'delete', kind: edit.kind, id: edit.id, reason })
     } else if (edit.action === 'delete') {
-      if (edit.before === undefined) continue
-      edits.push({ action: 'create', kind: edit.kind, id: edit.id, content: edit.before, reason })
+      const before: HarnessEntry | undefined = edit.beforeEntry
+        ?? (edit.before === undefined ? undefined : { content: edit.before } as HarnessEntry)
+      if (before === undefined) continue
+      edits.push({
+        action: 'create', kind: edit.kind, id: edit.id,
+        ...(before.title === undefined ? {} : { title: before.title }),
+        content: before.content,
+        reason,
+        ...(edit.beforeEntry === undefined ? { rollbackDegraded: true } : {}),
+      })
+    } else if (edit.beforeEntry !== undefined) {
+      edits.push({
+        action: 'update', kind: edit.kind, id: edit.id,
+        ...(edit.beforeEntry.title === undefined ? {} : { title: edit.beforeEntry.title }),
+        content: edit.beforeEntry.content,
+        reason,
+      })
     } else if (edit.before !== undefined) {
-      edits.push({ action: 'update', kind: edit.kind, id: edit.id, content: edit.before, reason })
+      edits.push({ action: 'update', kind: edit.kind, id: edit.id, content: edit.before, reason, rollbackDegraded: true })
     }
   }
   return {

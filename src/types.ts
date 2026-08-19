@@ -94,6 +94,7 @@ export interface RefinementEdit {
   archive?: boolean
   pin?: boolean
   title?: string
+  rollbackDegraded?: boolean
 }
 
 /** The model-produced refinement plan. */
