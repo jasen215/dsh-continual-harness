@@ -53,7 +53,10 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
   if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
     return `invalid blastRadius: ${edit.blastRadius}`
   }
-  if (edit.action !== 'delete' && edit.content === undefined) return 'non-delete edits require content'
+  if (edit.action !== 'delete'
+      && edit.content === undefined
+      && edit.archive === undefined
+      && edit.pin === undefined) return 'non-delete edits require content'
   return undefined
 }
 
@@ -180,6 +183,50 @@ export function applyRefinementProposal(
       delete next.entries[edit.kind][edit.id]
       continue
     }
+    const currentEntry = current!
+    if (edit.archive !== undefined) {
+      const stateNow = currentEntry.metadata?.lifecycleState ?? 'active'
+      const target = edit.archive ? 'archived' : 'active'
+      if (stateNow === target) {
+        appliedEdits.push(stampAppliedEdit(edit, {
+          applied: false,
+          error: edit.archive ? 'already archived' : 'not archived',
+        }))
+        continue
+      }
+      const nextEntry: HarnessEntry = {
+        ...currentEntry,
+        version: currentEntry.version + 1,
+        updatedAt: now,
+        metadata: { ...currentEntry.metadata, lifecycleState: target },
+      }
+      next.entries[edit.kind][edit.id] = nextEntry
+      appliedEdits.push(stampAppliedEdit(edit, {
+        before: currentEntry.content,
+        beforeEntry: structuredClone(currentEntry),
+        after: currentEntry.content,
+        afterEntry: structuredClone(nextEntry),
+        applied: true,
+      }))
+      continue
+    }
+    if (edit.pin !== undefined) {
+      const nextEntry: HarnessEntry = {
+        ...currentEntry,
+        version: currentEntry.version + 1,
+        updatedAt: now,
+        metadata: { ...currentEntry.metadata, pinned: edit.pin },
+      }
+      next.entries[edit.kind][edit.id] = nextEntry
+      appliedEdits.push(stampAppliedEdit(edit, {
+        before: currentEntry.content,
+        beforeEntry: structuredClone(currentEntry),
+        after: currentEntry.content,
+        afterEntry: structuredClone(nextEntry),
+        applied: true,
+      }))
+      continue
+    }
     // validateEdit guarantees content for non-delete edits; the guard keeps the
     // narrowing explicit under exactOptionalPropertyTypes.
     const content = edit.content
@@ -212,7 +259,6 @@ export function applyRefinementProposal(
       appliedEdits.push(stampAppliedEdit(edit, { after: content, afterEntry: structuredClone(entry), applied: true }))
       continue
     }
-    const currentEntry = current!
     const nextEntry = {
       ...currentEntry,
       version: currentEntry.version + 1,
