@@ -132,6 +132,39 @@ describe('plugin registration', () => {
     expect(ctx.tools.get('harness_refine')?.name).toBe('harness_refine')
   })
 
+  it('registers harness_wrapup by default and skips it when wrapupEnabled is false', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, pluginConfig(tempHome()))
+    expect(ctx.tools.get('harness_wrapup')?.name).toBe('harness_wrapup')
+
+    const off = new Context()
+    await off.plugin(SystemPrompt)
+    await off.plugin(AgentRegistry)
+    await off.plugin(ToolRuntime)
+    await off.plugin(plugin, { ...pluginConfig(tempHome()), wrapupEnabled: false })
+    expect(off.tools.get('harness_wrapup')).toBeUndefined()
+  })
+
+  it('accepts maxInjectedEntriesPerKind and validates it as a positive integer', async () => {
+    const ok = new Context()
+    await ok.plugin(SystemPrompt)
+    await ok.plugin(AgentRegistry)
+    await ok.plugin(ToolRuntime)
+    await ok.plugin(plugin, { ...pluginConfig(tempHome()), maxInjectedEntriesPerKind: 3 })
+    expect(ok.tools.get('harness_refine')).toBeDefined()
+
+    const bad = new Context()
+    await bad.plugin(SystemPrompt)
+    await bad.plugin(AgentRegistry)
+    await bad.plugin(ToolRuntime)
+    await expect(
+      bad.plugin(plugin, { ...pluginConfig(tempHome()), maxInjectedEntriesPerKind: 1.5 }),
+    ).rejects.toThrow()
+  })
+
   it('rolls back a prior global refinement through the tool without an LLM', async () => {
     const home = tempHome()
     const ctx = new Context()
