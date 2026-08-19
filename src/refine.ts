@@ -53,6 +53,9 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
   if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
     return `invalid blastRadius: ${edit.blastRadius}`
   }
+  if (edit.action !== 'update' && (edit.archive !== undefined || edit.pin !== undefined)) {
+    return 'archive/pin only valid on update edits'
+  }
   if (edit.action !== 'delete'
       && edit.content === undefined
       && edit.archive === undefined

@@ -131,6 +131,35 @@ describe('HarnessStore', () => {
     expect(store.state(agent).entries.skill['repro']).toBeUndefined()
   })
 
+  it('removes archived skill bundles and restores them on unarchive', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('agent-archive-skill')
+    const bundle = join(home, 'skills', 'repro', 'SKILL.md')
+
+    store.applyRefinement(agent, {
+      id: 'skill_seed',
+      summary: 'seed skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'repro', content: 'body' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(true)
+
+    store.applyRefinement(agent, {
+      id: 'skill_archive',
+      summary: 'archive skill',
+      edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: true, reason: 'hide' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(false)
+
+    store.applyRefinement(agent, {
+      id: 'skill_unarchive',
+      summary: 'restore skill',
+      edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: false, reason: 'restore' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(true)
+  })
+
   it('applies store-configured growth limit and protected layers', () => {
     const ctx = new Context()
     const home = tempHome()
