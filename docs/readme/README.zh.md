@@ -41,7 +41,7 @@ src/
   driver.ts      自动精修驱动器（turn 间隔门 / 压缩门 / 冷却 / 防重入）
   invariant.ts   运行时不变量校验插件
   index.ts       插件入口与 Config
-tests/           12 个 spec，120 个用例（storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin 集成）
+tests/           17 个测试文件，163 个用例（storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin 集成 / rank / projection / archive / usage / wrapup）
 ```
 
 ### 数据布局
@@ -53,7 +53,7 @@ tests/           12 个 spec，120 个用例（storage / store / refine / rules 
   reviews.jsonl                     跨批次 gate/审计历史（ESP 扩展）
   continual-harness.log             continual-harness 实现日志（JSONL、0600）
   continual-harness.log.1           continual-harness 日志轮转文件
-  usage.events.jsonl                追加式注入遥测（启动时聚合到内存）
+  usage.events.jsonl                追加式注入遥测（首次访问时惰性加载到内存）
   sessions/<sessionKey>/
     harness_state.json              会话本地状态（遮蔽同 id 全局条目）
     refinements.jsonl               会话精修历史
@@ -150,7 +150,7 @@ tail -f ~/.dsh/harness/continual-harness.log
 
 ## 开发
 
-插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（120 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
+插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（163 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
 
 ## Known Limitations and Deferred Work
 

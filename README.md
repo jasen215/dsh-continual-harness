@@ -41,7 +41,7 @@ src/
   driver.ts      automatic refinement driver (turn-interval gate / compaction gate / cooldown / re-entry guard)
   invariant.ts   runtime invariant plugin
   index.ts       plugin entry and Config
-tests/           12 specs, 120 cases (storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin integration)
+tests/           17 test files, 163 cases (storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin integration / rank / projection / archive / usage / wrapup)
 ```
 
 ### Data layout
@@ -53,7 +53,7 @@ tests/           12 specs, 120 cases (storage / store / refine / rules / planner
   reviews.jsonl                     cross-batch gate/audit history (ESP extension)
   continual-harness.log             continual-harness implementation log (JSONL, 0600)
   continual-harness.log.1           rotated continual-harness log
-  usage.events.jsonl                append-only injection telemetry (aggregated in memory at startup)
+  usage.events.jsonl                append-only injection telemetry (lazily loaded into memory on first access)
   sessions/<sessionKey>/
     harness_state.json              session-local state (shadows same-id global entries)
     refinements.jsonl               session refinement history
@@ -160,7 +160,7 @@ tail -f ~/.dsh/harness/continual-harness.log
 
 The plugin is self-contained: `devDependencies` pin the published
 `@deepseek-ai/*` packages (rc versions), so `pnpm install`, `pnpm run
-typecheck`, `pnpm test` (120 cases), and `pnpm run build` (tsc emits
+typecheck`, `pnpm test` (163 cases), and `pnpm run build` (tsc emits
 `lib/types/*.js + *.d.ts`; the `"."` and `"./invariant"` exports point at the
 artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
