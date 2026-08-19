@@ -69,6 +69,95 @@ describe('applyRefinementProposal', () => {
     expect(result.appliedEdits.find(edit => edit.id === 'missing')?.error).toBe('entry not found')
   })
 
+  it('persists titles on create and explicit update', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 'title-create', summary: 'title',
+      edits: [{ action: 'create', kind: 'memory', id: 'titled', content: 'x', title: 'Original title' }],
+    }, { id: 'title-create', scope: 'local', baselineState: state })
+    expect(created.entries.memory['titled']?.title).toBe('Original title')
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 'title-update', summary: 'rename',
+      edits: [{ action: 'update', kind: 'memory', id: 'titled', reason: 'clarify', content: 'y', title: 'Updated title' }],
+    }, { id: 'title-update', scope: 'local', baselineState: created })
+    expect(updated.entries.memory['titled']?.title).toBe('Updated title')
+  })
+
+  it('stamps sourceSession on create and preserves it on update', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 's1', summary: 'create',
+      edits: [{ action: 'create', kind: 'memory', id: 'm', content: 'x' }],
+    }, { id: 's1', scope: 'local', baselineState: state, sourceSession: 'session-9' })
+    expect(created.entries.memory['m']?.metadata?.sourceSession).toBe('session-9')
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 's2', summary: 'update',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'y' }],
+    }, { id: 's2', scope: 'local', baselineState: created, sourceSession: 'session-9' })
+    expect(updated.entries.memory['m']?.metadata?.sourceSession).toBe('session-9')
+    expect(updated.entries.memory['m']?.content).toBe('y')
+  })
+
+  it('honors edit metadata precedence and sourceSession edge cases', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 'precedence-create', summary: 'create historical',
+      edits: [{
+        action: 'create', kind: 'memory', id: 'historical', content: 'x',
+        metadata: { sourceSession: 'historical' },
+      }],
+    }, {
+      id: 'precedence-create', scope: 'local', baselineState: state, sourceSession: 'current',
+    })
+    expect(created.entries.memory['historical']?.metadata?.sourceSession).toBe('historical')
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 'precedence-update', summary: 'update historical',
+      edits: [{
+        action: 'update', kind: 'memory', id: 'historical', reason: 'restore', content: 'y',
+        metadata: { sourceSession: 'historical-update' },
+      }],
+    }, {
+      id: 'precedence-update', scope: 'local', baselineState: created, sourceSession: 'current',
+    })
+    expect(updated.entries.memory['historical']?.metadata?.sourceSession).toBe('historical-update')
+
+    const archiveState = freshState()
+    archiveState.entries.memory['m'] = {
+      id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't',
+      metadata: { sourceSession: 'original' },
+    }
+    const { state: archived } = applyRefinementProposal(archiveState, {
+      id: 'archive', summary: 'archive',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: true }],
+    }, { id: 'archive', scope: 'local', baselineState: archiveState, sourceSession: 'current' })
+    expect(archived.entries.memory['m']?.metadata?.sourceSession).toBe('original')
+
+    const pinState = freshState()
+    pinState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
+    const { state: pinned } = applyRefinementProposal(pinState, {
+      id: 'pin', summary: 'pin',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', pin: true }],
+    }, { id: 'pin', scope: 'local', baselineState: pinState, sourceSession: 'current' })
+    expect(pinned.entries.memory['m']?.metadata?.sourceSession).toBeUndefined()
+
+    const noMetadataState = freshState()
+    noMetadataState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
+    const { state: noMetadataUpdated } = applyRefinementProposal(noMetadataState, {
+      id: 'old-entry', summary: 'update old entry',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'annotate', content: 'new' }],
+    }, { id: 'old-entry', scope: 'local', baselineState: noMetadataState, sourceSession: 'current' })
+    expect(noMetadataUpdated.entries.memory['m']?.metadata).toEqual({ sourceSession: 'current' })
+
+    const { state: noSource } = applyRefinementProposal(freshState(), {
+      id: 'no-source', summary: 'create without metadata',
+      edits: [{ action: 'create', kind: 'memory', id: 'm', content: 'x' }],
+    }, { id: 'no-source', scope: 'local', baselineState: freshState() })
+    expect(noSource.entries.memory['m']).not.toHaveProperty('metadata')
+  })
+
   it('rejects edits whose baseline entry changed during planning', () => {
     const baseline = freshState()
     baseline.entries.memory['pin-versions'] = { id: 'pin-versions', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
@@ -145,6 +234,22 @@ describe('full entry snapshots and rollback', () => {
     expect(rollback.edits[0]).toHaveProperty('rollbackDegraded', true)
   })
 
+  it('detects a baseline mismatch on skill persisted fields', () => {
+    const baseline = freshState()
+    baseline.entries.skill['skill'] = {
+      id: 'skill', kind: 'skill', version: 1, content: 'same', updatedAt: 't',
+      description: 'old description', reference: 'old reference', arguments: 'old arguments',
+    }
+    const state = structuredClone(baseline)
+    state.entries.skill['skill'] = { ...baseline.entries.skill['skill']!, reference: 'new reference' }
+    const { result } = applyRefinementProposal(state, {
+      id: 'r-skill-fields', summary: 'update',
+      edits: [{ action: 'update', kind: 'skill', id: 'skill', reason: 'why', content: 'same' }],
+    }, { id: 'r-skill-fields', scope: 'local', baselineState: baseline })
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toBe('entry changed during refinement planning')
+  })
+
   it('detects a baseline mismatch on metadata change, not just content', () => {
     const baseline = freshState()
     baseline.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'same', updatedAt: 't' }
@@ -160,6 +265,20 @@ describe('full entry snapshots and rollback', () => {
 })
 
 describe('rollbackProposal', () => {
+  it('persists rollbackDegraded on the applied rollback record', () => {
+    const state = freshState()
+    state.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'new', updatedAt: 't' }
+    const legacy: RefinementResult = {
+      id: 'legacy-r', summary: 'legacy', scope: 'local', committedAt: 't',
+      appliedEdits: [{ action: 'update', kind: 'memory', id: 'm', before: 'old', after: 'new', blastRadius: 'general', applied: true }],
+    }
+    const rollback = rollbackProposal(legacy)
+    const { result } = applyRefinementProposal(state, rollback, {
+      id: rollback.id, rollbackOf: legacy.id, scope: 'local', baselineState: state,
+    })
+    expect(result.appliedEdits[0]).toMatchObject({ applied: true, rollbackDegraded: true })
+  })
+
   it('reverses applied edits in reverse order', () => {
     const state = freshState()
     const proposal: RefinementProposal = {

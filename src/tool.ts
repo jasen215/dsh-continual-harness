@@ -7,10 +7,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { appendReview } from './audit.ts'
 import { requireGlobalApproval } from './approval.ts'
 import { completeViaAgent } from './complete.ts'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import { overviewForPrompt, historyForPrompt } from './render.ts'
+import { suggestWrapup } from './wrapup.ts'
 import type { HarnessStore } from './store.ts'
 import type { BlastRadius, RefinementAction, RefinementKind } from './types.ts'
 
@@ -56,6 +58,82 @@ const OUTPUT_SCHEMA = {
     },
   },
 } as const
+
+const WRAPUP_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    suggestions: {
+      type: 'array', required: true,
+      items: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true },
+          kind: { type: 'string', required: true, enum: ['prompt', 'memory', 'skill', 'subagent'] },
+          fate: { type: 'string', required: true, enum: ['keep', 'promote', 'archive'] },
+          reason: { type: 'string', required: true },
+        },
+      },
+    },
+    promoted: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: { type: 'string', required: true },
+        applied: { type: 'boolean', required: true },
+        error: { type: 'string' },
+      },
+    },
+  },
+} as const
+
+/** Register the `harness_wrapup` tool: mechanical keep/promote/archive advice. */
+export function registerHarnessWrapup(ctx: Context, store: HarnessStore): void {
+  ctx.tools.register(defineTool({
+    name: 'harness_wrapup',
+    description: 'Review session-local harness entries and suggest keep/promote/archive. Optionally promote one local entry to the global store by copy (local stays unchanged).',
+    parameters: {
+      promote: {
+        type: 'string',
+        description: 'Local entry id to promote to the global store by copy.',
+      },
+    },
+    output: {
+      schema: WRAPUP_OUTPUT_SCHEMA,
+      render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      const agent = exec.agent
+      if (!agent) throw new Error('harness_wrapup requires a live agent')
+      const sessionId = String(agent.session.id)
+      const local = store.localState(agent)
+      const global = store.globalState()
+      const suggestions = suggestWrapup(local, global, key => store.usageStatsFor(key), sessionId)
+      try {
+        if (typeof args.promote === 'string' && args.promote !== '') {
+          const out = store.promoteEntry(agent, args.promote)
+          return { suggestions, promoted: { id: args.promote, applied: out.applied, ...(out.error === undefined ? {} : { error: out.error }) } }
+        }
+        return { suggestions }
+      } catch (error) {
+        try {
+          appendReview(store.home, {
+            timestamp: new Date().toISOString(),
+            sessionId,
+            trigger: 'manual',
+            turnsSinceLastReview: 0,
+            outcome: 'failed',
+            rationale: `harness_wrapup failed: ${String(error)}`,
+          })
+        } catch {
+          // review append failure must not mask the original error
+        }
+        throw error
+      }
+    },
+    presentCall: () => ({ card: 'generic' as const, title: 'Wrap up harness session', kind: 'other' as const }),
+  }))
+}
 
 /** Register the `harness_refine` tool over the store. */
 export function registerHarnessTool(ctx: Context, store: HarnessStore, options: ToolOptions): void {

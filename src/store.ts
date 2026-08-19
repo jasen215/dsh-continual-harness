@@ -12,20 +12,23 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, rollbackProposal } from './refine.ts'
-import { formatHarnessStateForPrompt } from './render.ts'
+import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
 import { reconcileSkillFiles } from './skills.ts'
 import {
   appendGlobalRefinement,
+  appendUsageEvents,
   defaultHarnessHome,
   getGlobalHarnessStateDir,
   getLocalHarnessStateDir,
   loadGlobalRefinementHistory,
   loadHarnessState,
+  loadUsageEvents,
   mergeHarnessStates,
   mergeRefinementHistory,
   saveHarnessState,
 } from './storage.ts'
-import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
+import { aggregateUsage } from './usage.ts'
+import type { HarnessEntry, HarnessState, RefinementKind, RefinementProposal, RefinementResult, SkillEntry } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
@@ -50,6 +53,10 @@ export class HarnessStore {
   private readonly maxEntryGrowth: number | undefined
   /** Kinds protected from the automatic path; plumbed for Config wiring. */
   private readonly protectedKinds: readonly RefinementKind[] | undefined
+  /** Per-kind cap for ranked prompt injection. */
+  private readonly maxInjectedEntriesPerKind: number
+  /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
+  private usage: Record<string, { injectionCount: number; lastInjectedAt?: string }> | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -58,22 +65,31 @@ export class HarnessStore {
       skillsDir?: string
       maxEntryGrowth?: number
       protectedKinds?: readonly RefinementKind[]
+      maxInjectedEntriesPerKind?: number
     } = {},
   ) {
     this.home = options.harnessRoot ?? defaultHarnessHome()
     this.skillsDir = options.skillsDir ?? dshHomePath('skills')
     this.maxEntryGrowth = options.maxEntryGrowth
     this.protectedKinds = options.protectedKinds
+    this.maxInjectedEntriesPerKind = options.maxInjectedEntriesPerKind ?? DEFAULT_ENTRIES_PER_KIND
   }
 
-  /** The session-local state for an agent. */
+  /** The session-local state for an agent; migration diagnostics are logged. */
   localState(agent: Agent): HarnessState {
-    return loadHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)))
+    return loadHarnessState(
+      getLocalHarnessStateDir(this.home, String(agent.session.id)),
+      diagnostics => this.logMigration(diagnostics),
+    )
   }
 
-  /** The cross-session global state. */
+  /** The cross-session global state; migration diagnostics are logged. */
   globalState(): HarnessState {
-    return loadHarnessState(getGlobalHarnessStateDir(this.home))
+    return loadHarnessState(getGlobalHarnessStateDir(this.home), diagnostics => this.logMigration(diagnostics))
+  }
+
+  private logMigration(diagnostics: string[]): void {
+    for (const diagnostic of diagnostics) this.ctx.logger('harness').warn(`state migration: ${diagnostic}`)
   }
 
   /** The merged view the model sees: local shadows same-id global entries. */
@@ -89,9 +105,53 @@ export class HarnessStore {
     return mergeRefinementHistory(local, loadGlobalRefinementHistory(this.home))
   }
 
-  /** Compact overview for prompt injection. */
-  render(agent: Agent): string {
-    return formatHarnessStateForPrompt(this.state(agent))
+  /** Structured overview + injected keys for prompt injection. */
+  render(agent: Agent): { overview: string; injectedKeys: string[] } {
+    const local = this.localState(agent)
+    const state = mergeHarnessStates(this.globalState(), local)
+    return formatHarnessStateForPromptStructured(state, buildQueryFromSession(agent.session), {
+      maxPerKind: this.maxInjectedEntriesPerKind,
+      sessionId: String(agent.session.id),
+      isLocal: (kind, id) => local.entries[kind][id] !== undefined,
+    })
+  }
+
+  /** Lazy-load injection telemetry into memory. */
+  private usageStats(): Record<string, { injectionCount: number; lastInjectedAt?: string }> {
+    if (this.usage === undefined) {
+      try {
+        this.usage = aggregateUsage(loadUsageEvents(this.home))
+      } catch (error) {
+        this.ctx.logger('harness').warn(`usage load failed: ${String(error)}`)
+        this.usage = {}
+      }
+    }
+    return this.usage
+  }
+
+  /** Record one injection per key: batch-append the events and update memory; never blocks injection. */
+  recordInjections(agent: Agent, injectedKeys: string[]): void {
+    void agent
+    if (injectedKeys.length === 0) return
+    const now = new Date().toISOString()
+    const stats = this.usageStats()
+    const events = injectedKeys.map(key => ({ key, at: now }))
+    try {
+      appendUsageEvents(this.home, events)
+    } catch (error) {
+      this.ctx.logger('harness').warn(`usage append failed: ${String(error)}`)
+    }
+    for (const { key } of events) {
+      const current = stats[key] ?? { injectionCount: 0 }
+      current.injectionCount += 1
+      current.lastInjectedAt = now
+      stats[key] = current
+    }
+  }
+
+  /** Aggregate stats for one usage key (for wrap-up suggestions). */
+  usageStatsFor(key: string): { injectionCount: number; lastInjectedAt?: string } | undefined {
+    return this.usageStats()[key]
   }
 
   /** Tail-biased trajectory serialization for the planner. */
@@ -117,6 +177,7 @@ export class HarnessStore {
       ...(global ? {} : { globalEntries: this.globalState().entries }),
       ...(options.automatic === undefined ? {} : { automatic: options.automatic }),
       ...(options.rollbackOf === undefined ? {} : { rollbackOf: options.rollbackOf }),
+      sourceSession: String(agent.session.id),
     })
     if (global) {
       saveHarnessState(getGlobalHarnessStateDir(this.home), state)
@@ -128,6 +189,26 @@ export class HarnessStore {
     this.materializeSkills(agent, result)
     agentEvents(this.ctx, agent).emit('harness/refined', { result })
     return result
+  }
+
+  /** Promote a local entry to global by copy: local stays unchanged; a same-id
+   * global is a deterministic conflict. Not a cross-store transaction. */
+  promoteEntry(agent: Agent, id: string): { applied: boolean; error?: string } {
+    const local = this.localState(agent)
+    const global = this.globalState()
+    const hits = (Object.keys(local.entries) as RefinementKind[])
+      .map(kind => ({ kind, entry: local.entries[kind][id] }))
+      .filter(candidate => candidate.entry !== undefined)
+    if (hits.length === 0) return { applied: false, error: `local entry not found: ${id}` }
+    if (hits.length > 1) return { applied: false, error: `ambiguous local id: ${id}` }
+    const { kind, entry } = hits[0]!
+    if (global.entries[kind][id] !== undefined) return { applied: false, error: 'global id conflict' }
+    this.applyRefinement(agent, {
+      id: `promote_${Date.now()}`,
+      summary: `Promote local ${kind}:${id} to global`,
+      edits: [{ action: 'create', kind, id, ...promoteFields(entry!), reason: 'promote from session wrap-up' }],
+    }, { global: true })
+    return { applied: true }
   }
 
   /**
@@ -165,6 +246,20 @@ export class HarnessStore {
       rollbackOf: rollbackId,
     })
   }
+}
+
+/** Copy the persisted fields of a local entry into a promote create-edit. */
+function promoteFields(entry: HarnessEntry): Record<string, unknown> {
+  const fields: Record<string, unknown> = { content: entry.content }
+  if (entry.title !== undefined) fields.title = entry.title
+  if (entry.metadata !== undefined) fields.metadata = entry.metadata
+  if (entry.kind === 'skill') {
+    const skill = entry as SkillEntry
+    if (skill.description !== undefined) fields.description = skill.description
+    if (skill.reference !== undefined) fields.reference = skill.reference
+    if (skill.arguments !== undefined) fields.arguments = skill.arguments
+  }
+  return fields
 }
 
 /** Serialize a session's user/assistant text turns, tail-biased. */

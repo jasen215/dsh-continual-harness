@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -57,6 +57,59 @@ describe('HarnessStore', () => {
     return new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
   }
 
+  it('records injections and exposes persisted usage stats', () => {
+    const home = tempHome()
+    const store = testStore(new Context(), home)
+    const { agent } = stubAgent('usage-agent')
+
+    store.recordInjections(agent, ['global:memory:fact', 'global:memory:fact', 'local:usage-agent:memory:note'])
+
+    expect(store.usageStatsFor('global:memory:fact')).toEqual({ injectionCount: 2, lastInjectedAt: expect.any(String) })
+    expect(store.usageStatsFor('local:usage-agent:memory:note')).toEqual({ injectionCount: 1, lastInjectedAt: expect.any(String) })
+    const lines = readFileSync(join(home, 'usage.events.jsonl'), 'utf8').trim().split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines.map(line => JSON.parse(line).key)).toEqual([
+      'global:memory:fact',
+      'global:memory:fact',
+      'local:usage-agent:memory:note',
+    ])
+  })
+
+  it('does nothing for an empty injection list', () => {
+    const home = tempHome()
+    const store = testStore(new Context(), home)
+    const { agent } = stubAgent('usage-empty')
+
+    store.recordInjections(agent, [])
+
+    expect(existsSync(join(home, 'usage.events.jsonl'))).toBe(false)
+    expect(store.usageStatsFor('global:memory:missing')).toBeUndefined()
+  })
+
+  it('lazy-loads usage stats from an existing event log', () => {
+    const home = tempHome()
+    writeFileSync(join(home, 'usage.events.jsonl'), [
+      JSON.stringify({ key: 'global:memory:fact', at: '2026-01-01T00:00:00.000Z' }),
+      JSON.stringify({ key: 'global:memory:fact', at: '2026-01-02T00:00:00.000Z' }),
+    ].join('\n') + '\n')
+    const store = testStore(new Context(), home)
+
+    expect(store.usageStatsFor('global:memory:fact')).toEqual({
+      injectionCount: 2,
+      lastInjectedAt: '2026-01-02T00:00:00.000Z',
+    })
+  })
+
+  it('does not throw when usage log loading fails', () => {
+    const home = tempHome()
+    mkdirSync(join(home, 'usage.events.jsonl'))
+    const store = testStore(new Context(), home)
+    const { agent } = stubAgent('usage-failure')
+
+    expect(() => store.recordInjections(agent, ['global:memory:fact'])).not.toThrow()
+    expect(store.usageStatsFor('global:memory:fact')?.injectionCount).toBe(1)
+  })
+
   it('applies a refinement locally: state file, session event, and merged view', () => {
     const ctx = new Context()
     const store = testStore(ctx, tempHome())
@@ -101,14 +154,97 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, plan, { global: true })
     expect(store.state(agent).entries.prompt['global-note']?.content).toBe('cross-session')
     expect(store.history(agent).map(entry => entry.id)).toContain('refine_3')
-    expect(store.render(agent)).toContain('global-note')
+    expect(store.render(agent).overview).toContain('global-note')
+  })
+
+  it('promotes a local entry to global by copy, leaving local unchanged', () => {
+    const ctx = new Context()
+    const store = testStore(ctx, tempHome())
+    const { agent } = stubAgent('promote-1')
+    store.applyRefinement(agent, {
+      id: 'rp1', summary: 'local seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'lesson', content: 'durable' }],
+    }, {})
+    const out = store.promoteEntry(agent, 'lesson')
+    expect(out.applied).toBe(true)
+    expect(store.globalState().entries.memory['lesson']?.content).toBe('durable')
+    expect(store.localState(agent).entries.memory['lesson']?.content).toBe('durable')
+  })
+
+  it('promotes every persisted local field without changing local state', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-full')
+    store.applyRefinement(agent, {
+      id: 'rp-full', summary: 'local skill',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'complete-skill', content: 'body', title: 'Title',
+        description: 'Description', reference: 'Reference', arguments: '{"mode":"fast"}',
+        metadata: { sourceSession: 'original', lifecycleState: 'archived', pinned: true, lastInjectedAt: 'when' },
+      }],
+    }, {})
+    const localBefore = structuredClone(store.localState(agent).entries.skill['complete-skill'])
+    expect(store.promoteEntry(agent, 'complete-skill').applied).toBe(true)
+    const promoted = store.globalState().entries.skill['complete-skill']
+    expect(promoted).toMatchObject({
+      content: 'body', title: 'Title', description: 'Description', reference: 'Reference', arguments: '{"mode":"fast"}',
+      metadata: { sourceSession: 'original', lifecycleState: 'archived', pinned: true, lastInjectedAt: 'when' },
+    })
+    expect(promoted?.updatedAt).toEqual(expect.any(String))
+    expect(store.localState(agent).entries.skill['complete-skill']).toEqual(localBefore)
+  })
+
+  it('reports an unknown local id without changing either store', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-missing')
+    expect(store.promoteEntry(agent, 'missing')).toEqual({ applied: false, error: 'local entry not found: missing' })
+    expect(store.globalState().entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} })
+  })
+
+  it('rejects an ambiguous id shared by multiple kinds instead of picking one', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-ambig')
+    store.applyRefinement(agent, {
+      id: 'rp-a', summary: 'seed memory',
+      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'm' }],
+    }, {})
+    store.applyRefinement(agent, {
+      id: 'rp-b', summary: 'seed skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'same', content: 's' }],
+    }, {})
+    expect(store.promoteEntry(agent, 'same')).toEqual({ applied: false, error: 'ambiguous local id: same' })
+    expect(store.globalState().entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} })
+  })
+
+  it('promote conflicts when the global id already exists and leaves everything unchanged', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-2')
+    store.applyRefinement(agent, {
+      id: 'rp2', summary: 'seed both',
+      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'local' }],
+    }, {})
+    store.applyRefinement(agent, {
+      id: 'rp3', summary: 'seed global',
+      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'global' }],
+    }, { global: true })
+    const out = store.promoteEntry(agent, 'same')
+    expect(out.applied).toBe(false)
+    expect(out.error).toBe('global id conflict')
+    expect(store.globalState().entries.memory['same']?.content).toBe('global')
   })
 
   it('renders an empty overview when nothing is stored', () => {
     const store = testStore(new Context(), tempHome())
     const { agent } = stubAgent('agent-4')
-    expect(store.render(agent)).toContain('# Continual Harness State')
-    expect(store.render(agent)).toContain('- none')
+    expect(store.render(agent).overview).toContain('# Continual Harness State')
+    expect(store.render(agent).overview).toContain('- none')
   })
 
   it('materializes skill edits as SKILL.md bundles and restores them on rollback', () => {
@@ -129,6 +265,35 @@ describe('HarnessStore', () => {
     store.rollbackRefinement(agent, 'refine_skill', {})
     expect(existsSync(bundle)).toBe(false)
     expect(store.state(agent).entries.skill['repro']).toBeUndefined()
+  })
+
+  it('removes archived skill bundles and restores them on unarchive', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('agent-archive-skill')
+    const bundle = join(home, 'skills', 'repro', 'SKILL.md')
+
+    store.applyRefinement(agent, {
+      id: 'skill_seed',
+      summary: 'seed skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'repro', content: 'body' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(true)
+
+    store.applyRefinement(agent, {
+      id: 'skill_archive',
+      summary: 'archive skill',
+      edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: true, reason: 'hide' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(false)
+
+    store.applyRefinement(agent, {
+      id: 'skill_unarchive',
+      summary: 'restore skill',
+      edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: false, reason: 'restore' }],
+    }, {})
+    expect(existsSync(bundle)).toBe(true)
   })
 
   it('applies store-configured growth limit and protected layers', () => {

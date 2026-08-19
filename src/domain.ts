@@ -21,6 +21,8 @@ export const HARNESS_STATE_SOURCE = 'harness-state'
 export const HARNESS_SCHEMA_VERSION = 2
 /** Append-only injection telemetry event log under the harness home. */
 export const USAGE_EVENTS_FILE_NAME = 'usage.events.jsonl'
+/** Kind names accepted by the harness layer. */
+export const REFINEMENT_KINDS = ['prompt', 'memory', 'skill', 'subagent'] as const
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {

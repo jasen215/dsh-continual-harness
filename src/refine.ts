@@ -4,12 +4,13 @@
  * @module dsh-continual-harness
  */
 
-import { HARNESS_SCHEMA_VERSION } from './domain.ts'
+import { HARNESS_SCHEMA_VERSION, REFINEMENT_KINDS } from './domain.ts'
 import type {
   AppliedRefinementEdit,
   BlastRadius,
   HarnessEntry,
   HarnessState,
+  SkillEntry,
   RefinementEdit,
   RefinementKind,
   RefinementResult,
@@ -17,7 +18,7 @@ import type {
 } from './types.ts'
 
 /** Kind names accepted by the harness layer. */
-export const REFINEMENT_KINDS = ['prompt', 'memory', 'skill', 'subagent'] as const
+export { REFINEMENT_KINDS }
 /** Actions accepted by the harness layer. */
 export const REFINEMENT_ACTIONS = ['create', 'update', 'delete'] as const
 /** Identifier of the immutable base system prompt; never an editable id. */
@@ -34,6 +35,9 @@ export function entryFingerprint(entry: HarnessEntry): string {
     version: entry.version,
     content: entry.content,
     title: entry.title,
+    description: entry.kind === 'skill' ? (entry as SkillEntry).description : undefined,
+    reference: entry.kind === 'skill' ? (entry as SkillEntry).reference : undefined,
+    arguments: entry.kind === 'skill' ? (entry as SkillEntry).arguments : undefined,
     metadata: entry.metadata,
     protection: entry.protection,
   })
@@ -52,6 +56,9 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
   }
   if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
     return `invalid blastRadius: ${edit.blastRadius}`
+  }
+  if (edit.action !== 'update' && (edit.archive !== undefined || edit.pin !== undefined)) {
+    return 'archive/pin only valid on update edits'
   }
   if (edit.action !== 'delete'
       && edit.content === undefined
@@ -85,6 +92,7 @@ function stampAppliedEdit(
     id: edit.id,
     blastRadius,
     ...(edit.reason === undefined ? {} : { reason: edit.reason }),
+    ...(edit.rollbackDegraded === undefined ? {} : { rollbackDegraded: edit.rollbackDegraded }),
     ...fields,
   }
 }
@@ -110,6 +118,8 @@ export function applyRefinementProposal(
     globalEntries?: HarnessState['entries']
     /** True when the commit rides the automatic path (gate), enabling protected-layer checks. */
     automatic?: boolean
+    /** Session provenance stamped on create/content-update edits. */
+    sourceSession?: string
   },
 ): { result: RefinementResult; state: HarnessState } {
   const now = new Date().toISOString()
@@ -235,16 +245,22 @@ export function applyRefinementProposal(
       continue
     }
     if (edit.action === 'create') {
+      const finalSourceSession = edit.metadata?.sourceSession ?? options.sourceSession
+      const metadata = {
+        ...(edit.metadata ?? {}),
+        ...(finalSourceSession === undefined ? {} : { sourceSession: finalSourceSession }),
+      }
       const entry = edit.kind === 'skill'
         ? {
             id: edit.id,
             kind: edit.kind,
             version: 1,
             content,
+            ...(edit.title === undefined ? {} : { title: edit.title }),
             ...(edit.description === undefined ? {} : { description: edit.description }),
             ...(edit.reference === undefined ? {} : { reference: edit.reference }),
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
-            ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
+            ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
         : {
@@ -252,18 +268,26 @@ export function applyRefinementProposal(
             kind: edit.kind,
             version: 1,
             content,
-            ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
+            ...(edit.title === undefined ? {} : { title: edit.title }),
+            ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
       next.entries[edit.kind][edit.id] = entry
       appliedEdits.push(stampAppliedEdit(edit, { after: content, afterEntry: structuredClone(entry), applied: true }))
       continue
     }
+    const finalSourceSession = edit.metadata?.sourceSession ?? options.sourceSession
+    const metadata = {
+      ...(currentEntry.metadata ?? {}),
+      ...(edit.metadata ?? {}),
+      ...(finalSourceSession === undefined ? {} : { sourceSession: finalSourceSession }),
+    }
     const nextEntry = {
       ...currentEntry,
       version: currentEntry.version + 1,
       content,
-      ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
+      ...(edit.title === undefined ? {} : { title: edit.title }),
+      ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
       updatedAt: now,
     }
     next.entries[edit.kind][edit.id] = nextEntry
@@ -325,11 +349,6 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
     summary: `Rollback of ${target.id}`,
     edits,
   }
-}
-
-/** Infer the scope of a result absent an explicit one. */
-export function inferRefinementResultScope(result: RefinementResult): 'local' | 'global' {
-  return result.scope
 }
 
 /** A fresh empty entries map at the current schema version. */
