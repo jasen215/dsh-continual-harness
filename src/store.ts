@@ -16,15 +16,18 @@ import { formatHarnessStateForPrompt } from './render.ts'
 import { reconcileSkillFiles } from './skills.ts'
 import {
   appendGlobalRefinement,
+  appendUsageEvent,
   defaultHarnessHome,
   getGlobalHarnessStateDir,
   getLocalHarnessStateDir,
   loadGlobalRefinementHistory,
   loadHarnessState,
+  loadUsageEvents,
   mergeHarnessStates,
   mergeRefinementHistory,
   saveHarnessState,
 } from './storage.ts'
+import { aggregateUsage } from './usage.ts'
 import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
@@ -50,6 +53,8 @@ export class HarnessStore {
   private readonly maxEntryGrowth: number | undefined
   /** Kinds protected from the automatic path; plumbed for Config wiring. */
   private readonly protectedKinds: readonly RefinementKind[] | undefined
+  /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
+  private usage: Record<string, { injectionCount: number; lastInjectedAt?: string }> | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -92,6 +97,38 @@ export class HarnessStore {
   /** Compact overview for prompt injection. */
   render(agent: Agent): string {
     return formatHarnessStateForPrompt(this.state(agent))
+  }
+
+  /** Lazy-load injection telemetry into memory. */
+  private usageStats(): Record<string, { injectionCount: number; lastInjectedAt?: string }> {
+    if (this.usage === undefined) {
+      this.usage = aggregateUsage(loadUsageEvents(this.home))
+    }
+    return this.usage
+  }
+
+  /** Record one injection per key: append the event and update memory; never blocks injection. */
+  recordInjections(agent: Agent, injectedKeys: string[]): void {
+    void agent
+    if (injectedKeys.length === 0) return
+    const now = new Date().toISOString()
+    const stats = this.usageStats()
+    for (const key of injectedKeys) {
+      try {
+        appendUsageEvent(this.home, { key, at: now })
+      } catch (error) {
+        this.ctx.logger('harness').warn(`usage append failed: ${String(error)}`)
+      }
+      const current = stats[key] ?? { injectionCount: 0 }
+      current.injectionCount += 1
+      current.lastInjectedAt = now
+      stats[key] = current
+    }
+  }
+
+  /** Aggregate stats for one usage key (for wrap-up suggestions). */
+  usageStatsFor(key: string): { injectionCount: number; lastInjectedAt?: string } | undefined {
+    return this.usageStats()[key]
   }
 
   /** Tail-biased trajectory serialization for the planner. */
