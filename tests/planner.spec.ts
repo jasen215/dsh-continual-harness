@@ -86,3 +86,54 @@ describe('system prompts', () => {
     expect(AUTO_REFINE_REVIEW_SYSTEM_PROMPT).toContain('gatekeeper')
   })
 })
+
+describe('planner edit contract (task 3)', () => {
+  it('documents reason as required for update/delete and optional for create', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toMatch(/update.*delete.*must.*reason|must.*reason.*update|update\/delete/i)
+    expect(REFINEMENT_SYSTEM_PROMPT).toMatch(/create.*(may|can) omit|omit.*create/i)
+  })
+
+  it('documents the blastRadius field with general|project|session values', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('blastRadius')
+    expect(REFINEMENT_SYSTEM_PROMPT).toMatch(/general\|project\|session/)
+  })
+
+  it('instructs the 4-level update preference with umbrella entries', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('umbrella')
+    expect(REFINEMENT_SYSTEM_PROMPT).toMatch(/4|four|levels|preference/i)
+  })
+
+  it('carries the Do NOT capture list for non-durable lessons', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('Do NOT capture')
+    expect(REFINEMENT_SYSTEM_PROMPT).toMatch(/environment-dependent|missing binaries|negative assertions|broken/i)
+  })
+
+  it('shows reason and blastRadius in the JSON contract example', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('"reason":"..."')
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('"blastRadius":"general"')
+  })
+
+  it('keeps the review gate warning that negative assertions are not durable lessons', () => {
+    expect(AUTO_REFINE_REVIEW_SYSTEM_PROMPT).toMatch(/Do NOT capture|not durable/i)
+    expect(AUTO_REFINE_REVIEW_SYSTEM_PROMPT).toMatch(/negative assertions|environment-dependent/i)
+  })
+})
+
+describe('scope instruction (task 3)', () => {
+  it('restricts global writes to stable cross-session lessons and requires reason', () => {
+    const globalInstruction = scopeInstruction(true)
+    expect(globalInstruction).toMatch(/stable cross-session lessons|stable.*lessons/i)
+    expect(globalInstruction).toMatch(/update.*delete.*reason|must.*reason/i)
+  })
+})
+
+describe('proposal parsing (task 3)', () => {
+  it('still parses legacy-shaped JSON without reason or blastRadius', () => {
+    const proposal = parseProposal(
+      '{"id":"refine_1","summary":"s","edits":[{"action":"update","kind":"memory","id":"a","content":"c"}]}',
+    )
+    expect(proposal.edits[0]).toMatchObject({ action: 'update', kind: 'memory', id: 'a', content: 'c' })
+    expect(proposal.edits[0]).not.toHaveProperty('reason')
+    expect(proposal.edits[0]).not.toHaveProperty('blastRadius')
+  })
+})
