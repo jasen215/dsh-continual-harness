@@ -210,8 +210,12 @@ export function isHarnessEntry(value: unknown): value is HarnessEntry {
     || typeof entry.updatedAt !== 'string') return false
   if (entry.metadata !== undefined) {
     if (!isPlainObject(entry.metadata)) return false
-    const lifecycleState = entry.metadata.lifecycleState
+    const metadata = entry.metadata
+    const lifecycleState = metadata.lifecycleState
     if (lifecycleState !== undefined && lifecycleState !== 'active' && lifecycleState !== 'archived') return false
+    if (metadata.sourceSession !== undefined && typeof metadata.sourceSession !== 'string') return false
+    if (metadata.pinned !== undefined && typeof metadata.pinned !== 'boolean') return false
+    if (metadata.lastInjectedAt !== undefined && typeof metadata.lastInjectedAt !== 'string') return false
   }
   return true
 }

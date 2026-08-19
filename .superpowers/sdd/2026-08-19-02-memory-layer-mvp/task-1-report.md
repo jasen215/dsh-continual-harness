@@ -99,4 +99,37 @@ Result: typecheck passed; 129/129 tests passed across 12 test files. `git diff -
 
 ### Fix commit
 
-Pending commit for this review fix.
+`0542ff14 fix(memory): validate migrated buckets and metadata`
+
+## Second Review Fix Report
+
+### What changed
+
+- `isHarnessEntry` now type-validates every present `metadata` field: `sourceSession` and `lastInjectedAt` must be strings, `pinned` must be boolean, and `lifecycleState` remains restricted to `active` or `archived`.
+- Added regression coverage proving malformed values for each field are skipped with diagnostics while a fully populated valid metadata object survives migration.
+
+### Covering tests
+
+RED command:
+
+```text
+pnpm vitest run tests/storage.spec.ts
+```
+
+Result before the fix: 1 failed, 13 passed. The new regression test showed `metadata.sourceSession: 123` survived migration.
+
+GREEN command:
+
+```text
+pnpm vitest run tests/storage.spec.ts
+```
+
+Result: 14/14 passing with no warnings.
+
+Full verification command:
+
+```text
+pnpm typecheck && pnpm test
+```
+
+Result: typecheck passed; 130/130 tests passed across 12 test files. `git diff --check` passed with no output.

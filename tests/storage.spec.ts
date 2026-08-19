@@ -133,6 +133,36 @@ describe('harness state storage', () => {
     expect(diagnostics).toContain('skipping invalid memory entry stale')
   })
 
+  it('validates all present metadata field types during migration', () => {
+    const { state, diagnostics } = migrateHarnessState({
+      schemaVersion: 1,
+      entries: {
+        memory: {
+          badSource: { id: 'badSource', kind: 'memory', version: 1, content: 'nope', updatedAt: 't', metadata: { sourceSession: 123 } },
+          badPinned: { id: 'badPinned', kind: 'memory', version: 1, content: 'nope', updatedAt: 't', metadata: { pinned: 'yes' } },
+          badInjected: { id: 'badInjected', kind: 'memory', version: 1, content: 'nope', updatedAt: 't', metadata: { lastInjectedAt: 5 } },
+          valid: {
+            id: 'valid', kind: 'memory', version: 1, content: 'ok', updatedAt: 't',
+            metadata: { sourceSession: 'session-1', lifecycleState: 'active', pinned: true, lastInjectedAt: '2026-01-01T00:00:00.000Z' },
+          },
+        },
+        prompt: {}, skill: {}, subagent: {},
+      },
+      refinements: [],
+    })
+    expect(state.entries.memory['badSource']).toBeUndefined()
+    expect(state.entries.memory['badPinned']).toBeUndefined()
+    expect(state.entries.memory['badInjected']).toBeUndefined()
+    expect(state.entries.memory['valid']?.metadata).toEqual({
+      sourceSession: 'session-1', lifecycleState: 'active', pinned: true, lastInjectedAt: '2026-01-01T00:00:00.000Z',
+    })
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      'skipping invalid memory entry badSource',
+      'skipping invalid memory entry badPinned',
+      'skipping invalid memory entry badInjected',
+    ]))
+  })
+
   it('refuses a future schema version and keeps the file untouched', () => {
     const dir = getLocalHarnessStateDir(tempHome(), 'session-1')
     mkdirSync(dir, { recursive: true })
