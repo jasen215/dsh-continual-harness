@@ -20,6 +20,7 @@ There is no need to split into multiple packages: this plugin is a single npm pa
 | Session wrap-up | Optional `harness_wrapup` tool gives mechanical keep/promote/archive advice; promotion is copy-only and conflicts return a deterministic error |
 | In-session review trajectory | Rebuilt from session logs (tail-biased truncation) |
 | Invariant guard | `harness/refinement` event validation + batched failure reporting |
+| Explicit A/B benchmark | Single `harness_benchmark` action tool: fixed frozen cases, pre-refinement reference snapshots, and same-round reference/candidate A/B runs with code-owned decisions |
 
 ## Architecture
 
@@ -36,12 +37,15 @@ src/
   planner.ts     LLM planning prompts and JSON parsing (plan / auto-refine review prompts)
   store.ts       HarnessStore: combined storage + event publishing (session events + agent-scoped events)
   complete.ts    completeViaAgent: completion through ctx.get('llm')
-  tool.ts        harness_refine tool
+  benchmark.ts   benchmark cases/snapshots + atomic benchmark store persistence
+  evaluate.ts    isolated per-cell executor/reviewer evaluation (evidence + score)
+  score.ts       code-owned aggregation and ACCEPTED/REJECTED decisions
+  tool.ts        harness_refine / harness_wrapup / harness_benchmark tools
   projection.ts  pre-step projection (digest dedup, <harness_state> injection)
   driver.ts      automatic refinement driver (turn-interval gate / compaction gate / cooldown / re-entry guard)
   invariant.ts   runtime invariant plugin
   index.ts       plugin entry and Config
-tests/           17 test files, 163 cases (storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin integration / rank / projection / archive / usage / wrapup)
+tests/           23 test files, 287 cases (storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin integration / rank / projection / archive / usage / wrapup / benchmark / evaluate / score / isolation / tool / benchmark integration)
 ```
 
 ### Data layout
@@ -54,6 +58,10 @@ tests/           17 test files, 163 cases (storage / store / refine / rules / pl
   continual-harness.log             continual-harness implementation log (JSONL, 0600)
   continual-harness.log.1           rotated continual-harness log
   usage.events.jsonl                append-only injection telemetry (lazily loaded into memory on first access)
+  benchmark/                        explicit benchmark store (validation layer)
+    cases.json                      fixed benchmark cases (draft/frozen + frozen material hashes)
+    snapshots/<snapshotId>.json     captured reference snapshots (read-only merged harness state)
+    runs.jsonl                      append-only A/B run records (cells + evidence + code-owned decision)
   sessions/<sessionKey>/
     harness_state.json              session-local state (shadows same-id global entries)
     refinements.jsonl               session refinement history
@@ -133,6 +141,7 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `logMaxBytes` | `5242880` (5 MB) | Rotation cap for the harness log file |
 | `maxEntryGrowth` | `0.5` | Per-commit entry growth fraction cap; `0` disables the check |
 | `protectedKinds` | `['skill']` | Kinds the automatic path may not modify (reserved; per-entry `protection` is the enforced guard) |
+| `benchmark` | `{enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0}` | Explicit `harness_benchmark` tool: iterations per case per side, run cap, report-only pass line, non-regression tolerance, max failed candidate cells |
 
 ## Governance
 
@@ -156,11 +165,54 @@ tail -f ~/.dsh/harness/continual-harness.log
 
 (A dedicated tool entry for governance is deferred.)
 
+## Benchmark
+
+The validation layer is **explicit and single-entry**: one `harness_benchmark` action tool drives the whole workflow, and it never auto-triggers a refinement — nothing in the benchmark path starts a `harness_refine` or the automatic gate, and a `REJECTED` decision never auto-rolls back. The benchmark store lives under `<harnessRoot>/benchmark/` (`cases.json`, `snapshots/`, `runs.jsonl`).
+
+The minimal sequence:
+
+```
+new → add-case → freeze → capture-reference → apply refinement → run → status
+```
+
+1. `new` — initialize the benchmark store.
+2. `add-case` — add a draft case (`case_id`, `title`, `statement`, `rubric`, optional `capability`).
+3. `freeze` — freeze the draft; frozen case material is immutable and hashed.
+4. `capture-reference` — persist a reference snapshot of the merged harness state **BEFORE** applying the refinement you want to validate (`snapshot_id`). Reference capture must precede the refinement: the candidate is later derived as *this captured reference plus exactly that refinement*, so capturing after the change would make the delta unprovable.
+5. Apply the refinement (`harness_refine`, or any path that lands a refinement in the store history) — the run needs its real id.
+6. `run` — evaluate the named refinement A/B against the reference snapshot (`reference_snapshot_id` + `refinement_id`). The candidate must be the **single specified delta**: the run derives it from the captured reference plus the refinement's recorded applied edits and proves it in code before any evaluation; a drifted or multi-change candidate is refused with a `benchmark:run:candidate-delta` error. Both sides run the same frozen cases in stored order with the same `runs`/`provider`/`model`.
+7. `status` — list cases, snapshots, and recent runs.
+
+A `run` returns the code-owned decision (`src/score.ts`), not a model verdict:
+
+```json
+{
+  "action": "run",
+  "ok": true,
+  "run_id": "run-...",
+  "refinement_id": "refine-1",
+  "status": "ACCEPTED",
+  "reference_overall": 70,
+  "candidate_overall": 90,
+  "regression_cases": [],
+  "failed_cells": 0,
+  "feedback": ["reference ok", "candidate better"],
+  "auto_rollback": false,
+  "runs": 1,
+  "cells": 2
+}
+```
+
+- Scores are on a `0..100` scale (`score` in each cell). A failed cell carries `score: null` — failure is never counted as `0` — and is excluded from the overall means.
+- `passThreshold` (default `60`) is **report-only** (§4.5): it never gates acceptance. A run is `ACCEPTED` only when neither side lacks usable cells, candidate failed cells stay within `maxFailedCells`, and no overall or per-case regression exceeds `regressionTolerance` (default `0`).
+- Every run appends its full record (cells with executor evidence + the decision) to `benchmark/runs.jsonl`. Evaluation reads only the captured snapshots and writes only that record — it never touches `reviews.jsonl`, the harness state, injection telemetry, or skill files.
+- `REJECTED` is reported and recorded only; `auto_rollback` is always `false` in MVP and no rollback is ever invoked.
+
 ## Development
 
 The plugin is self-contained: `devDependencies` pin the published
 `@deepseek-ai/*` packages (rc versions), so `pnpm install`, `pnpm run
-typecheck`, `pnpm test` (163 cases), and `pnpm run build` (tsc emits
+typecheck`, `pnpm test` (287 cases), and `pnpm run build` (tsc emits
 `lib/types/*.js + *.d.ts`; the `"."` and `"./invariant"` exports point at the
 artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
