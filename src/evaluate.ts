@@ -7,19 +7,19 @@
  * snapshot it is given and writes nothing.
  *
  * `CellEvaluation` (this module) is the evaluation-stage outcome: everything
- * Task 4 needs to build a persisted `CellScore` (kept in `src/benchmark.ts` as
- * the domain record) plus the executor evidence the run record must store. It
- * lives here, next to the evaluator that produces it, rather than in
+ * `src/score.ts` needs to build a persisted `CellScore` (kept in `src/benchmark.ts`
+ * as the domain record) plus the executor evidence the run record must store.
+ * It lives here, next to the evaluator that produces it, rather than in
  * `benchmark.ts`, which owns the persisted record shapes.
  * @module dsh-continual-harness
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { BenchmarkCase, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
+import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
 import { hashBenchmarkCase } from './benchmark.ts'
+import { completeViaModel } from './complete.ts'
 import type { Complete } from './planner.ts'
-import { TRUNCATED_JSON_ERROR } from './planner.ts'
+import { extractJsonObject } from './planner.ts'
 import { overviewForPrompt } from './render.ts'
 
 /** Default output budget for one evaluator call. */
@@ -27,12 +27,15 @@ export const DEFAULT_EVALUATION_MAX_TOKENS = 8_000
 /** Default per-phase timeout for one evaluator call. */
 export const DEFAULT_EVALUATION_TIMEOUT_MS = 60_000
 
+/** The documented executor evidence fields; anything else is rejected. */
+const EXECUTOR_EVIDENCE_FIELDS: readonly string[] = ['completed', 'summary', 'actions', 'observations', 'artifacts']
+
 /**
  * Stable evaluation failure vocabulary. These describe failures that happen
- * while producing or parsing a cell — distinct from Task 1's
- * `CellScoreFailureReason`, which validates an already-built `CellScore`
- * record. `CellScore.failureReason` is a plain string, so these values flow
- * through unchanged into the persisted record.
+ * while producing or parsing a cell — distinct from the domain
+ * `CellScoreFailureReason` in `src/benchmark.ts`, which validates an
+ * already-built `CellScore` record. `CellScore.failureReason` is a plain
+ * string, so these values flow through unchanged into the persisted record.
  */
 export type EvaluationFailureReason =
   | 'provider-error'
@@ -73,32 +76,15 @@ export interface ReviewerScore {
 }
 
 /**
- * The evaluation-stage outcome of one cell: status, score, feedback, the
- * executor evidence (part of the run record), and every reference Task 4 needs
- * to construct a `CellScore` — snapshot/case hashes, side, provider/model, and
- * timing. A failed cell carries `score: null` (never 0) and a stable
- * `failureReason`.
+ * The evaluation-stage outcome of one cell: the persisted `CellScore` fields
+ * (see `src/benchmark.ts`) plus the executor evidence the run record must
+ * store. A failed cell carries `score: null` (never 0) and a stable
+ * `failureReason`. It lives here, next to the evaluator that produces it,
+ * rather than in `benchmark.ts`, which owns the persisted record shapes.
  */
-export interface CellEvaluation {
-  runId: string
-  side: 'reference' | 'candidate'
-  caseId: string
-  iteration: number
-  status: 'ok' | 'failed'
-  score: number | null
-  failureReason?: string
-  feedback?: string
+export interface CellEvaluation extends CellScore {
   /** Executor evidence; `null` when the executor phase itself failed. */
   evidence: ExecutorEvidence | null
-  snapshotId: string
-  stateHash: string
-  caseHash: string
-  executorProvider?: string
-  executorModel?: string
-  reviewerProvider?: string
-  reviewerModel?: string
-  durationMs?: number
-  recordedAt: string
 }
 
 /** System prompt for the executor phase; deliberately contains no rubric. */
@@ -160,7 +146,7 @@ export function parseReviewerScore(text: string): ReviewerScore {
 export function parseExecutorEvidence(text: string): ExecutorEvidence {
   const object = parseJsonObject(text)
   for (const key of Object.keys(object)) {
-    if (!(EXECUTOR_EVIDENCE_FIELDS as readonly string[]).includes(key)) {
+    if (!EXECUTOR_EVIDENCE_FIELDS.includes(key)) {
       throw new Error(`unexpected executor evidence field: ${key}`)
     }
   }
@@ -190,16 +176,15 @@ export function parseExecutorEvidence(text: string): ExecutorEvidence {
  *
  * Precondition: `input.benchmarkCase` must be frozen — its material hash is
  * stamped into the cell via `hashBenchmarkCase`, which rejects drafts. Callers
- * validate frozen state before evaluation (Task 5's `run` action).
+ * validate frozen state before evaluation (the `run` action in `src/tool.ts`).
  */
 export async function runCellEvaluation(
   ctx: Context,
   input: CellEvaluationInput,
   options: CellEvaluationOptions = {},
 ): Promise<CellEvaluation> {
-  const complete = options.complete ?? completeViaContext(ctx, input)
+  const complete = options.complete ?? completeViaModel(ctx, input.provider, input.model, DEFAULT_EVALUATION_MAX_TOKENS)
   const timeoutMs = options.timeoutMs ?? DEFAULT_EVALUATION_TIMEOUT_MS
-  const signal = options.signal
   const startedAt = Date.now()
   const recordedAt = new Date().toISOString()
   const base = {
@@ -217,15 +202,27 @@ export async function runCellEvaluation(
     recordedAt,
   }
 
+  // A phase timeout must cancel the underlying completion call, not just stop
+  // waiting on it — otherwise an orphaned `llm.stream` keeps running. The
+  // internal controller forwards the caller's signal and is aborted on timeout.
+  const controller = new AbortController()
+  const callerSignal = options.signal
+  if (callerSignal !== undefined) {
+    if (callerSignal.aborted) controller.abort()
+    else callerSignal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
+  const callSignal = controller.signal
+
   let executorText: string
   try {
     executorText = await raceWithTimeout(
-      complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), signal),
+      complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), callSignal),
       timeoutMs,
-      signal,
+      callerSignal,
+      () => controller.abort(),
     )
   } catch (error) {
-    return failedCell(base, null, failureReasonFor(error, signal), startedAt)
+    return failedCell(base, null, failureReasonFor(error, callerSignal), startedAt)
   }
 
   let evidence: ExecutorEvidence
@@ -238,12 +235,13 @@ export async function runCellEvaluation(
   let reviewerText: string
   try {
     reviewerText = await raceWithTimeout(
-      complete(REVIEWER_SYSTEM_PROMPT, buildReviewerPrompt(input.benchmarkCase, evidence), signal),
+      complete(REVIEWER_SYSTEM_PROMPT, buildReviewerPrompt(input.benchmarkCase, evidence), callSignal),
       timeoutMs,
-      signal,
+      callerSignal,
+      () => controller.abort(),
     )
   } catch (error) {
-    return failedCell(base, evidence, failureReasonFor(error, signal), startedAt)
+    return failedCell(base, evidence, failureReasonFor(error, callerSignal), startedAt)
   }
 
   let verdict: ReviewerScore
@@ -263,9 +261,6 @@ export async function runCellEvaluation(
     durationMs: Date.now() - startedAt,
   }
 }
-
-/** The documented executor evidence fields; anything else is rejected. */
-const EXECUTOR_EVIDENCE_FIELDS = ['completed', 'summary', 'actions', 'observations', 'artifacts'] as const
 
 /** Marker error for a phase that exceeded its timeout budget. */
 class EvaluationTimeoutError extends Error {
@@ -287,26 +282,34 @@ class ReviewerParseError extends Error {
   }
 }
 
-/** Map any completion-phase error onto the stable failure vocabulary. */
+/** Map any completion-phase error onto the stable failure vocabulary. The
+ * error type wins over the signal state: a phase timeout aborts the internal
+ * controller (so `signal.aborted` is set) yet must still read as `timeout`. */
 function failureReasonFor(error: unknown, signal: AbortSignal | undefined): EvaluationFailureReason {
-  if (signal?.aborted) return 'aborted'
   if (error instanceof EvaluationTimeoutError) return 'timeout'
   if (error instanceof EvaluationAbortError) return 'aborted'
   if (error instanceof Error && error.name === 'AbortError') return 'aborted'
+  if (signal?.aborted) return 'aborted'
   return 'provider-error'
 }
 
-/** Race a promise against a per-phase timeout and the caller's abort signal. */
+/** Race a promise against a per-phase timeout and the caller's abort signal.
+ * When the timeout wins, `onTimeout` (if given) fires first so the caller can
+ * cancel the underlying work before the rejection is observed. */
 function raceWithTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   signal: AbortSignal | undefined,
+  onTimeout?: () => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const onAbort = (): void => settle(() => reject(new EvaluationAbortError()))
-    const onTimeout = (): void => settle(() => reject(new EvaluationTimeoutError()))
+    const fireTimeout = (): void => {
+      onTimeout?.()
+      settle(() => reject(new EvaluationTimeoutError()))
+    }
     const cleanup = (): void => {
       if (timer !== undefined) clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
@@ -324,7 +327,7 @@ function raceWithTimeout<T>(
       }
       signal.addEventListener('abort', onAbort, { once: true })
     }
-    timer = setTimeout(onTimeout, timeoutMs)
+    timer = setTimeout(fireTimeout, timeoutMs)
     promise.then(
       value => {
         if (settled) return
@@ -340,34 +343,6 @@ function raceWithTimeout<T>(
       },
     )
   })
-}
-
-/** Build the default completion seam over `ctx.llm.stream`, mirroring complete.ts routing. */
-function completeViaContext(ctx: Context, input: Pick<CellEvaluationInput, 'provider' | 'model'>): Complete {
-  return async (system, user, signal) => {
-    const llm = ctx.get('llm')
-    if (!llm) {
-      throw new Error('harness benchmark evaluation requires the llm service on the context')
-    }
-    let text = ''
-    let failed = false
-    for await (const chunk of llm.stream({
-      provider: input.provider,
-      model: input.model,
-      system,
-      maxTokens: DEFAULT_EVALUATION_MAX_TOKENS,
-      messages: [createUserMessage({
-        source: { kind: 'plugin', plugin: 'dsh-continual-harness' },
-        content: [{ type: 'text', text: user }],
-      })],
-      ...(signal === undefined ? {} : { signal }),
-    })) {
-      if (chunk.type === 'text-delta') text += chunk.text
-      else if (chunk.type === 'finish' && chunk.reason.kind === 'error') failed = true
-    }
-    if (failed) throw new Error('harness benchmark evaluation failed: model request failed')
-    return text
-  }
 }
 
 /** Build a failed cell: score null, stable reason, timing stamped. */
@@ -387,12 +362,9 @@ function failedCell(
   }
 }
 
-/** Extract the first `{...}` span, tolerating prose and code fences, mirroring planner.ts. */
+/** Parse a JSON object reply, tolerating prose and code fences via the shared span extractor. */
 function parseJsonObject(text: string): Record<string, unknown> {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error(TRUNCATED_JSON_ERROR)
-  const parsed: unknown = JSON.parse(text.slice(start, end + 1))
+  const parsed: unknown = JSON.parse(extractJsonObject(text))
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('the model reply is not a JSON object')
   }

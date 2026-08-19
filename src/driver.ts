@@ -109,11 +109,11 @@ export function registerHarnessDriver(ctx: Context, store: HarnessStore, options
   })
 
   // `session/disposed` is the dsh-session first-class teardown boundary
-  // (emitted once when an announced session leaves the store, per the Task 1
-  // ruling); there is no `session/end` event, so the final drain attaches
-  // here, keyed off the session id from the payload. Cordis fibers dispose
-  // this listener with the plugin, so it cannot leak across unload. Guarded
-  // like the event listener: a disabled driver owns no gate state to drain.
+  // (emitted once when an announced session leaves the store, per its typings);
+  // there is no `session/end` event, so the final drain attaches here, keyed
+  // off the session id from the payload. Cordis fibers dispose this listener
+  // with the plugin, so it cannot leak across unload. Guarded like the event
+  // listener: a disabled driver owns no gate state to drain.
   if (options.enabled) {
     ctx.on('session/disposed', (session) => {
       void finalizeSession(String(session.id))
@@ -218,10 +218,13 @@ export function registerHarnessDriver(ctx: Context, store: HarnessStore, options
       }
     }
     try {
+      const stateOverview = overviewForPrompt(store.state(agent))
+      const historyText = historyForPrompt(store.history(agent))
+      const trajectoryText = store.trajectory(agent, options.maxTrajectoryChars)
       const review = await reviewAutoRefine({
-        stateOverview: overviewForPrompt(store.state(agent)),
-        historyText: historyForPrompt(store.history(agent)),
-        trajectoryText: store.trajectory(agent, options.maxTrajectoryChars),
+        stateOverview,
+        historyText,
+        trajectoryText,
         reason,
       }, complete)
       if (!review.approved) {
@@ -229,9 +232,9 @@ export function registerHarnessDriver(ctx: Context, store: HarnessStore, options
         return
       }
       const plan = await planRefinement({
-        stateOverview: overviewForPrompt(store.state(agent)),
-        historyText: historyForPrompt(store.history(agent)),
-        trajectoryText: store.trajectory(agent, options.maxTrajectoryChars),
+        stateOverview,
+        historyText,
+        trajectoryText,
         scopeInstruction: scopeInstruction(false),
         instructions: autoRefineInstructions(reason, review),
       }, complete)

@@ -96,6 +96,32 @@ export interface Config {
   protectedKinds: RefinementKind[]
 }
 
+/** Benchmark configuration (spec §5) with its MVP defaults. */
+export interface BenchmarkConfig {
+  /** Whether the benchmark tool is registered at all. */
+  enabled: boolean
+  /** Iterations when the tool call omits `runs`. */
+  defaultRuns: number
+  /** Hard cap on iterations per run. */
+  maxRuns: number
+  /** Report-only pass line; never gates ACCEPTED (spec §4.5). */
+  passThreshold: number
+  /** Allowed downward drift of candidate vs reference before regression. */
+  regressionTolerance: number
+  /** Candidate failed cells above this count reject the run. */
+  maxFailedCells: number
+}
+
+/** Benchmark config defaults (spec §5); shared by the schema and the apply fallback. */
+export const DEFAULT_BENCHMARK_CONFIG: BenchmarkConfig = {
+  enabled: true,
+  defaultRuns: 1,
+  maxRuns: 3,
+  passThreshold: 60,
+  regressionTolerance: 0,
+  maxFailedCells: 0,
+}
+
 /** Schemastery configuration for the continual harness plugin. */
 export const Config: z<Config> = z.object({
   harnessRoot: z.string(),
@@ -114,13 +140,13 @@ export const Config: z<Config> = z.object({
   wrapupEnabled: z.boolean().default(true),
   auditReviews: z.boolean().default(true),
   benchmark: z.object({
-    enabled: z.boolean().default(true),
-    defaultRuns: z.number().step(1).min(1).default(1),
-    maxRuns: z.number().step(1).min(1).default(3),
-    passThreshold: z.number().min(0).max(100).default(60),
-    regressionTolerance: z.number().min(0).default(0),
-    maxFailedCells: z.number().step(1).min(0).default(0),
-  }).default({ enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0 }),
+    enabled: z.boolean().default(DEFAULT_BENCHMARK_CONFIG.enabled),
+    defaultRuns: z.number().step(1).min(1).default(DEFAULT_BENCHMARK_CONFIG.defaultRuns),
+    maxRuns: z.number().step(1).min(1).default(DEFAULT_BENCHMARK_CONFIG.maxRuns),
+    passThreshold: z.number().min(0).max(100).default(DEFAULT_BENCHMARK_CONFIG.passThreshold),
+    regressionTolerance: z.number().min(0).default(DEFAULT_BENCHMARK_CONFIG.regressionTolerance),
+    maxFailedCells: z.number().step(1).min(0).default(DEFAULT_BENCHMARK_CONFIG.maxFailedCells),
+  }).default(DEFAULT_BENCHMARK_CONFIG),
   logToFile: z.boolean().default(true),
   logMaxBytes: z.number().step(1).min(1).default(5 * 1024 * 1024),
   maxEntryGrowth: z.number().min(0).default(0.5),
@@ -151,7 +177,7 @@ export function apply(ctx: Context, config: Config): void {
   if (config.wrapupEnabled) {
     registerHarnessWrapup(ctx, store)
   }
-  const benchmark = config.benchmark ?? { enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0 }
+  const benchmark = config.benchmark ?? DEFAULT_BENCHMARK_CONFIG
   if (benchmark.enabled) {
     registerBenchmarkTool(ctx, store, {
       defaultRuns: benchmark.defaultRuns,

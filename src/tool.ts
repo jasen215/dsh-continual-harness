@@ -458,7 +458,7 @@ function actionCaptureReference(
   exec: BenchmarkExecution,
 ): { action: string; ok: boolean; snapshot_id: string; state_hash: string; captured_at: string } {
   const agent = exec.agent
-  if (!agent) throw new Error('harness_benchmark capture-reference requires a live agent')
+  if (!agent) throw benchmarkError('capture-reference:no-agent', 'harness_benchmark capture-reference requires a live agent')
   const snapshotId = stringArg(args.snapshot_id)
   if (snapshotId === undefined) throw benchmarkError('capture-reference:missing-argument', 'capture-reference requires snapshot_id')
   const snapshot = store.captureSnapshot(agent, snapshotId)
@@ -523,7 +523,7 @@ async function actionRun(
   cells: number
 }> {
   const agent = exec.agent
-  if (!agent) throw new Error('harness_benchmark run requires a live agent')
+  if (!agent) throw benchmarkError('run:no-agent', 'harness_benchmark run requires a live agent')
   const referenceId = stringArg(args.reference_snapshot_id)
   if (referenceId === undefined) {
     throw benchmarkError('run:missing-argument', 'run requires reference_snapshot_id')
@@ -561,9 +561,9 @@ async function actionRun(
   }
 
   const evaluations: CellEvaluation[] = []
+  const cellOptions = { ...(exec.signal === undefined ? {} : { signal: exec.signal }) }
   for (const benchmarkCase of frozenCases) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
-      const optionsForCell = { ...(exec.signal === undefined ? {} : { signal: exec.signal }) }
       evaluations.push(await runCellEvaluation(ctx, {
         runId,
         side: 'reference',
@@ -572,7 +572,7 @@ async function actionRun(
         snapshot: reference,
         provider,
         model,
-      }, optionsForCell))
+      }, cellOptions))
       evaluations.push(await runCellEvaluation(ctx, {
         runId,
         side: 'candidate',
@@ -581,11 +581,11 @@ async function actionRun(
         snapshot: candidate,
         provider,
         model,
-      }, optionsForCell))
+      }, cellOptions))
     }
   }
 
-  const cells = evaluations.map(cellFromEvaluation)
+  const cells: Array<CellScore & { evidence: ExecutorEvidence | null }> = evaluations.map(cellFromEvaluation)
   const decision = decideBenchmark({
     runId,
     refinementId,
@@ -634,28 +634,10 @@ function deriveCandidateSnapshot(reference: HarnessSnapshot, refinement: Refinem
   return buildSnapshot(state, snapshotId, refinement.id)
 }
 
-/** Project a CellEvaluation onto the persisted CellScore shape plus its executor evidence. */
+/** Project a CellEvaluation (a `CellScore` plus evidence) onto the persisted shape. */
 function cellFromEvaluation(evaluation: CellEvaluation): CellScore & { evidence: ExecutorEvidence | null } {
-  return {
-    runId: evaluation.runId,
-    side: evaluation.side,
-    caseId: evaluation.caseId,
-    iteration: evaluation.iteration,
-    score: evaluation.score,
-    status: evaluation.status,
-    ...(evaluation.failureReason === undefined ? {} : { failureReason: evaluation.failureReason }),
-    ...(evaluation.feedback === undefined ? {} : { feedback: evaluation.feedback }),
-    snapshotId: evaluation.snapshotId,
-    stateHash: evaluation.stateHash,
-    caseHash: evaluation.caseHash,
-    ...(evaluation.executorProvider === undefined ? {} : { executorProvider: evaluation.executorProvider }),
-    ...(evaluation.executorModel === undefined ? {} : { executorModel: evaluation.executorModel }),
-    ...(evaluation.reviewerProvider === undefined ? {} : { reviewerProvider: evaluation.reviewerProvider }),
-    ...(evaluation.reviewerModel === undefined ? {} : { reviewerModel: evaluation.reviewerModel }),
-    ...(evaluation.durationMs === undefined ? {} : { durationMs: evaluation.durationMs }),
-    recordedAt: evaluation.recordedAt,
-    evidence: evaluation.evidence,
-  }
+  const { evidence, ...score } = evaluation
+  return { ...score, evidence }
 }
 
 /** Resolve the iterations count: explicit positive integer capped by maxRuns. */

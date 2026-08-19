@@ -282,7 +282,7 @@ export function loadBenchmark(home: string): BenchmarkCase[] {
     throw new Error(`unsupported benchmark cases schema in ${file}`)
   }
   const envelope = parsed as BenchmarkCasesEnvelope
-  if (envelope.schemaVersion > BENCHMARK_CASES_SCHEMA_VERSION) {
+  if (envelope.schemaVersion !== BENCHMARK_CASES_SCHEMA_VERSION) {
     throw new Error(`unsupported benchmark cases schemaVersion ${envelope.schemaVersion}`)
   }
   for (const benchmarkCase of envelope.cases) {
@@ -317,8 +317,9 @@ export function saveBenchmarkCases(home: string, cases: BenchmarkCase[]): void {
 /**
  * Append one benchmark run record as a JSON line to `<home>/benchmark/runs.jsonl`.
  * Only the benchmark run log is touched — the audit gate's `reviews.jsonl` is
- * never rewritten. The concrete record shape (cells + decision) is defined
- * when evaluation and aggregation land.
+ * never rewritten. The record is `{ runId, cells, decision, createdAt }` as
+ * assembled by the `run` action in `src/tool.ts`. The append is not atomic
+ * (a torn trailing line is possible on crash); readers tolerate it.
  */
 export function appendBenchmarkRun(home: string, record: Record<string, unknown>): void {
   const file = benchmarkRunsFile(home)
@@ -457,9 +458,12 @@ function atomicWriteJson(file: string, value: unknown): void {
   renameSync(tmp, file)
 }
 
+/** A snapshot id becomes a file name; the allowlist rejects path escapes and platform-invalid characters. */
+const SAFE_SNAPSHOT_ID_PATTERN = /^[A-Za-z0-9._-]+$/
+
 /** A snapshot id becomes a file name; reject anything that could escape the snapshots dir. */
 function assertSafeSnapshotId(snapshotId: string): void {
-  if (snapshotId.trim() === '' || snapshotId.includes('/') || snapshotId.includes('\\') || snapshotId === '.' || snapshotId === '..') {
+  if (!SAFE_SNAPSHOT_ID_PATTERN.test(snapshotId)) {
     throw new Error(`unsafe benchmark snapshot id: ${snapshotId}`)
   }
 }

@@ -311,11 +311,17 @@ describe('benchmark persistence', () => {
     expect(readFileSync(join(home, 'benchmark', 'cases.json'), 'utf8')).toBe('{ not json')
   })
 
-  it('rejects an unsupported cases schema version', () => {
+  it('rejects an unsupported cases schema version (higher or lower)', () => {
     const home = tempHome()
     mkdirSync(join(home, 'benchmark'), { recursive: true })
-    writeFileSync(join(home, 'benchmark', 'cases.json'), JSON.stringify({ schemaVersion: 99, cases: [] }), 'utf8')
-    expect(() => loadBenchmark(home)).toThrow(/schema/i)
+    const writeVersion = (schemaVersion: number): void => {
+      writeFileSync(join(home, 'benchmark', 'cases.json'), JSON.stringify({ schemaVersion, cases: [], caseHashes: {} }), 'utf8')
+    }
+    writeVersion(99)
+    expect(() => loadBenchmark(home)).toThrow(/schemaVersion/)
+    // a lower-but-not-current version is equally unsupported: no migrations exist
+    writeVersion(0)
+    expect(() => loadBenchmark(home)).toThrow(/schemaVersion/)
   })
 
   it('fails loudly when a frozen case hash does not match its stored material', () => {
