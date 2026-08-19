@@ -15,6 +15,9 @@ There is no need to split into multiple packages: this plugin is a single npm pa
 | State projection (inject harness context each step) | `agent/pre-step` waterfall listener; incremental injection when the content digest changes |
 | Review and automatic refinement | `session/event` listener on turn interval / compaction end; runs LLM review → plan → apply automatically |
 | Manual refinement tool | Registers the `harness_refine` tool (directly callable by the LLM, supports rollback) |
+| Memory lifecycle | Manual archive/unarchive/pin through refinement metadata; archived entries are hidden from injection and skill materialization |
+| Ranked injection | Queries the latest effective direct-user message (up to 400 chars), ranks title matches above content matches, then applies freshness/id tie-breaks and a per-kind cap |
+| Session wrap-up | Optional `harness_wrapup` tool gives mechanical keep/promote/archive advice; promotion is copy-only and conflicts return a deterministic error |
 | In-session review trajectory | Rebuilt from session logs (tail-biased truncation) |
 | Invariant guard | `harness/refinement` event validation + batched failure reporting |
 
@@ -27,7 +30,9 @@ src/
   storage.ts     disk read/write of state and history (atomic writes, corruption degradation, local/global merge, jsonl history)
   refine.ts      validation, application, rollback (baseline conflict detection, version increments, growth limit)
   skills.ts      SKILL.md rendering + file reconciliation (generated skills are real dsh skills)
-  render.ts      model-facing overview / summary / history rendering
+  render.ts      model-facing overview / summary / history rendering (ranked injection)
+  usage.ts       injection telemetry keys and in-memory usage aggregation
+  wrapup.ts      deterministic session wrap-up suggestions (keep/promote/archive)
   planner.ts     LLM planning prompts and JSON parsing (plan / auto-refine review prompts)
   store.ts       HarnessStore: combined storage + event publishing (session events + agent-scoped events)
   complete.ts    completeViaAgent: completion through ctx.get('llm')
@@ -48,6 +53,7 @@ tests/           12 specs, 120 cases (storage / store / refine / rules / planner
   reviews.jsonl                     cross-batch gate/audit history (ESP extension)
   continual-harness.log             continual-harness implementation log (JSONL, 0600)
   continual-harness.log.1           rotated continual-harness log
+  usage.events.jsonl                append-only injection telemetry (aggregated in memory at startup)
   sessions/<sessionKey>/
     harness_state.json              session-local state (shadows same-id global entries)
     refinements.jsonl               session refinement history
@@ -120,6 +126,8 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `plannerMaxTokens` | 32000 | Max tokens for the planner LLM call |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | Auto-refine: turn-interval gate, compaction-end gate, cooldown, disable switch |
 | `requireGlobalApproval` | `false` | Require explicit human approval before a global write commits (conservative mode) |
+| `maxInjectedEntriesPerKind` | `6` | Positive-integer cap (step 1, minimum 1) for ranked injected entries per kind |
+| `wrapupEnabled` | `true` | Register the optional `harness_wrapup` session wrap-up tool |
 | `auditReviews` | `true` | Append every gate verdict to `reviews.jsonl` under the harness root |
 | `logToFile` | `true` | Persist harness logs to `continual-harness.log` (JSONL, `0600`, rotated) |
 | `logMaxBytes` | `5242880` (5 MB) | Rotation cap for the harness log file |

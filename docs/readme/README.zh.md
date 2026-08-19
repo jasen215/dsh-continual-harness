@@ -15,6 +15,9 @@ DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个�
 | 状态投影（每步注入 harness 上下文） | `agent/pre-step` 瀑布监听，按内容摘要变化增量注入 |
 | 复盘与自动精修 | `session/event` 监听 turn 间隔 / 压缩结束，自动跑 LLM 评审 → 规划 → 应用 |
 | 手动精修工具 | 注册 `harness_refine` 工具（LLM 可直接调用，支持回滚） |
+| 记忆生命周期 | 通过精修元数据手动 archive/unarchive/pin；已归档条目不会注入，也不会物化为 skill |
+| 排序注入 | 从最近一条有效 direct-user 消息取查询（最多 400 字符），标题命中优先于内容命中，再按更新时间和 id 稳定排序，并按 kind 限额 |
+| 会话收尾 | 可选 `harness_wrapup` 工具机械给出 keep/promote/archive 建议；promote 只复制，冲突返回确定性错误 |
 | 会话内复盘轨迹 | 从 session 日志重建（tail-biased 截断） |
 | 不变量守护 | `harness/refinement` 事件校验 + 批量 fail 上报 |
 
@@ -27,7 +30,9 @@ src/
   storage.ts     状态与历史的磁盘读写（原子写、损坏降级、local/global 合并、jsonl 历史）
   refine.ts      校验、应用、回滚（基线冲突检测、版本递增、增长率上限）
   skills.ts      SKILL.md 渲染 + 文件协调（生成的 skill 是真正的 dsh skill）
-  render.ts      面向模型的概览 / 摘要 / 历史渲染
+  render.ts      面向模型的概览 / 摘要 / 历史渲染（排序注入）
+  usage.ts       注入遥测 key 与内存中的使用统计聚合
+  wrapup.ts      确定性的会话收尾建议（keep/promote/archive）
   planner.ts     LLM 规划提示词与 JSON 解析（plan / auto-refine review 两条提示词）
   store.ts       HarnessStore：组合存储 + 事件发布（session 事件 + agent 作用域事件）
   complete.ts    completeViaAgent：经 ctx.get('llm') 调用补全
@@ -48,6 +53,7 @@ tests/           12 个 spec，120 个用例（storage / store / refine / rules 
   reviews.jsonl                     跨批次 gate/审计历史（ESP 扩展）
   continual-harness.log             continual-harness 实现日志（JSONL、0600）
   continual-harness.log.1           continual-harness 日志轮转文件
+  usage.events.jsonl                追加式注入遥测（启动时聚合到内存）
   sessions/<sessionKey>/
     harness_state.json              会话本地状态（遮蔽同 id 全局条目）
     refinements.jsonl               会话精修历史
@@ -112,6 +118,8 @@ pnpm dsh --profile <name> "…"
 | `plannerMaxTokens` | 32000 | 规划器 LLM 调用的最大 token 数 |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | 自动精修：turn 间隔门、压缩结束门、冷却时间、禁用开关 |
 | `requireGlobalApproval` | `false` | 全局写入提交前是否要求显式人工审批（保守模式） |
+| `maxInjectedEntriesPerKind` | `6` | 每个 kind 排序注入的正整数上限（步长 1，最小值 1） |
+| `wrapupEnabled` | `true` | 是否注册可选的 `harness_wrapup` 会话收尾工具 |
 | `auditReviews` | `true` | 每个 gate 裁决追加到 harness 根目录 `reviews.jsonl` |
 | `logToFile` | `true` | 把 harness 日志持久化到 `continual-harness.log`（JSONL、`0600`、轮转） |
 | `logMaxBytes` | `5242880`（5 MB） | harness 日志文件轮转上限 |
