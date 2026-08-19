@@ -73,7 +73,7 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
     const state = store.state(agent)
     const hasContent = Object.values(state.entries).some(records => Object.keys(records).length > 0)
       || state.refinements.length > 0
-    const { overview } = store.render(agent)
+    const { overview, injectedKeys } = store.render(agent)
     const digest = digestOf(overview)
     const lastDigest = injectedDigests.get(agent)
     if (digest === lastDigest || (!hasContent && lastDigest === undefined)) return decision
@@ -91,6 +91,7 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
         surfaceOp: { op: 'replace', start: existingSeq, end: existingSeq },
         sourceEventSeqs: [existingSeq],
       })
+      store.recordInjections(agent, injectedKeys)
       return decision
     }
 
@@ -99,6 +100,7 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
     // system-prompt context — so it reads as the most recent system-level
     // reminder before the model call.
     if (step === 1 && decision.messages.length === 0) return decision
+    store.recordInjections(agent, injectedKeys)
     return { kind: 'enter', messages: [...decision.messages, desired] }
   })
 }
