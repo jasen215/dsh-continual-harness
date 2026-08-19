@@ -42,10 +42,13 @@ tests/           7 specs, 46 cases (storage / refine / planner / store / driver 
 ### Data layout
 
 ```
-<harnessRoot>/                      harness/ under the default dsh data dir (overridable via Config.harnessRoot)
-  harness_state.json                cross-session global state
-  refinements.jsonl                 global refinement history (append-only)
-  sessions/<sessionKey>/harness/
+<harnessRoot>/                      shared ESP experience root; defaults to ~/.dsh/harness/
+  harness_state.json                cross-session global state (ESP)
+  refinements.jsonl                 global refinement history (append-only, ESP)
+  reviews.jsonl                     cross-batch gate/audit history (ESP extension)
+  continual-harness.log             continual-harness implementation log (JSONL, 0600)
+  continual-harness.log.1           rotated continual-harness log
+  sessions/<sessionKey>/
     harness_state.json              session-local state (shadows same-id global entries)
     refinements.jsonl               session refinement history
 ```
