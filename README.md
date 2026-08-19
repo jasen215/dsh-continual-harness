@@ -147,13 +147,13 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 
 Every write path — the `harness_refine` tool and the automatic gate — funnels through a rule layer with three tiers, plus a reversibility backstop:
 
-1. **Impact minimization** — every edit is validated against a fixed contract before any write. `create` may omit a `reason`; `update`/`delete` must carry a one-line `reason` (a missing one rejects the edit with `edit "<id>"缺 reason被拒绝，请补充 reason后重新提交`). Optional `blastRadius` (`general | project | session`) defaults to `general`. `base_system_prompt` is immutable. `maxEntryGrowth` (default `0.5`) caps how much an update may grow an entry in one commit (`条目增长率超过 maxEntryGrowth上限`; `0` disables the check).
-2. **Legality hard rejects** — Protected entries (those carrying `protection`) are immutable on the automatic path (`受保护条目仅显式用户会话可改`); during a `local` refinement the global store is read-only, so touching an unshadowed global entry requires creating a local shadow first (`global条目在 local精修期间只读，请创建 local遮蔽条目`).
+1. **Impact minimization** — every edit is validated against a fixed contract before any write. `create` may omit a `reason`; `update`/`delete` must carry a one-line `reason` (a missing one rejects the edit with `edit "<id>" rejected: missing reason`). Optional `blastRadius` (`general | project | session`) defaults to `general`. `base_system_prompt` is immutable. `maxEntryGrowth` (default `0.5`) caps how much an update may grow an entry in one commit (`entry growth exceeds the maxEntryGrowth cap`; `0` disables the check).
+2. **Legality hard rejects** — Protected entries (those carrying `protection`) are immutable on the automatic path (`protected entries are mutable only in explicit user sessions`); during a `local` refinement the global store is read-only, so touching an unshadowed global entry requires creating a local shadow first (`global entries are read-only during a local refinement; create a local shadow first`).
 3. **Necessity soft gate** — before any automatic refinement the review gate decides whether persisting now is worthwhile; a declined review never reaches the store, and every verdict is audited.
 
 **Reversibility** is the backstop: every committed refinement rolls back by id, and rollbacks carry a system-generated `rollback:<id>` reason.
 
-Global writes are **zero-approval by default**: the tool commits a global refinement without consulting any approval service. Set `requireGlobalApproval: true` for the conservative mode, in which a global write first asks the user through the `dsh-user-questions` service and is skipped on rejection (`global写入未获批：<error>`).
+Global writes are **zero-approval by default**: the tool commits a global refinement without consulting any approval service. Set `requireGlobalApproval: true` for the conservative mode, in which a global write first asks the user through the `dsh-user-questions` service and is skipped on rejection (`global write not approved: <error>`).
 
 The gate and the plugin keep two artifacts under the harness root: every gate verdict is appended to `reviews.jsonl` (outcomes `approved | declined | assessed | failed`), and harness log lines from the `harness` / `continual-harness` loggers are appended to `continual-harness.log` (JSONL, `0600`, rotated to `.1` once `logMaxBytes` is exceeded).
 

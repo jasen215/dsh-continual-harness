@@ -319,7 +319,7 @@ describe('HarnessStore', () => {
       edits: [{ action: 'update', kind: 'memory', id: 'long', reason: 'grow', content: 'y'.repeat(200) }],
     }, {})
     expect(grown.appliedEdits[0]!.applied).toBe(false)
-    expect(grown.appliedEdits[0]!.error).toBe('条目增长率超过 maxEntryGrowth上限')
+    expect(grown.appliedEdits[0]!.error).toBe('entry growth exceeds the maxEntryGrowth cap')
     expect(store.state(agent).entries.memory['long']!.content).toBe('x'.repeat(100))
 
     // protected layer: an automatic-path write of a protected global skill is rejected
@@ -348,7 +348,7 @@ describe('HarnessStore', () => {
       edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', reason: 'auto', content: 'tampered' }],
     }, { automatic: true, global: true })
     expect(automatic.appliedEdits[0]!.applied).toBe(false)
-    expect(automatic.appliedEdits[0]!.error).toBe('受保护条目仅显式用户会话可改')
+    expect(automatic.appliedEdits[0]!.error).toBe('protected entries are mutable only in explicit user sessions')
     expect(store.state(agent).entries.skill['pinned-skill']?.content).toBe('protected body')
   })
 

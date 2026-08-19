@@ -202,9 +202,9 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
       if (options.requireGlobalApproval && global) {
         try {
           await requireGlobalApproval(ctx, agent, exec.signal,
-            `目标：global store；planner 计划：${plan.summary}`)
+            `Target: global store; planner plan: ${plan.summary}`)
         } catch (error) {
-          return { refinement_id: 'none', scope: 'global' as const, summary: `global 写入未获批：${String(error)}`, applied: 0, failed: 0, edits: [] }
+          return { refinement_id: 'none', scope: 'global' as const, summary: `global write not approved: ${String(error)}`, applied: 0, failed: 0, edits: [] }
         }
       }
       const result = store.applyRefinement(agent, plan, { global })
