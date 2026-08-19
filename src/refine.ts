@@ -10,6 +10,7 @@ import type {
   BlastRadius,
   HarnessState,
   RefinementEdit,
+  RefinementKind,
   RefinementResult,
   RefinementProposal,
 } from './types.ts'
@@ -67,7 +68,20 @@ function stampAppliedEdit(
 export function applyRefinementProposal(
   state: HarnessState,
   proposal: RefinementProposal,
-  options: { id: string; rollbackOf?: string; scope: 'local' | 'global'; baselineState: HarnessState },
+  options: {
+    id: string
+    rollbackOf?: string
+    scope: 'local' | 'global'
+    baselineState: HarnessState
+    /** Entry growth fraction cap; 0 disables the check. */
+    maxEntryGrowth?: number
+    /** Kinds protected from the automatic path (plumbed; the per-edit rule keys off the entry's own protection). */
+    protectedKinds?: readonly RefinementKind[]
+    /** Global entries for the local-during-global read-only rule. */
+    globalEntries?: HarnessState['entries']
+    /** True when the commit rides the automatic path (gate), enabling protected-layer checks. */
+    automatic?: boolean
+  },
 ): { result: RefinementResult; state: HarnessState } {
   const now = new Date().toISOString()
   const appliedEdits: AppliedRefinementEdit[] = []
@@ -78,6 +92,19 @@ export function applyRefinementProposal(
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: invalid }))
       continue
     }
+    // Rule 1: during a local refinement the global store is read-only. An id
+    // present in the global store but absent from the local target state is an
+    // unshadowed global entry; the model must create a local shadow instead.
+    if (options.scope === 'local'
+        && (edit.action === 'update' || edit.action === 'delete')
+        && options.globalEntries?.[edit.kind]?.[edit.id] !== undefined
+        && state.entries[edit.kind]?.[edit.id] === undefined) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: 'global条目在 local精修期间只读，请创建 local遮蔽条目',
+      }))
+      continue
+    }
     const current = state.entries[edit.kind][edit.id]
     if (edit.action === 'create' && current !== undefined) {
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: 'entry already exists' }))
@@ -85,6 +112,30 @@ export function applyRefinementProposal(
     }
     if ((edit.action === 'update' || edit.action === 'delete') && current === undefined) {
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: 'entry not found' }))
+      continue
+    }
+    // Rule 2: protected entries are immutable on the automatic path; the tool
+    // (explicit user session) path may still edit them.
+    if (options.automatic === true
+        && (edit.action === 'update' || edit.action === 'delete')
+        && current!.protection !== undefined) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: '受保护条目仅显式用户会话可改',
+      }))
+      continue
+    }
+    // Rule 3: growth limit on update; empty old content skips the check.
+    const growthLimit = options.maxEntryGrowth ?? 0
+    if (edit.action === 'update'
+        && growthLimit > 0
+        && current!.content.length > 0
+        && edit.content !== undefined
+        && (edit.content.length - current!.content.length) / current!.content.length > growthLimit) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: '条目增长率超过 maxEntryGrowth上限',
+      }))
       continue
     }
     const baseline = options.baselineState.entries[edit.kind][edit.id]

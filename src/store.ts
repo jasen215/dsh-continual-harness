@@ -25,7 +25,7 @@ import {
   mergeRefinementHistory,
   saveHarnessState,
 } from './storage.ts'
-import type { HarnessState, RefinementProposal, RefinementResult } from './types.ts'
+import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
@@ -36,6 +36,8 @@ export interface CommitOptions {
   global?: boolean
   /** When set, the commit is recorded as the rollback of this refinement id. */
   rollbackOf?: string
+  /** Marks the commit as riding the automatic path (gate), enabling protected-layer checks. */
+  automatic?: boolean
 }
 
 /** Persistent harness store owned by the plugin. */
@@ -44,13 +46,24 @@ export class HarnessStore {
   readonly home: string
   /** Skills directory where effective skill entries materialize as SKILL.md. */
   readonly skillsDir: string
+  /** Per-commit entry growth fraction cap; 0 (default) disables the check. */
+  private readonly maxEntryGrowth: number | undefined
+  /** Kinds protected from the automatic path; plumbed for Config wiring. */
+  private readonly protectedKinds: readonly RefinementKind[] | undefined
 
   constructor(
     private readonly ctx: Context,
-    options: { harnessRoot?: string; skillsDir?: string } = {},
+    options: {
+      harnessRoot?: string
+      skillsDir?: string
+      maxEntryGrowth?: number
+      protectedKinds?: readonly RefinementKind[]
+    } = {},
   ) {
     this.home = options.harnessRoot ?? defaultHarnessHome()
     this.skillsDir = options.skillsDir ?? dshHomePath('skills')
+    this.maxEntryGrowth = options.maxEntryGrowth
+    this.protectedKinds = options.protectedKinds
   }
 
   /** The session-local state for an agent. */
@@ -98,6 +111,11 @@ export class HarnessStore {
       id: plan.id,
       scope: global ? 'global' : 'local',
       baselineState: baseline,
+      ...(this.maxEntryGrowth === undefined ? {} : { maxEntryGrowth: this.maxEntryGrowth }),
+      ...(this.protectedKinds === undefined ? {} : { protectedKinds: this.protectedKinds }),
+      // local commits see the global store read-only through the rule layer
+      ...(global ? {} : { globalEntries: this.globalState().entries }),
+      ...(options.automatic === undefined ? {} : { automatic: options.automatic }),
       ...(options.rollbackOf === undefined ? {} : { rollbackOf: options.rollbackOf }),
     })
     if (global) {
