@@ -51,11 +51,12 @@ interface FakeLlm {
   >
 }
 
-function makeLlm(replies: ReadonlyArray<Record<string, unknown>>): FakeLlm {
+function makeLlm(replies: ReadonlyArray<Record<string, unknown>>, delayMs = 0): FakeLlm {
   let calls = 0
   return {
     get callCount() { return calls },
     async *stream() {
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
       const reply = replies[Math.min(calls, replies.length - 1)]
       calls += 1
       yield { type: 'text-delta', text: JSON.stringify(reply) }
@@ -65,14 +66,27 @@ function makeLlm(replies: ReadonlyArray<Record<string, unknown>>): FakeLlm {
 }
 
 /** Llm stand-in that yields non-JSON prose, so parseAutoRefineReview throws. */
-function makeFailingLlm(): FakeLlm {
+function makeFailingLlm(delayMs = 0): FakeLlm {
+  let calls = 0
+  return {
+    get callCount() { return calls },
+    async *stream() {
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
+      calls += 1
+      yield { type: 'text-delta', text: 'the model replied with prose, not JSON' }
+      yield { type: 'finish', reason: { kind: 'success' } }
+    },
+  }
+}
+
+/** Llm stand-in that never replies; the gate hangs on the stream forever. */
+function makeHangingLlm(): FakeLlm {
   let calls = 0
   return {
     get callCount() { return calls },
     async *stream() {
       calls += 1
-      yield { type: 'text-delta', text: 'the model replied with prose, not JSON' }
-      yield { type: 'finish', reason: { kind: 'success' } }
+      await new Promise(() => {})
     },
   }
 }
@@ -340,7 +354,7 @@ describe('registerHarnessDriver', () => {
     expect(llm.callCount).toBe(2)
   })
 
-  it('records a failed gate verdict and keeps the turn counter so the gate re-triggers', async () => {
+  it('records a failed gate verdict and re-triggers once a later turn crosses the interval', async () => {
     ctx = new Context()
     const llm = makeFailingLlm()
     const agents = makeAgents()
@@ -368,7 +382,8 @@ describe('registerHarnessDriver', () => {
     expect(first[0]?.outcome).toBe('failed')
     expect(first[0]?.rationale).toContain('JSON')
 
-    // The failed gate did not reset turnCount: the next turn/end re-triggers it.
+    // The failed attempt settled as a terminal result, so the counter reset;
+    // with turnInterval 1 the next turn/end crosses the interval again.
     turnEnd(agent.session, 2)
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(llm.callCount).toBe(2)
@@ -437,5 +452,324 @@ describe('registerHarnessDriver', () => {
     // the audit failure was swallowed; the gate still planned and applied
     expect(llm.callCount).toBe(2)
     expect(store.state(agent).entries.memory['m1']?.content).toBe('learned')
+  })
+
+  it('schedules a single gate once the turn interval is reached, not on every turn', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'first interval' },
+      { id: 'auto_a', summary: 'a', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { approved: true, rationale: 'second interval' },
+      { id: 'auto_b', summary: 'b', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'more' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const store = testStore(tempHome())
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 2,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: false,
+    })
+    const agent = stubAgent('driver-11')
+    agents.register(agent)
+
+    // Two turns reach the interval: exactly one gate (review + plan).
+    turnEnd(agent.session, 1)
+    turnEnd(agent.session, 2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+
+    // Turn three does not start another gate; the next pair does.
+    turnEnd(agent.session, 3)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+    turnEnd(agent.session, 4)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(4)
+    expect(store.state(agent).entries.memory['m1']?.content).toBe('learned')
+    expect(store.state(agent).entries.memory['m2']?.content).toBe('more')
+  })
+
+  it('awaits an in-flight gate when the session is finalized', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+    ], 30)
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const store = testStore(tempHome())
+    const driver = registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: false,
+    })
+    const agent = stubAgent('driver-12')
+    agents.register(agent)
+
+    // The gate starts and is now in flight, awaiting the slow llm.
+    turnEnd(agent.session, 1)
+    // The final drain awaits the in-flight gate to completion.
+    await driver.finalize(String(agent.session.id))
+
+    expect(llm.callCount).toBe(2)
+    expect(store.state(agent).entries.memory['m1']?.content).toBe('learned')
+  })
+
+  it('makes zero LLM calls when the final drain has no pending work', async () => {
+    ctx = new Context()
+    const llm = makeLlm([{ approved: true, rationale: 'interval reached' }])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const store = testStore(tempHome())
+    const driver = registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 10,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: false,
+    })
+    const agent = stubAgent('driver-13')
+    agents.register(agent)
+
+    // One turn does not reach the interval, so no gate is due.
+    turnEnd(agent.session, 1)
+    await driver.finalize(String(agent.session.id))
+    // A session the driver never saw is also a no-op.
+    await driver.finalize('driver-unknown')
+    expect(llm.callCount).toBe(0)
+  })
+
+  it('is idempotent: repeated finalizer calls do not duplicate work and block late events', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+    ], 30)
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    const driver = registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-14')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    // The first finalizer call awaits the in-flight gate; the repeats no-op.
+    await driver.finalize(String(agent.session.id))
+    await driver.finalize(String(agent.session.id))
+    // A late event after the drain must not start new work.
+    turnEnd(agent.session, 2)
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    expect(llm.callCount).toBe(2)
+    expect(loadReviews(home)).toHaveLength(1)
+  })
+
+  it('resolves without throwing when the final drain times out on a hanging gate', async () => {
+    ctx = new Context()
+    const llm = makeHangingLlm()
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const store = testStore(tempHome())
+    const driver = registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: false,
+    })
+    const agent = stubAgent('driver-15')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    // The gate hangs on the llm; the drain bounds the wait and resolves.
+    await expect(driver.finalize(String(agent.session.id))).resolves.toBeUndefined()
+    await expect(driver.finalize(String(agent.session.id))).resolves.toBeUndefined()
+  })
+
+  it('resolves without throwing when the in-flight gate fails during the drain', async () => {
+    ctx = new Context()
+    const llm = makeFailingLlm(30)
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    const driver = registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-16')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await expect(driver.finalize(String(agent.session.id))).resolves.toBeUndefined()
+
+    // The failure was audited once; the drain did not re-run the gate.
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]?.outcome).toBe('failed')
+    expect(llm.callCount).toBe(1)
+  })
+
+  it('drains a due-but-unstarted gate (cooldown-blocked) at session disposal', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'first interval' },
+      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { approved: true, rationale: 'final drain' },
+      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    const driver = registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 60_000,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-17')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+    expect(loadReviews(home)).toHaveLength(1)
+
+    // The interval is reached again, but the cooldown blocks the gate: it
+    // stays pending, neither started nor lost.
+    turnEnd(agent.session, 2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+
+    // The final drain starts the due gate, bypassing the cooldown.
+    await driver.finalize(String(agent.session.id))
+    expect(llm.callCount).toBe(4)
+    expect(loadReviews(home)).toHaveLength(2)
+    expect(store.state(agent).entries.memory['m2']?.content).toBe('drained')
+  })
+
+  it('runs a cooldown-blocked due gate on a later turn once the cooldown elapses', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'first interval' },
+      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { approved: true, rationale: 'cooldown elapsed' },
+      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'recovered' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 50,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-17b')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+    expect(loadReviews(home)).toHaveLength(1)
+
+    // The next threshold is cooldown-blocked, so the gate parks as pending.
+    turnEnd(agent.session, 2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+
+    // Once the cooldown elapses, a later turn/end runs the parked gate again:
+    // the event path recovers it, the final drain is not the only trigger.
+    await new Promise(resolve => setTimeout(resolve, 60))
+    turnEnd(agent.session, 3)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(4)
+    expect(loadReviews(home)).toHaveLength(2)
+    expect(store.state(agent).entries.memory['m2']?.content).toBe('recovered')
+  })
+
+  it('drains pending work when the session is disposed through the event', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'first interval' },
+      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { approved: true, rationale: 'final drain' },
+      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 60_000,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-18')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+
+    // The next threshold is cooldown-blocked, so the gate stays pending.
+    turnEnd(agent.session, 2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+
+    // The drain is attached to the dsh-session `session/disposed` boundary.
+    ctx.emit('session/disposed', agent.session)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(llm.callCount).toBe(4)
+    expect(loadReviews(home)).toHaveLength(2)
+    expect(store.state(agent).entries.memory['m2']?.content).toBe('drained')
   })
 })

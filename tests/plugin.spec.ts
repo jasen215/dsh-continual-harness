@@ -255,6 +255,51 @@ describe('governance default mode', () => {
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.localState(agent).entries.memory['m1']?.content).toBe('learned')
   })
+
+  it('drains pending review work when a session is disposed', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makeLlm([
+      { approved: true, rationale: 'first interval' },
+      { id: 'auto_1', summary: 'auto one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { approved: true, rationale: 'final drain' },
+      { id: 'auto_2', summary: 'auto two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+    ]) as never)
+    await ctx.plugin(plugin, {
+      ...pluginConfig(home),
+      autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 60_000, compact: true },
+    })
+
+    const { agent } = stubAgent('drain-mount')
+    ctx.agents.register(agent)
+    const emitTurn = (seq: number) => ctx.emit('session/event', agent.session, {
+      type: 'turn/end',
+      seq,
+      time: Date.now(),
+      data: { turn: seq, reason: { kind: 'success' } },
+    })
+
+    emitTurn(1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(loadReviews(home)).toHaveLength(1)
+
+    // The second threshold is cooldown-blocked, so the gate stays pending.
+    emitTurn(2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(loadReviews(home)).toHaveLength(1)
+
+    // The plugin-mounted driver drains the pending gate at session disposal.
+    ctx.emit('session/disposed', agent.session)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(2)
+    expect(reviews[1]).toMatchObject({ outcome: 'approved', trigger: 'turn-interval' })
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.localState(agent).entries.memory['m2']?.content).toBe('drained')
+  })
 })
 
 describe('governance conservative mode', () => {
