@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +11,9 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as plugin from '../src/index.ts'
+import { loadReviews } from '../src/audit.ts'
 import { HARNESS_STATE_SOURCE } from '../src/domain.ts'
+import { PLUGIN_LOG_FILE_NAME } from '../src/logfile.ts'
 import { HarnessStore } from '../src/store.ts'
 
 const testToolSignal = new AbortController().signal
@@ -99,6 +101,20 @@ function makePlanLlm(plan: Record<string, unknown>) {
   }
 }
 
+/** Llm stand-in that yields one reply JSON per completion call, in order. */
+function makeLlm(replies: ReadonlyArray<Record<string, unknown>>) {
+  let calls = 0
+  return {
+    get callCount() { return calls },
+    async *stream() {
+      const reply = replies[Math.min(calls, replies.length - 1)]
+      calls += 1
+      yield { type: 'text-delta' as const, text: JSON.stringify(reply) }
+      yield { type: 'finish' as const, reason: { kind: 'success' as const } }
+    },
+  }
+}
+
 /** A valid global memory-create plan the fake llm returns. */
 const PLAN = {
   id: 'refine_appr',
@@ -142,8 +158,8 @@ describe('plugin registration', () => {
   })
 })
 
-describe('conservative global approval mode', () => {
-  it('default mode performs a global write without consulting the approval service', async () => {
+describe('governance default mode', () => {
+  it('performs a global write without consulting the approval service', async () => {
     const home = tempHome()
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
@@ -165,7 +181,51 @@ describe('conservative global approval mode', () => {
     expect(fresh.globalState().entries.memory['m1']?.content).toBe('learned')
   })
 
-  it('conservative mode blocks a global write the user rejects', async () => {
+  it('records a gate verdict to reviews.jsonl under the harness root when the turn interval is reached', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+    ]) as never)
+    // auditReviews defaults to true: the plugin-wired driver appends every gate
+    // verdict to <harnessRoot>/reviews.jsonl. cooldownMs is 1 because the
+    // plugin schema requires >= 1 (0 is rejected by schemastery).
+    await ctx.plugin(plugin, {
+      ...pluginConfig(home),
+      autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 1, compact: true },
+    })
+
+    // The gate looks the live agent up through the real agents service.
+    const { agent } = stubAgent('gate-mount')
+    ctx.agents.register(agent)
+
+    ctx.emit('session/event', agent.session, {
+      type: 'turn/end',
+      seq: 1,
+      time: Date.now(),
+      data: { turn: 1, reason: { kind: 'success' } },
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]).toMatchObject({
+      outcome: 'approved',
+      trigger: 'turn-interval',
+      sessionId: String(agent.session.id),
+    })
+    // the approved plan committed to the session-local store
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.localState(agent).entries.memory['m1']?.content).toBe('learned')
+  })
+})
+
+describe('governance conservative mode', () => {
+  it('blocks a global write the user rejects', async () => {
     const home = tempHome()
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
@@ -189,7 +249,7 @@ describe('conservative global approval mode', () => {
     expect(fresh.globalState().entries.memory['m1']).toBeUndefined()
   })
 
-  it('conservative mode allows a global write the user approves', async () => {
+  it('allows a global write the user approves', async () => {
     const home = tempHome()
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
@@ -209,6 +269,74 @@ describe('conservative global approval mode', () => {
 
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.globalState().entries.memory['m1']?.content).toBe('learned')
+  })
+})
+
+describe('governance config defaults', () => {
+  it('wires the default file log into the harness root with mode 0600', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    // logToFile defaults to true: the exporter attached during apply lazily
+    // materializes <harnessRoot>/continual-harness.log on the first harness log.
+    ctx.logger('harness').info('mount probe')
+
+    const file = join(home, PLUGIN_LOG_FILE_NAME)
+    expect(existsSync(file)).toBe(true)
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+
+  it('does not create the file log when logToFile is disabled', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, { ...pluginConfig(home), logToFile: false })
+
+    ctx.logger('harness').info('not persisted')
+
+    expect(existsSync(join(home, PLUGIN_LOG_FILE_NAME))).toBe(false)
+  })
+
+  it('enforces the default maxEntryGrowth cap on a global update through the tool', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+
+    // Seed a one-character global memory entry through the shared store file.
+    const seeder = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    seeder.applyRefinement(stubAgent('growth-seeder').agent, {
+      id: 'refine_seed_growth',
+      summary: 'seed a one-character memory',
+      edits: [{ action: 'create', kind: 'memory', id: 'seed', content: 'x' }],
+    }, { global: true })
+
+    // The plan carries a reason so validation passes and only the growth rule
+    // fires: 20 chars vs 1 is a 19x growth, far beyond the default 0.5 cap.
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_growth',
+      summary: 'grow the seeded entry',
+      edits: [{ action: 'update', kind: 'memory', id: 'seed', content: 'a'.repeat(20), reason: 'grow it' }],
+    }) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const result = await execute(ctx, 'harness_refine', {}, stubAgent('growth-executor').agent)
+    const json = resultJson(result)
+    expect(json.applied).toBe(0)
+    expect(json.failed).toBe(1)
+    const edit = (json.edits as Array<Record<string, unknown>>)[0]
+    expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'seed', applied: false })
+    expect(edit?.error).toBe('条目增长率超过 maxEntryGrowth上限')
+
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.globalState().entries.memory['seed']?.content).toBe('x')
   })
 })
 
