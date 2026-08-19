@@ -7,7 +7,7 @@ import {
 } from '../src/approval.ts'
 
 /** The exact service-missing error message from the controller ruling. */
-const SERVICE_MISSING = 'userQuestions 服务未加载；安装 dsh-user-questions 以启用保守审批模式'
+const SERVICE_MISSING = 'userQuestions service is not loaded; install dsh-user-questions to enable the conservative approval mode'
 
 function stubService(value?: string): QuestionService & { ask: ReturnType<typeof vi.fn> } {
   return { ask: vi.fn(async () => (value === undefined ? {} : { value })) }
@@ -66,12 +66,12 @@ describe('requireGlobalApproval', () => {
 
     expect(stub.ask).toHaveBeenCalledOnce()
     const payload = stub.ask.mock.calls[0]?.[0]
-    expect(payload?.prompt).toContain('批准写入跨会话全局 store？')
+    expect(payload?.prompt).toContain('Approve writing to the cross-session global store?')
     expect(payload?.prompt).toContain('approve this global write')
     expect(payload?.signal).toBe(signal)
     expect(payload?.options).toEqual([
-      { label: '批准', value: 'approve' },
-      { label: '拒绝', value: 'reject' },
+      { label: 'Approve', value: 'approve' },
+      { label: 'Reject', value: 'reject' },
     ])
   })
 })

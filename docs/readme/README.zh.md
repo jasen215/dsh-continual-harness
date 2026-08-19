@@ -130,13 +130,13 @@ pnpm dsh --profile <name> "…"
 
 所有写入路径——`harness_refine` 工具与自动 gate——都经由一个三层规则层把关，并以可逆性兜底：
 
-1. **影响面最小化** ——每次编辑在写入前都先按固定契约校验。`create` 可省略 `reason`；`update`/`delete` 必须携带一行 `reason`（缺失时以 `edit "<id>"缺 reason被拒绝，请补充 reason后重新提交` 拒绝该编辑）。可选 `blastRadius`（`general | project | session`）默认 `general`。`base_system_prompt` 不可变。`maxEntryGrowth`（默认 `0.5`）限制一次提交中条目可增长的比例（超限报 `条目增长率超过 maxEntryGrowth上限`；`0` 关闭该检查）。
-2. **合法性硬拒** ——受保护条目（带 `protection` 的条目）在自动路径上不可改（`受保护条目仅显式用户会话可改`）；`local` 精修期间全局 store 只读，触碰未遮蔽的全局条目必须先创建 local 遮蔽条目（`global条目在 local精修期间只读，请创建 local遮蔽条目`）。
+1. **影响面最小化** ——每次编辑在写入前都先按固定契约校验。`create` 可省略 `reason`；`update`/`delete` 必须携带一行 `reason`（缺失时以 `edit "<id>" rejected: missing reason` 拒绝该编辑）。可选 `blastRadius`（`general | project | session`）默认 `general`。`base_system_prompt` 不可变。`maxEntryGrowth`（默认 `0.5`）限制一次提交中条目可增长的比例（超限报 `entry growth exceeds the maxEntryGrowth cap`；`0` 关闭该检查）。
+2. **合法性硬拒** ——受保护条目（带 `protection` 的条目）在自动路径上不可改（`protected entries are mutable only in explicit user sessions`）；`local` 精修期间全局 store 只读，触碰未遮蔽的全局条目必须先创建 local 遮蔽条目（`global entries are read-only during a local refinement; create a local shadow first`）。
 3. **必要性软把关** ——任何自动精修前，评审 gate 都会判断「现在固化是否值得」；被否决的评审不会进入 store，且每个裁决都会落审计。
 
 **可逆性兜底**：每个已提交的精修都可按 id 回滚，回滚自带系统生成的 `rollback:<id>` reason。
 
-全局写入**默认零审批**：工具提交全局精修时不咨询任何审批服务。设置 `requireGlobalApproval: true` 进入保守模式：全局写入先经 `dsh-user-questions` 服务询问用户，用户拒绝则跳过（`global写入未获批：<error>`）。
+全局写入**默认零审批**：工具提交全局精修时不咨询任何审批服务。设置 `requireGlobalApproval: true` 进入保守模式：全局写入先经 `dsh-user-questions` 服务询问用户，用户拒绝则跳过（`global write not approved: <error>`）。
 
 gate 与插件会在 harness 根目录保留两份产物：每个 gate 裁决追加到 `reviews.jsonl`（结果 `approved | declined | assessed | failed`），`harness` / `continual-harness` logger 的日志行追加到 `continual-harness.log`（JSONL、`0600`，超过 `logMaxBytes` 轮转到 `.1`）。
 

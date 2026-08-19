@@ -47,7 +47,7 @@ export function attachFileLog(ctx: Context, options: FileLogOptions): void {
         if (!PLUGIN_LOG_NAMES.has(message.name)) return
         appendRecord(options, message)
       } catch {
-        /* 日志失败永不打断 agent 循环 */
+        /* a log failure must never break the agent loop */
       }
     },
   } satisfies Exporter)
@@ -65,7 +65,7 @@ function appendRecord(options: FileLogOptions, message: Message): void {
   const line = `${JSON.stringify(record)}\n`
   if (options.maxBytes > 0 && existsSync(options.file)
       && statSync(options.file).size + Buffer.byteLength(line) > options.maxBytes) {
-    try { renameSync(options.file, `${options.file}.1`) } catch { /* 轮转失败保留原文件 */ }
+    try { renameSync(options.file, `${options.file}.1`) } catch { /* keep the original file if rotation fails */ }
   }
   appendFileSync(options.file, line, { mode: 0o600 })
 }

@@ -52,7 +52,7 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
   if (edit.kind === 'skill' && !KEBAB_CASE_PATTERN.test(edit.id)) return 'skill ids must be kebab-case'
   if ((edit.action === 'update' || edit.action === 'delete')
       && (typeof edit.reason !== 'string' || edit.reason.trim() === '')) {
-    return `edit "${edit.id}"缺 reason被拒绝，请补充 reason后重新提交`
+    return `edit "${edit.id}" rejected: missing reason, please re-add it`
   }
   if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
     return `invalid blastRadius: ${edit.blastRadius}`
@@ -140,7 +140,7 @@ export function applyRefinementProposal(
         && state.entries[edit.kind]?.[edit.id] === undefined) {
       appliedEdits.push(stampAppliedEdit(edit, {
         applied: false,
-        error: 'global条目在 local精修期间只读，请创建 local遮蔽条目',
+        error: 'global entries are read-only during a local refinement; create a local shadow first',
       }))
       continue
     }
@@ -160,7 +160,7 @@ export function applyRefinementProposal(
         && current!.protection !== undefined) {
       appliedEdits.push(stampAppliedEdit(edit, {
         applied: false,
-        error: '受保护条目仅显式用户会话可改',
+        error: 'protected entries are mutable only in explicit user sessions',
       }))
       continue
     }
@@ -173,7 +173,7 @@ export function applyRefinementProposal(
         && (edit.content.length - current!.content.length) / current!.content.length > growthLimit) {
       appliedEdits.push(stampAppliedEdit(edit, {
         applied: false,
-        error: '条目增长率超过 maxEntryGrowth上限',
+        error: 'entry growth exceeds the maxEntryGrowth cap',
       }))
       continue
     }

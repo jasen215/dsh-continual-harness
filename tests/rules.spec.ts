@@ -14,7 +14,7 @@ describe('edit reason contract', () => {
   })
 
   it('rejects update/delete without reason with the exact message', () => {
-    const message = (id: string) => `edit "${id}"缺 reason被拒绝，请补充 reason后重新提交`
+    const message = (id: string) => `edit "${id}" rejected: missing reason, please re-add it`
     expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', content: 'x' }))
       .toBe(message('m'))
     expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm' }))
@@ -32,7 +32,7 @@ describe('edit reason contract', () => {
   })
 
   it('rejects a non-string reason without throwing', () => {
-    const message = (id: string) => `edit "${id}"缺 reason被拒绝，请补充 reason后重新提交`
+    const message = (id: string) => `edit "${id}" rejected: missing reason, please re-add it`
     // parseProposal does no field validation, so the model can emit a number
     expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', reason: 123, content: 'x' }))
       .toBe(message('m'))
@@ -221,7 +221,7 @@ describe('growth limit rule', () => {
     )
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(false)
-    expect(edit.error).toBe('条目增长率超过 maxEntryGrowth上限')
+    expect(edit.error).toBe('entry growth exceeds the maxEntryGrowth cap')
     expect(edit.blastRadius).toBe('general')
   })
 
@@ -286,7 +286,7 @@ describe('protected rule', () => {
     )
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(false)
-    expect(edit.error).toBe('受保护条目仅显式用户会话可改')
+    expect(edit.error).toBe('protected entries are mutable only in explicit user sessions')
     expect(edit.blastRadius).toBe('general')
   })
 
@@ -297,7 +297,7 @@ describe('protected rule', () => {
       true,
     )
     expect(result.appliedEdits[0]!.applied).toBe(false)
-    expect(result.appliedEdits[0]!.error).toBe('受保护条目仅显式用户会话可改')
+    expect(result.appliedEdits[0]!.error).toBe('protected entries are mutable only in explicit user sessions')
   })
 
   it('allows the tool path (automatic false) to edit a protected entry', () => {
@@ -374,7 +374,7 @@ describe('local-during-global rule', () => {
       content: 'x',
     })
     expect(result.appliedEdits[0]!.applied).toBe(false)
-    expect(result.appliedEdits[0]!.error).toBe('global条目在 local精修期间只读，请创建 local遮蔽条目')
+    expect(result.appliedEdits[0]!.error).toBe('global entries are read-only during a local refinement; create a local shadow first')
   })
 
   it('rejects delete of a global-only entry', () => {
@@ -385,7 +385,7 @@ describe('local-during-global rule', () => {
       reason: 'why',
     })
     expect(result.appliedEdits[0]!.applied).toBe(false)
-    expect(result.appliedEdits[0]!.error).toBe('global条目在 local精修期间只读，请创建 local遮蔽条目')
+    expect(result.appliedEdits[0]!.error).toBe('global entries are read-only during a local refinement; create a local shadow first')
   })
 
   it('allows create of a global-only id as the local shadow', () => {

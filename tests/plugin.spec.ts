@@ -319,7 +319,7 @@ describe('governance conservative mode', () => {
     const json = resultJson(result)
     expect(json.refinement_id).toBe('none')
     expect(json.scope).toBe('global')
-    expect(json.summary).toContain('未获批')
+    expect(json.summary).toContain('not approved')
     expect(json.applied).toBe(0)
     expect(stub.ask).toHaveBeenCalledOnce()
 
@@ -411,7 +411,7 @@ describe('governance config defaults', () => {
     expect(json.failed).toBe(1)
     const edit = (json.edits as Array<Record<string, unknown>>)[0]
     expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'seed', applied: false })
-    expect(edit?.error).toBe('条目增长率超过 maxEntryGrowth上限')
+    expect(edit?.error).toBe('entry growth exceeds the maxEntryGrowth cap')
 
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.globalState().entries.memory['seed']?.content).toBe('x')

@@ -53,10 +53,10 @@ export async function requireGlobalApproval(
   what: string,
 ): Promise<void> {
   const service = questionServiceOf(ctx)
-  if (!service) throw new Error('userQuestions 服务未加载；安装 dsh-user-questions 以启用保守审批模式')
+  if (!service) throw new Error('userQuestions service is not loaded; install dsh-user-questions to enable the conservative approval mode')
   const answer = await service.ask({
-    prompt: `批准写入跨会话全局 store？\n\n${what}`,
-    options: [{ label: '批准', value: 'approve' }, { label: '拒绝', value: 'reject' }],
+    prompt: `Approve writing to the cross-session global store?\n\n${what}`,
+    options: [{ label: 'Approve', value: 'approve' }, { label: 'Reject', value: 'reject' }],
     ...(signal === undefined ? {} : { signal }),
   })
   if (answer.value !== 'approve') throw new Error('rejected by the user')

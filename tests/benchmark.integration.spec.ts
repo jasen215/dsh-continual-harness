@@ -1,5 +1,5 @@
 /**
- * End-to-end benchmark workflow test (spec §7 "集成测试" + §8 acceptance):
+ * End-to-end benchmark workflow test (spec §7 "integration tests" + §8 acceptance):
  * mounts the REAL plugin via apply() — real store, real harness_benchmark
  * tool, real evaluator and scorer, real persistence — with only the LLM
  * faked, and drives the full
