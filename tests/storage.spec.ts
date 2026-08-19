@@ -83,6 +83,56 @@ describe('harness state storage', () => {
     expect(diagnostics.length).toBeGreaterThan(0)
   })
 
+  it('skips malformed buckets while migrating other kinds', () => {
+    const { state, diagnostics } = migrateHarnessState({
+      schemaVersion: 1,
+      entries: {
+        memory: 'junk',
+        prompt: { good: { id: 'good', kind: 'prompt', version: 1, content: 'ok', updatedAt: 't' } },
+        skill: [],
+        subagent: {},
+      },
+      refinements: [],
+    })
+    expect(state.entries.memory).toEqual({})
+    expect(state.entries.prompt['good']?.content).toBe('ok')
+    expect(state.entries.skill).toEqual({})
+    expect(diagnostics).toContain('skipping invalid memory bucket')
+    expect(diagnostics).toContain('skipping invalid skill bucket')
+  })
+
+  it('skips entries with unsupported kinds and reports diagnostics', () => {
+    const { state, diagnostics } = migrateHarnessState({
+      schemaVersion: 1,
+      entries: {
+        memory: {
+          bad: { id: 'bad', kind: 'bogus', version: 1, content: 'nope', updatedAt: 't' },
+        },
+        prompt: {}, skill: {}, subagent: {},
+      },
+      refinements: [],
+    })
+    expect(state.entries.memory['bad']).toBeUndefined()
+    expect(diagnostics).toContain('skipping invalid memory entry bad')
+  })
+
+  it('skips stale lifecycle metadata but preserves archived entries', () => {
+    const { state, diagnostics } = migrateHarnessState({
+      schemaVersion: 1,
+      entries: {
+        memory: {
+          stale: { id: 'stale', kind: 'memory', version: 1, content: 'nope', updatedAt: 't', metadata: { lifecycleState: 'stale' } },
+          archived: { id: 'archived', kind: 'memory', version: 1, content: 'ok', updatedAt: 't', metadata: { lifecycleState: 'archived' } },
+        },
+        prompt: {}, skill: {}, subagent: {},
+      },
+      refinements: [],
+    })
+    expect(state.entries.memory['stale']).toBeUndefined()
+    expect(state.entries.memory['archived']?.metadata?.lifecycleState).toBe('archived')
+    expect(diagnostics).toContain('skipping invalid memory entry stale')
+  })
+
   it('refuses a future schema version and keeps the file untouched', () => {
     const dir = getLocalHarnessStateDir(tempHome(), 'session-1')
     mkdirSync(dir, { recursive: true })

@@ -49,7 +49,12 @@ export function migrateHarnessState(parsed: unknown): { state: HarnessState; dia
   const entries = structuredClone(EMPTY_ENTRIES)
   const raw = (source.entries ?? {}) as Partial<HarnessState['entries']>
   for (const kind of Object.keys(entries) as Array<keyof HarnessState['entries']>) {
-    const bucket = (raw[kind] ?? {}) as Record<string, unknown>
+    const candidate = raw[kind]
+    if (candidate !== undefined && !isPlainObject(candidate)) {
+      diagnostics.push(`skipping invalid ${kind} bucket`)
+      continue
+    }
+    const bucket = (candidate ?? {}) as Record<string, unknown>
     for (const [id, value] of Object.entries(bucket)) {
       if (!isHarnessEntry(value)) {
         diagnostics.push(`skipping invalid ${kind} entry ${id}`)
@@ -187,13 +192,26 @@ export function storeDirExists(dir: string): boolean {
   return existsSync(dir)
 }
 
+/** Whether a value is a plain object suitable for an id-to-entry map or metadata. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
 /** Validate an entry record shape (used by the invariant companion). */
 export function isHarnessEntry(value: unknown): value is HarnessEntry {
-  if (typeof value !== 'object' || value === null) return false
+  if (!isPlainObject(value)) return false
   const entry = value as Record<string, unknown>
-  return typeof entry.id === 'string'
-    && typeof entry.kind === 'string'
-    && typeof entry.version === 'number'
-    && typeof entry.content === 'string'
-    && typeof entry.updatedAt === 'string'
+  if (typeof entry.id !== 'string'
+    || !['prompt', 'memory', 'skill', 'subagent'].includes(entry.kind as string)
+    || typeof entry.version !== 'number'
+    || typeof entry.content !== 'string'
+    || typeof entry.updatedAt !== 'string') return false
+  if (entry.metadata !== undefined) {
+    if (!isPlainObject(entry.metadata)) return false
+    const lifecycleState = entry.metadata.lifecycleState
+    if (lifecycleState !== undefined && lifecycleState !== 'active' && lifecycleState !== 'archived') return false
+  }
+  return true
 }
