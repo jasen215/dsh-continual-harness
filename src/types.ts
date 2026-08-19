@@ -1,5 +1,7 @@
 /** Shared types of the continual harness plugin. @module dsh-continual-harness */
 
+export type EntrySnapshot = HarnessEntry
+
 /** Which store a refinement targets. */
 export type HarnessScope = 'local' | 'global'
 
@@ -28,6 +30,19 @@ export interface HarnessEntry {
   updatedAt: string
   /** Governance protection; absent entries are unprotected. */
   protection?: Protection
+  /** Optional single-line title for listing/ranking. */
+  title?: string
+  /** Provenance and lifecycle metadata (v2). */
+  metadata?: {
+    /** Trajectory provenance: source session id. */
+    sourceSession?: string
+    /** MVP lifecycle state; archived entries are hidden from injection. */
+    lifecycleState?: 'active' | 'archived'
+    /** User lock; field only, no automatic GC in MVP. */
+    pinned?: boolean
+    /** Last time this entry entered a model-visible overview. */
+    lastInjectedAt?: string
+  }
 }
 
 /** Reusable prompt notes; `base_system_prompt` is immutable and never stored here. */
@@ -75,6 +90,10 @@ export interface RefinementEdit {
   /** Legacy fields, tolerated for state compatibility. */
   reference?: string
   arguments?: string
+  /** Internal lifecycle edit fields; not required in model JSON. */
+  archive?: boolean
+  pin?: boolean
+  title?: string
 }
 
 /** The model-produced refinement plan. */
@@ -101,6 +120,9 @@ export interface AppliedRefinementEdit {
   blastRadius: BlastRadius
   /** Set when validation or the baseline conflict check rejected the edit. */
   error?: string
+  beforeEntry?: HarnessEntry
+  afterEntry?: HarnessEntry
+  rollbackDegraded?: boolean
   applied: boolean
 }
 

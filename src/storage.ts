@@ -13,6 +13,7 @@ import {
   HARNESS_SCHEMA_VERSION,
   HARNESS_STATE_FILE_NAME,
   REFINEMENT_HISTORY_FILE_NAME,
+  USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
 import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
 
@@ -38,23 +39,38 @@ export function getGlobalHarnessStateDir(home: string): string {
   return home
 }
 
-/** Read one store file; a missing or corrupt file degrades to empty state. */
+/** Migrate a parsed state payload to the current schema version. */
+export function migrateHarnessState(parsed: unknown): { state: HarnessState; diagnostics: string[] } {
+  const diagnostics: string[] = []
+  const source = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as Partial<HarnessState>
+  if (typeof source.schemaVersion === 'number' && source.schemaVersion > HARNESS_SCHEMA_VERSION) {
+    throw new Error(`unsupported harness state schemaVersion ${source.schemaVersion}`)
+  }
+  const entries = structuredClone(EMPTY_ENTRIES)
+  const raw = (source.entries ?? {}) as Partial<HarnessState['entries']>
+  for (const kind of Object.keys(entries) as Array<keyof HarnessState['entries']>) {
+    const bucket = (raw[kind] ?? {}) as Record<string, unknown>
+    for (const [id, value] of Object.entries(bucket)) {
+      if (!isHarnessEntry(value)) {
+        diagnostics.push(`skipping invalid ${kind} entry ${id}`)
+        continue
+      }
+      entries[kind][id] = value as HarnessEntry
+    }
+  }
+  const refinements = Array.isArray(source.refinements)
+    ? (source.refinements as HarnessState['refinements'])
+    : []
+  return { state: { schemaVersion: HARNESS_SCHEMA_VERSION, entries, refinements }, diagnostics }
+}
+
+/** Read one store file: missing → empty; corrupt/future → empty and never overwritten; old version → migrate. */
 export function loadHarnessState(dir: string): HarnessState {
   const file = join(dir, HARNESS_STATE_FILE_NAME)
   if (!existsSync(file)) return emptyHarnessState()
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<HarnessState>
-    if (parsed.schemaVersion !== HARNESS_SCHEMA_VERSION) return emptyHarnessState()
-    return {
-      schemaVersion: HARNESS_SCHEMA_VERSION,
-      entries: {
-        prompt: parsed.entries?.prompt ?? {},
-        memory: parsed.entries?.memory ?? {},
-        skill: parsed.entries?.skill ?? {},
-        subagent: parsed.entries?.subagent ?? {},
-      },
-      refinements: Array.isArray(parsed.refinements) ? parsed.refinements : [],
-    }
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    return migrateHarnessState(parsed).state
   } catch {
     return emptyHarnessState()
   }
@@ -129,6 +145,31 @@ export function mergeRefinementHistory(local: RefinementResult[], global: Refine
     merged.push(result)
   }
   return merged
+}
+
+/** Append one injection telemetry event line under the harness home. */
+export function appendUsageEvent(home: string, event: { key: string; at: string }): void {
+  mkdirSync(home, { recursive: true })
+  appendFileSync(join(home, USAGE_EVENTS_FILE_NAME), `${JSON.stringify(event)}\n`, 'utf8')
+}
+
+/** Read the injection telemetry log; missing file → empty, bad lines skipped. */
+export function loadUsageEvents(home: string): Array<{ key: string; at: string }> {
+  const file = join(home, USAGE_EVENTS_FILE_NAME)
+  if (!existsSync(file)) return []
+  const events: Array<{ key: string; at: string }> = []
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const event = JSON.parse(line) as { key?: unknown; at?: unknown }
+      if (typeof event.key === 'string' && typeof event.at === 'string') {
+        events.push({ key: event.key, at: event.at })
+      }
+    } catch {
+      // skip the corrupt line
+    }
+  }
+  return events
 }
 
 /** Resolve the default harness home under the dsh home directory. */
