@@ -85,6 +85,56 @@ describe('applyRefinementProposal', () => {
     expect(updated.entries.memory['m']?.content).toBe('y')
   })
 
+  it('honors edit metadata precedence and sourceSession edge cases', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 'precedence-create', summary: 'create historical',
+      edits: [{
+        action: 'create', kind: 'memory', id: 'historical', content: 'x',
+        metadata: { sourceSession: 'historical' },
+      }],
+    }, {
+      id: 'precedence-create', scope: 'local', baselineState: state, sourceSession: 'current',
+    })
+    expect(created.entries.memory['historical']?.metadata?.sourceSession).toBe('historical')
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 'precedence-update', summary: 'update historical',
+      edits: [{
+        action: 'update', kind: 'memory', id: 'historical', reason: 'restore', content: 'y',
+        metadata: { sourceSession: 'historical-update' },
+      }],
+    }, {
+      id: 'precedence-update', scope: 'local', baselineState: created, sourceSession: 'current',
+    })
+    expect(updated.entries.memory['historical']?.metadata?.sourceSession).toBe('historical-update')
+
+    const archiveState = freshState()
+    archiveState.entries.memory['m'] = {
+      id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't',
+      metadata: { sourceSession: 'original' },
+    }
+    const { state: archived } = applyRefinementProposal(archiveState, {
+      id: 'archive', summary: 'archive',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: true }],
+    }, { id: 'archive', scope: 'local', baselineState: archiveState, sourceSession: 'current' })
+    expect(archived.entries.memory['m']?.metadata?.sourceSession).toBe('original')
+
+    const noMetadataState = freshState()
+    noMetadataState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
+    const { state: noMetadataUpdated } = applyRefinementProposal(noMetadataState, {
+      id: 'old-entry', summary: 'update old entry',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'annotate', content: 'new' }],
+    }, { id: 'old-entry', scope: 'local', baselineState: noMetadataState, sourceSession: 'current' })
+    expect(noMetadataUpdated.entries.memory['m']?.metadata).toEqual({ sourceSession: 'current' })
+
+    const { state: noSource } = applyRefinementProposal(freshState(), {
+      id: 'no-source', summary: 'create without metadata',
+      edits: [{ action: 'create', kind: 'memory', id: 'm', content: 'x' }],
+    }, { id: 'no-source', scope: 'local', baselineState: freshState() })
+    expect(noSource.entries.memory['m']).not.toHaveProperty('metadata')
+  })
+
   it('rejects edits whose baseline entry changed during planning', () => {
     const baseline = freshState()
     baseline.entries.memory['pin-versions'] = { id: 'pin-versions', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
