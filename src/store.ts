@@ -10,6 +10,8 @@ import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { buildSnapshot } from './benchmark.ts'
+import type { HarnessSnapshot } from './benchmark.ts'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, rollbackProposal } from './refine.ts'
 import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
@@ -95,6 +97,17 @@ export class HarnessStore {
   /** The merged view the model sees: local shadows same-id global entries. */
   state(agent: Agent): HarnessState {
     return mergeHarnessStates(this.globalState(), this.localState(agent))
+  }
+
+  /**
+   * Capture a read-only snapshot of the merged local/global state without
+   * persisting anything: no files are written, no entries are mutated or
+   * stamped, and no injection or usage tracking is triggered. The returned
+   * snapshot's `state` is a structured-clone copy; persist it with
+   * `captureReferenceSnapshot`.
+   */
+  captureSnapshot(agent: Agent, snapshotId: string, refinementId?: string): HarnessSnapshot {
+    return buildSnapshot(this.state(agent), snapshotId, refinementId)
   }
 
   /** Merged refinement history: session events first, then global history. */

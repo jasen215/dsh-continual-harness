@@ -13,3 +13,6 @@ docs/superpowers/
 
 # Subagent-driven development workspace (never commit)
 .superpowers/
+
+# Git worktrees (never commit)
+.worktrees/

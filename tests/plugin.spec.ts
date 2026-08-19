@@ -255,6 +255,51 @@ describe('governance default mode', () => {
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.localState(agent).entries.memory['m1']?.content).toBe('learned')
   })
+
+  it('drains pending review work when a session is disposed', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makeLlm([
+      { approved: true, rationale: 'first interval' },
+      { id: 'auto_1', summary: 'auto one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { approved: true, rationale: 'final drain' },
+      { id: 'auto_2', summary: 'auto two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+    ]) as never)
+    await ctx.plugin(plugin, {
+      ...pluginConfig(home),
+      autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 60_000, compact: true },
+    })
+
+    const { agent } = stubAgent('drain-mount')
+    ctx.agents.register(agent)
+    const emitTurn = (seq: number) => ctx.emit('session/event', agent.session, {
+      type: 'turn/end',
+      seq,
+      time: Date.now(),
+      data: { turn: seq, reason: { kind: 'success' } },
+    })
+
+    emitTurn(1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(loadReviews(home)).toHaveLength(1)
+
+    // The second threshold is cooldown-blocked, so the gate stays pending.
+    emitTurn(2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(loadReviews(home)).toHaveLength(1)
+
+    // The plugin-mounted driver drains the pending gate at session disposal.
+    ctx.emit('session/disposed', agent.session)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(2)
+    expect(reviews[1]).toMatchObject({ outcome: 'approved', trigger: 'turn-interval' })
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.localState(agent).entries.memory['m2']?.content).toBe('drained')
+  })
 })
 
 describe('governance conservative mode', () => {
@@ -370,6 +415,47 @@ describe('governance config defaults', () => {
 
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.globalState().entries.memory['seed']?.content).toBe('x')
+  })
+})
+
+describe('benchmark tool registration', () => {
+  it('registers the harness_benchmark tool by default and skips it when disabled', async () => {
+    const on = new Context()
+    await on.plugin(SystemPrompt)
+    await on.plugin(AgentRegistry)
+    await on.plugin(ToolRuntime)
+    await on.plugin(plugin, pluginConfig(tempHome()))
+    expect(on.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
+
+    const off = new Context()
+    await off.plugin(SystemPrompt)
+    await off.plugin(AgentRegistry)
+    await off.plugin(ToolRuntime)
+    await off.plugin(plugin, { ...pluginConfig(tempHome()), benchmark: { enabled: false } })
+    expect(off.tools.get('harness_benchmark')).toBeUndefined()
+  })
+
+  it('accepts explicit benchmark config and still registers the tool', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, {
+      ...pluginConfig(tempHome()),
+      benchmark: { enabled: true, defaultRuns: 2, maxRuns: 5, passThreshold: 70, regressionTolerance: 5, maxFailedCells: 1 },
+    })
+    expect(ctx.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
+  })
+
+  it('keeps the existing tools registered when the benchmark tool is on', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, pluginConfig(tempHome()))
+    expect(ctx.tools.get('harness_refine')?.name).toBe('harness_refine')
+    expect(ctx.tools.get('harness_wrapup')?.name).toBe('harness_wrapup')
+    expect(ctx.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
   })
 })
 

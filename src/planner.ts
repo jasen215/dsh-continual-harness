@@ -51,7 +51,8 @@ Negative assertions about tools or features and environment-dependent failures a
 Respond with ONLY a JSON object:
 {"approved":true|false,"rationale":"one sentence"}`
 
-function extractJsonObject(text: string): string {
+/** Extract the first `{...}` span from model text, tolerating prose and code fences. */
+export function extractJsonObject(text: string): string {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start < 0 || end <= start) throw new Error(TRUNCATED_JSON_ERROR)

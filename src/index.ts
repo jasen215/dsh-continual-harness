@@ -20,7 +20,7 @@ import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { HarnessStore } from './store.ts'
-import { registerHarnessTool, registerHarnessWrapup } from './tool.ts'
+import { registerBenchmarkTool, registerHarnessTool, registerHarnessWrapup } from './tool.ts'
 import type { RefinementKind } from './types.ts'
 
 export const name = 'continual-harness'
@@ -36,6 +36,22 @@ export interface AutoRefineConfig {
   cooldownMs: number
   /** Whether a compaction also triggers a gate pass. */
   compact: boolean
+}
+
+/** Explicit benchmark tool configuration (spec §5). */
+export interface BenchmarkConfig {
+  /** Whether the `harness_benchmark` tool is registered. */
+  enabled: boolean
+  /** Iterations per case per side when a run omits `runs`. */
+  defaultRuns: number
+  /** Upper bound for `runs`; a larger explicit value is refused. */
+  maxRuns: number
+  /** Report-only pass line in 0..100; never gates acceptance (§4.5). */
+  passThreshold: number
+  /** How far the candidate may fall below the reference before regressing. */
+  regressionTolerance: number
+  /** Maximum failed candidate cells a run may still accept. */
+  maxFailedCells: number
 }
 
 /** Continual harness plugin configuration. */
@@ -68,6 +84,8 @@ export interface Config {
   wrapupEnabled: boolean
   /** Audit automatic review verdicts into the session log. */
   auditReviews: boolean
+  /** Explicit benchmark tool settings (spec §5). */
+  benchmark?: BenchmarkConfig
   /** Persist harness logs to a file. */
   logToFile: boolean
   /** Cap on the harness log file size in bytes. */
@@ -76,6 +94,32 @@ export interface Config {
   maxEntryGrowth: number
   /** Kinds the automatic path may not modify. */
   protectedKinds: RefinementKind[]
+}
+
+/** Benchmark configuration (spec §5) with its MVP defaults. */
+export interface BenchmarkConfig {
+  /** Whether the benchmark tool is registered at all. */
+  enabled: boolean
+  /** Iterations when the tool call omits `runs`. */
+  defaultRuns: number
+  /** Hard cap on iterations per run. */
+  maxRuns: number
+  /** Report-only pass line; never gates ACCEPTED (spec §4.5). */
+  passThreshold: number
+  /** Allowed downward drift of candidate vs reference before regression. */
+  regressionTolerance: number
+  /** Candidate failed cells above this count reject the run. */
+  maxFailedCells: number
+}
+
+/** Benchmark config defaults (spec §5); shared by the schema and the apply fallback. */
+export const DEFAULT_BENCHMARK_CONFIG: BenchmarkConfig = {
+  enabled: true,
+  defaultRuns: 1,
+  maxRuns: 3,
+  passThreshold: 60,
+  regressionTolerance: 0,
+  maxFailedCells: 0,
 }
 
 /** Schemastery configuration for the continual harness plugin. */
@@ -95,6 +139,14 @@ export const Config: z<Config> = z.object({
   maxInjectedEntriesPerKind: z.number().step(1).min(1).default(6),
   wrapupEnabled: z.boolean().default(true),
   auditReviews: z.boolean().default(true),
+  benchmark: z.object({
+    enabled: z.boolean().default(DEFAULT_BENCHMARK_CONFIG.enabled),
+    defaultRuns: z.number().step(1).min(1).default(DEFAULT_BENCHMARK_CONFIG.defaultRuns),
+    maxRuns: z.number().step(1).min(1).default(DEFAULT_BENCHMARK_CONFIG.maxRuns),
+    passThreshold: z.number().min(0).max(100).default(DEFAULT_BENCHMARK_CONFIG.passThreshold),
+    regressionTolerance: z.number().min(0).default(DEFAULT_BENCHMARK_CONFIG.regressionTolerance),
+    maxFailedCells: z.number().step(1).min(0).default(DEFAULT_BENCHMARK_CONFIG.maxFailedCells),
+  }).default(DEFAULT_BENCHMARK_CONFIG),
   logToFile: z.boolean().default(true),
   logMaxBytes: z.number().step(1).min(1).default(5 * 1024 * 1024),
   maxEntryGrowth: z.number().min(0).default(0.5),
@@ -124,6 +176,16 @@ export function apply(ctx: Context, config: Config): void {
   })
   if (config.wrapupEnabled) {
     registerHarnessWrapup(ctx, store)
+  }
+  const benchmark = config.benchmark ?? DEFAULT_BENCHMARK_CONFIG
+  if (benchmark.enabled) {
+    registerBenchmarkTool(ctx, store, {
+      defaultRuns: benchmark.defaultRuns,
+      maxRuns: benchmark.maxRuns,
+      passThreshold: benchmark.passThreshold,
+      regressionTolerance: benchmark.regressionTolerance,
+      maxFailedCells: benchmark.maxFailedCells,
+    })
   }
   registerHarnessProjection(ctx, store)
   const autoRefine = config.autoRefine ?? { enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }
