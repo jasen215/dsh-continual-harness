@@ -1,15 +1,25 @@
 /**
  * Benchmark domain contracts: fixed cases, reference/candidate snapshots, and
- * the pure lifecycle functions that construct and validate them. This module
- * carries no file I/O and no store wiring — persistence lands with the store
- * task. The snapshot constructor is deliberately named `buildSnapshot` (a pure
- * structured-clone capture) so the persisting `HarnessStore.captureSnapshot`
- * method of the later store task does not collide with it.
+ * the pure lifecycle functions that construct and validate them — plus atomic
+ * persistence for the `<harnessRoot>/benchmark/` store (cases, snapshots, run
+ * records). The snapshot constructor is deliberately named `buildSnapshot` (a
+ * pure structured-clone capture) so the persisting `HarnessStore.captureSnapshot`
+ * method does not collide with it; `captureReferenceSnapshot` and
+ * `loadReferenceSnapshot` are the file-level persist/load helpers.
  * @module dsh-continual-harness
  */
 
 import { createHash } from 'node:crypto'
-import { REFINEMENT_KINDS } from './domain.ts'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import {
+  BENCHMARK_CASES_FILE_NAME,
+  BENCHMARK_CASES_SCHEMA_VERSION,
+  BENCHMARK_DIR_NAME,
+  BENCHMARK_RUNS_FILE_NAME,
+  BENCHMARK_SNAPSHOTS_DIR_NAME,
+  REFINEMENT_KINDS,
+} from './domain.ts'
 import type { HarnessState } from './types.ts'
 
 /** A fixed benchmark case. Only `draft` cases may change; `frozen` cases are immutable. */
@@ -253,6 +263,105 @@ export function validateCellScore(cell: CellScore): CellScoreValidationResult {
   return { ok: true }
 }
 
+/**
+ * Load the fixed benchmark cases from `<home>/benchmark/cases.json`. A missing
+ * store reads as an empty list; malformed JSON, an unknown schema version, an
+ * invalid case shape, or a frozen case whose material no longer matches its
+ * recorded hash all fail loudly (never silent acceptance, never a repair write).
+ */
+export function loadBenchmark(home: string): BenchmarkCase[] {
+  const file = benchmarkCasesFile(home)
+  if (!existsSync(file)) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    throw new Error(`malformed benchmark cases file ${file}: ${String(error)}`)
+  }
+  if (!isBenchmarkCasesEnvelope(parsed)) {
+    throw new Error(`unsupported benchmark cases schema in ${file}`)
+  }
+  const envelope = parsed as BenchmarkCasesEnvelope
+  if (envelope.schemaVersion > BENCHMARK_CASES_SCHEMA_VERSION) {
+    throw new Error(`unsupported benchmark cases schemaVersion ${envelope.schemaVersion}`)
+  }
+  for (const benchmarkCase of envelope.cases) {
+    if (benchmarkCase.state === 'frozen') {
+      const recorded = envelope.caseHashes[benchmarkCase.id]
+      if (recorded === undefined || recorded !== hashBenchmarkCase(benchmarkCase)) {
+        throw new Error(`frozen benchmark case hash mismatch: ${benchmarkCase.id}`)
+      }
+    }
+  }
+  return envelope.cases
+}
+
+/**
+ * Atomically persist the fixed benchmark cases to `<home>/benchmark/cases.json`
+ * (sibling `.tmp` + rename), recording the material hash of every frozen case
+ * so a later load can detect tampering. Drafts are never hashed.
+ */
+export function saveBenchmarkCases(home: string, cases: BenchmarkCase[]): void {
+  const caseHashes: Record<string, string> = {}
+  for (const benchmarkCase of cases) {
+    if (benchmarkCase.state === 'frozen') caseHashes[benchmarkCase.id] = hashBenchmarkCase(benchmarkCase)
+  }
+  const envelope: BenchmarkCasesEnvelope = {
+    schemaVersion: BENCHMARK_CASES_SCHEMA_VERSION,
+    cases,
+    caseHashes,
+  }
+  atomicWriteJson(benchmarkCasesFile(home), envelope)
+}
+
+/**
+ * Append one benchmark run record as a JSON line to `<home>/benchmark/runs.jsonl`.
+ * Only the benchmark run log is touched — the audit gate's `reviews.jsonl` is
+ * never rewritten. The concrete record shape (cells + decision) is defined
+ * when evaluation and aggregation land.
+ */
+export function appendBenchmarkRun(home: string, record: Record<string, unknown>): void {
+  const file = benchmarkRunsFile(home)
+  mkdirSync(dirname(file), { recursive: true })
+  appendFileSync(file, `${JSON.stringify(record)}\n`, 'utf8')
+}
+
+/**
+ * Persist a reference snapshot read-only to `<home>/benchmark/snapshots/<snapshotId>.json`
+ * via an atomic tmp + rename write. The snapshot id must be a safe file name;
+ * the snapshot object itself is written as-is (its `stateHash` is validated
+ * on load, not re-stamped here).
+ */
+export function captureReferenceSnapshot(home: string, snapshot: HarnessSnapshot): void {
+  assertSafeSnapshotId(snapshot.snapshotId)
+  atomicWriteJson(benchmarkSnapshotFile(home, snapshot.snapshotId), snapshot)
+}
+
+/**
+ * Load a previously captured snapshot. A missing snapshot returns `undefined`;
+ * malformed JSON or a stored `state` whose canonical projection hash no longer
+ * matches the recorded `stateHash` fails loudly.
+ */
+export function loadReferenceSnapshot(home: string, snapshotId: string): HarnessSnapshot | undefined {
+  assertSafeSnapshotId(snapshotId)
+  const file = benchmarkSnapshotFile(home, snapshotId)
+  if (!existsSync(file)) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch (error) {
+    throw new Error(`malformed benchmark snapshot file ${file}: ${String(error)}`)
+  }
+  if (!isHarnessSnapshot(parsed)) {
+    throw new Error(`unsupported benchmark snapshot shape in ${file}`)
+  }
+  const snapshot = parsed as HarnessSnapshot
+  if (snapshot.stateHash !== sha256(canonicalJson(snapshot.state))) {
+    throw new Error(`benchmark snapshot stateHash mismatch: ${snapshotId}`)
+  }
+  return snapshot
+}
+
 /** Entry keys whose canonical projection differs between two states. */
 function entryDiffKeys(a: HarnessState, b: HarnessState): Set<string> {
   const keys = new Set<string>()
@@ -281,4 +390,76 @@ function canonicalJson(value: unknown): string {
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
+}
+
+/** On-disk envelope of the benchmark cases file. */
+interface BenchmarkCasesEnvelope {
+  schemaVersion: number
+  cases: BenchmarkCase[]
+  /** Material hash of every frozen case, keyed by case id; drafts carry none. */
+  caseHashes: Record<string, string>
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isBenchmarkCase(value: unknown): value is BenchmarkCase {
+  if (!isPlainObject(value)) return false
+  const candidate = value as Record<string, unknown>
+  return typeof candidate.id === 'string'
+    && typeof candidate.title === 'string'
+    && typeof candidate.statement === 'string'
+    && typeof candidate.rubric === 'string'
+    && (candidate.state === 'draft' || candidate.state === 'frozen')
+    && typeof candidate.createdAt === 'string'
+    && (candidate.frozenAt === undefined || typeof candidate.frozenAt === 'string')
+    && (candidate.capability === undefined || typeof candidate.capability === 'string')
+}
+
+function isBenchmarkCasesEnvelope(value: unknown): value is BenchmarkCasesEnvelope {
+  if (!isPlainObject(value)) return false
+  const envelope = value as Record<string, unknown>
+  return typeof envelope.schemaVersion === 'number'
+    && Array.isArray(envelope.cases)
+    && envelope.cases.every(isBenchmarkCase)
+    && isPlainObject(envelope.caseHashes)
+    && Object.values(envelope.caseHashes).every(hash => typeof hash === 'string')
+}
+
+function isHarnessSnapshot(value: unknown): value is HarnessSnapshot {
+  if (!isPlainObject(value)) return false
+  const snapshot = value as Record<string, unknown>
+  return typeof snapshot.snapshotId === 'string'
+    && isPlainObject(snapshot.state)
+    && typeof snapshot.stateHash === 'string'
+    && typeof snapshot.capturedAt === 'string'
+    && (snapshot.refinementId === undefined || typeof snapshot.refinementId === 'string')
+}
+
+function benchmarkCasesFile(home: string): string {
+  return join(home, BENCHMARK_DIR_NAME, BENCHMARK_CASES_FILE_NAME)
+}
+
+function benchmarkRunsFile(home: string): string {
+  return join(home, BENCHMARK_DIR_NAME, BENCHMARK_RUNS_FILE_NAME)
+}
+
+function benchmarkSnapshotFile(home: string, snapshotId: string): string {
+  return join(home, BENCHMARK_DIR_NAME, BENCHMARK_SNAPSHOTS_DIR_NAME, `${snapshotId}.json`)
+}
+
+/** Atomic JSON write: sibling `.tmp` file, then rename, mirroring storage.ts. */
+function atomicWriteJson(file: string, value: unknown): void {
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.tmp`
+  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
+  renameSync(tmp, file)
+}
+
+/** A snapshot id becomes a file name; reject anything that could escape the snapshots dir. */
+function assertSafeSnapshotId(snapshotId: string): void {
+  if (snapshotId.trim() === '' || snapshotId.includes('/') || snapshotId.includes('\\') || snapshotId === '.' || snapshotId === '..') {
+    throw new Error(`unsafe benchmark snapshot id: ${snapshotId}`)
+  }
 }

@@ -31,6 +31,8 @@ export const BENCHMARK_CASES_FILE_NAME = 'cases.json'
 export const BENCHMARK_RUNS_FILE_NAME = 'runs.jsonl'
 /** Read-only serialized reference/candidate snapshot directory name. */
 export const BENCHMARK_SNAPSHOTS_DIR_NAME = 'snapshots'
+/** Monotonic schema version of the benchmark cases file. */
+export const BENCHMARK_CASES_SCHEMA_VERSION = 1
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {

@@ -8,7 +8,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { HarnessStore, serializeTrajectory } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { getGlobalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
+import { getGlobalHarnessStateDir, getLocalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
 import type { RefinementProposal } from '../src/types.ts'
 
 const tempDirs: string[] = []
@@ -350,6 +350,77 @@ describe('HarnessStore', () => {
     expect(automatic.appliedEdits[0]!.applied).toBe(false)
     expect(automatic.appliedEdits[0]!.error).toBe('受保护条目仅显式用户会话可改')
     expect(store.state(agent).entries.skill['pinned-skill']?.content).toBe('protected body')
+  })
+
+  describe('captureSnapshot', () => {
+    /** Seed one memory entry into the given store dir. */
+    function seedMemory(dir: string, id: string, content: string): void {
+      saveHarnessState(dir, {
+        schemaVersion: HARNESS_SCHEMA_VERSION,
+        entries: {
+          prompt: {},
+          memory: { [id]: { id, kind: 'memory', version: 1, content, updatedAt: '2026-08-19T00:00:00.000Z' } },
+          skill: {},
+          subagent: {},
+        },
+        refinements: [],
+      })
+    }
+
+    it('captures merged local and global entries', () => {
+      const home = tempHome()
+      const store = testStore(new Context(), home)
+      const { agent } = stubAgent('snap-agent')
+      seedMemory(getGlobalHarnessStateDir(home), 'global-fact', 'global value')
+      seedMemory(getLocalHarnessStateDir(home, String(agent.session.id)), 'local-fact', 'local value')
+
+      const snapshot = store.captureSnapshot(agent, 'ref-1')
+      expect(snapshot.snapshotId).toBe('ref-1')
+      expect(snapshot.stateHash).toMatch(/^[a-f0-9]{64}$/)
+      expect(snapshot.capturedAt).toEqual(expect.any(String))
+      expect(snapshot.state.entries.memory['global-fact']?.content).toBe('global value')
+      expect(snapshot.state.entries.memory['local-fact']?.content).toBe('local value')
+    })
+
+    it('later store writes do not mutate the captured object', () => {
+      const ctx = new Context()
+      const home = tempHome()
+      const store = testStore(ctx, home)
+      const { agent } = stubAgent('snap-agent')
+      store.applyRefinement(agent, {
+        id: 'seed',
+        summary: 'seed',
+        edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'original' }],
+      }, {})
+      const captured = store.captureSnapshot(agent, 'ref-1')
+      expect(captured.state.entries.memory['fact']?.content).toBe('original')
+
+      // mutate the live store afterwards
+      store.applyRefinement(agent, {
+        id: 'grow',
+        summary: 'grow',
+        edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'grow', content: 'changed' }],
+      }, {})
+      expect(store.state(agent).entries.memory['fact']?.content).toBe('changed')
+      expect(captured.state.entries.memory['fact']?.content).toBe('original')
+    })
+
+    it('capture has no side effects: no files, no usage events, no state mutation', () => {
+      const home = tempHome()
+      const store = testStore(new Context(), home)
+      const { agent } = stubAgent('snap-agent')
+
+      const before = store.state(agent)
+      const snapshot = store.captureSnapshot(agent, 'ref-1')
+
+      // no files written by the capture itself
+      expect(existsSync(join(home, 'benchmark'))).toBe(false)
+      expect(existsSync(join(home, 'usage.events.jsonl'))).toBe(false)
+      // no state mutation: the merged view is unchanged
+      expect(store.state(agent)).toEqual(before)
+      // and the captured object is a detached structured clone
+      expect(snapshot.state.entries.memory).toEqual({})
+    })
   })
 })
 

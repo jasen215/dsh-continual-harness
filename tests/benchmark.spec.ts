@@ -1,12 +1,21 @@
-import { describe, expect, it } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
+  appendBenchmarkRun,
   buildSnapshot,
+  captureReferenceSnapshot,
   createBenchmarkCase,
   freezeBenchmarkCase,
   hashBenchmarkCase,
+  loadBenchmark,
+  loadReferenceSnapshot,
+  saveBenchmarkCases,
   validateCandidateDelta,
   validateCellScore,
 } from '../src/benchmark.ts'
+import type { BenchmarkCase, BenchmarkDecision, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import type { CellScore, HarnessEntry, HarnessState, RefinementResult } from '../src/types.ts'
 
@@ -226,5 +235,150 @@ describe('validateCellScore', () => {
 
   it('rejects an ok cell without a score', () => {
     expect(validateCellScore(cellWith(null, 'ok'))).toEqual({ ok: false, reason: 'ok-cell-score-required' })
+  })
+})
+
+const tempDirs: string[] = []
+
+function tempHome(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-benchmark-'))
+  tempDirs.push(dir)
+  return dir
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+function frozenCase(id = 'case-1'): BenchmarkCase {
+  return freezeBenchmarkCase(createBenchmarkCase({ id, title: 'Task', statement: 'Do X', rubric: 'X is correct' }))
+}
+
+function runRecord(runId: string): Record<string, unknown> {
+  const decision: BenchmarkDecision = {
+    runId,
+    refinementId: 'refine-1',
+    status: 'ACCEPTED',
+    referenceOverall: 80,
+    candidateOverall: 90,
+    regressionCases: [],
+    failedCells: 0,
+    feedback: ['improved'],
+    autoRollback: false,
+    createdAt: '2026-08-19T00:00:02.000Z',
+  }
+  return { runId, cells: [], decision, createdAt: '2026-08-19T00:00:02.000Z' }
+}
+
+describe('benchmark persistence', () => {
+  it('loads an empty case list when the benchmark directory is missing', () => {
+    const home = tempHome()
+    expect(loadBenchmark(home)).toEqual([])
+    expect(existsSync(join(home, 'benchmark'))).toBe(false)
+  })
+
+  it('round-trips draft and frozen cases through save and load', () => {
+    const home = tempHome()
+    const draft = createBenchmarkCase({ id: 'draft-1', title: 'Draft', statement: 'Do Y', rubric: 'Y is correct' })
+    const frozen = frozenCase('frozen-1')
+    saveBenchmarkCases(home, [draft, frozen])
+    const loaded = loadBenchmark(home)
+    expect(loaded).toEqual([draft, frozen])
+    expect(loaded[1]!.state).toBe('frozen')
+    expect(loaded[1]!.frozenAt).toEqual(expect.any(String))
+    expect(hashBenchmarkCase(loaded[1]!)).toBe(hashBenchmarkCase(frozen))
+  })
+
+  it('replaces the cases file atomically on a second save', () => {
+    const home = tempHome()
+    const first = frozenCase('case-1')
+    const second = frozenCase('case-2')
+    saveBenchmarkCases(home, [first])
+    saveBenchmarkCases(home, [first, second])
+    expect(loadBenchmark(home)).toEqual([first, second])
+    expect(existsSync(join(home, 'benchmark', 'cases.json.tmp'))).toBe(false)
+    const raw = JSON.parse(readFileSync(join(home, 'benchmark', 'cases.json'), 'utf8')) as { cases: unknown[] }
+    expect(raw.cases).toHaveLength(2)
+  })
+
+  it('rejects malformed cases.json without overwriting the existing valid file', () => {
+    const home = tempHome()
+    const frozen = frozenCase()
+    saveBenchmarkCases(home, [frozen])
+    writeFileSync(join(home, 'benchmark', 'cases.json'), '{ not json', 'utf8')
+    expect(() => loadBenchmark(home)).toThrow()
+    // the malformed file is left untouched: a failed load never repairs it
+    expect(readFileSync(join(home, 'benchmark', 'cases.json'), 'utf8')).toBe('{ not json')
+  })
+
+  it('rejects an unsupported cases schema version', () => {
+    const home = tempHome()
+    mkdirSync(join(home, 'benchmark'), { recursive: true })
+    writeFileSync(join(home, 'benchmark', 'cases.json'), JSON.stringify({ schemaVersion: 99, cases: [] }), 'utf8')
+    expect(() => loadBenchmark(home)).toThrow(/schema/i)
+  })
+
+  it('fails loudly when a frozen case hash does not match its stored material', () => {
+    const home = tempHome()
+    const frozen = frozenCase()
+    saveBenchmarkCases(home, [frozen])
+    // tamper with the frozen material behind the stored hash's back
+    const file = join(home, 'benchmark', 'cases.json')
+    const stored = JSON.parse(readFileSync(file, 'utf8')) as { cases: Array<{ id: string; statement: string }> }
+    stored.cases[0]!.statement = 'tampered'
+    writeFileSync(file, JSON.stringify(stored), 'utf8')
+    expect(() => loadBenchmark(home)).toThrow(/hash/i)
+  })
+
+  it('appends run records to runs.jsonl and never touches reviews.jsonl', () => {
+    const home = tempHome()
+    const reviews = join(home, 'reviews.jsonl')
+    writeFileSync(reviews, '{"existing":"verdict"}\n', 'utf8')
+    appendBenchmarkRun(home, runRecord('run-1'))
+    appendBenchmarkRun(home, runRecord('run-2'))
+    const lines = readFileSync(join(home, 'benchmark', 'runs.jsonl'), 'utf8').trim().split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines.map(line => JSON.parse(line).runId)).toEqual(['run-1', 'run-2'])
+    // the audit gate's file keeps its schema and content untouched
+    expect(readFileSync(reviews, 'utf8')).toBe('{"existing":"verdict"}\n')
+  })
+
+  it('captures and loads a reference snapshot round trip', () => {
+    const home = tempHome()
+    const snapshot = buildSnapshot(baseState(), 'ref-1')
+    captureReferenceSnapshot(home, snapshot)
+    expect(existsSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'))).toBe(true)
+    expect(existsSync(join(home, 'benchmark', 'snapshots', 'ref-1.json.tmp'))).toBe(false)
+    expect(loadReferenceSnapshot(home, 'ref-1')).toEqual(snapshot)
+  })
+
+  it('returns undefined for a missing snapshot', () => {
+    expect(loadReferenceSnapshot(tempHome(), 'missing')).toBeUndefined()
+  })
+
+  it('rejects malformed snapshot JSON', () => {
+    const home = tempHome()
+    mkdirSync(join(home, 'benchmark', 'snapshots'), { recursive: true })
+    writeFileSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'), '{ nope', 'utf8')
+    expect(() => loadReferenceSnapshot(home, 'ref-1')).toThrow()
+  })
+
+  it('fails loudly when a stored snapshot stateHash does not match its state', () => {
+    const home = tempHome()
+    const snapshot = buildSnapshot(baseState(), 'ref-1')
+    captureReferenceSnapshot(home, snapshot)
+    // rewrite the snapshot file with a drifted state but the old stateHash
+    const tampered: HarnessSnapshot = {
+      ...snapshot,
+      state: { ...snapshot.state, entries: { ...snapshot.state.entries, memory: { mem: { id: 'mem', kind: 'memory', version: 1, content: 'drift', updatedAt: '2026-08-19T00:00:00.000Z' } } } },
+    }
+    writeFileSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'), JSON.stringify(tampered), 'utf8')
+    expect(() => loadReferenceSnapshot(home, 'ref-1')).toThrow(/hash/i)
+  })
+
+  it('refuses to persist a snapshot id that is not a safe file name', () => {
+    const home = tempHome()
+    const snapshot = buildSnapshot(baseState(), '../escape')
+    expect(() => captureReferenceSnapshot(home, snapshot)).toThrow()
   })
 })
