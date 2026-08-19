@@ -122,5 +122,6 @@ export function apply(ctx: Context, config: Config): void {
     compact: autoRefine.compact,
     plannerMaxTokens: config.plannerMaxTokens,
     maxTrajectoryChars: config.maxTrajectoryChars,
+    auditReviews: config.auditReviews,
   })
 }
