@@ -69,6 +69,21 @@ describe('applyRefinementProposal', () => {
     expect(result.appliedEdits.find(edit => edit.id === 'missing')?.error).toBe('entry not found')
   })
 
+  it('persists titles on create and explicit update', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 'title-create', summary: 'title',
+      edits: [{ action: 'create', kind: 'memory', id: 'titled', content: 'x', title: 'Original title' }],
+    }, { id: 'title-create', scope: 'local', baselineState: state })
+    expect(created.entries.memory['titled']?.title).toBe('Original title')
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 'title-update', summary: 'rename',
+      edits: [{ action: 'update', kind: 'memory', id: 'titled', reason: 'clarify', content: 'y', title: 'Updated title' }],
+    }, { id: 'title-update', scope: 'local', baselineState: created })
+    expect(updated.entries.memory['titled']?.title).toBe('Updated title')
+  })
+
   it('stamps sourceSession on create and preserves it on update', () => {
     const state = freshState()
     const { state: created } = applyRefinementProposal(state, {
@@ -219,6 +234,22 @@ describe('full entry snapshots and rollback', () => {
     expect(rollback.edits[0]).toHaveProperty('rollbackDegraded', true)
   })
 
+  it('detects a baseline mismatch on skill persisted fields', () => {
+    const baseline = freshState()
+    baseline.entries.skill['skill'] = {
+      id: 'skill', kind: 'skill', version: 1, content: 'same', updatedAt: 't',
+      description: 'old description', reference: 'old reference', arguments: 'old arguments',
+    }
+    const state = structuredClone(baseline)
+    state.entries.skill['skill'] = { ...baseline.entries.skill['skill']!, reference: 'new reference' }
+    const { result } = applyRefinementProposal(state, {
+      id: 'r-skill-fields', summary: 'update',
+      edits: [{ action: 'update', kind: 'skill', id: 'skill', reason: 'why', content: 'same' }],
+    }, { id: 'r-skill-fields', scope: 'local', baselineState: baseline })
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toBe('entry changed during refinement planning')
+  })
+
   it('detects a baseline mismatch on metadata change, not just content', () => {
     const baseline = freshState()
     baseline.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'same', updatedAt: 't' }
@@ -234,6 +265,20 @@ describe('full entry snapshots and rollback', () => {
 })
 
 describe('rollbackProposal', () => {
+  it('persists rollbackDegraded on the applied rollback record', () => {
+    const state = freshState()
+    state.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'new', updatedAt: 't' }
+    const legacy: RefinementResult = {
+      id: 'legacy-r', summary: 'legacy', scope: 'local', committedAt: 't',
+      appliedEdits: [{ action: 'update', kind: 'memory', id: 'm', before: 'old', after: 'new', blastRadius: 'general', applied: true }],
+    }
+    const rollback = rollbackProposal(legacy)
+    const { result } = applyRefinementProposal(state, rollback, {
+      id: rollback.id, rollbackOf: legacy.id, scope: 'local', baselineState: state,
+    })
+    expect(result.appliedEdits[0]).toMatchObject({ applied: true, rollbackDegraded: true })
+  })
+
   it('reverses applied edits in reverse order', () => {
     const state = freshState()
     const proposal: RefinementProposal = {

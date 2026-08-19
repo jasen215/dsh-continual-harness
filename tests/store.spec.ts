@@ -171,6 +171,39 @@ describe('HarnessStore', () => {
     expect(store.localState(agent).entries.memory['lesson']?.content).toBe('durable')
   })
 
+  it('promotes every persisted local field without changing local state', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-full')
+    store.applyRefinement(agent, {
+      id: 'rp-full', summary: 'local skill',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'complete-skill', content: 'body', title: 'Title',
+        description: 'Description', reference: 'Reference', arguments: '{"mode":"fast"}',
+        metadata: { sourceSession: 'original', lifecycleState: 'archived', pinned: true, lastInjectedAt: 'when' },
+      }],
+    }, {})
+    const localBefore = structuredClone(store.localState(agent).entries.skill['complete-skill'])
+    expect(store.promoteEntry(agent, 'complete-skill').applied).toBe(true)
+    const promoted = store.globalState().entries.skill['complete-skill']
+    expect(promoted).toMatchObject({
+      content: 'body', title: 'Title', description: 'Description', reference: 'Reference', arguments: '{"mode":"fast"}',
+      metadata: { sourceSession: 'original', lifecycleState: 'archived', pinned: true, lastInjectedAt: 'when' },
+    })
+    expect(promoted?.updatedAt).toEqual(expect.any(String))
+    expect(store.localState(agent).entries.skill['complete-skill']).toEqual(localBefore)
+  })
+
+  it('reports an unknown local id without changing either store', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-missing')
+    expect(store.promoteEntry(agent, 'missing')).toEqual({ applied: false, error: 'local entry not found: missing' })
+    expect(store.globalState().entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} })
+  })
+
   it('promote conflicts when the global id already exists and leaves everything unchanged', () => {
     const ctx = new Context()
     const home = tempHome()

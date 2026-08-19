@@ -201,7 +201,10 @@ export class HarnessStore {
         action: 'create', kind: hit.kind, id,
         content: entry.content,
         ...(entry.title === undefined ? {} : { title: entry.title }),
-        ...(hit.kind === 'skill' && (entry as SkillEntry).description !== undefined ? { description: (entry as SkillEntry).description } : {}),
+        ...(hit.kind === 'skill' && (entry as SkillEntry).description === undefined ? {} : { description: (entry as SkillEntry).description }),
+        ...(hit.kind === 'skill' && (entry as SkillEntry).reference === undefined ? {} : { reference: (entry as SkillEntry).reference }),
+        ...(hit.kind === 'skill' && (entry as SkillEntry).arguments === undefined ? {} : { arguments: (entry as SkillEntry).arguments }),
+        ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
         reason: 'promote from session wrap-up',
       }],
     }, { global: true })

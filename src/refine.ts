@@ -10,6 +10,7 @@ import type {
   BlastRadius,
   HarnessEntry,
   HarnessState,
+  SkillEntry,
   RefinementEdit,
   RefinementKind,
   RefinementResult,
@@ -34,6 +35,9 @@ export function entryFingerprint(entry: HarnessEntry): string {
     version: entry.version,
     content: entry.content,
     title: entry.title,
+    description: entry.kind === 'skill' ? (entry as SkillEntry).description : undefined,
+    reference: entry.kind === 'skill' ? (entry as SkillEntry).reference : undefined,
+    arguments: entry.kind === 'skill' ? (entry as SkillEntry).arguments : undefined,
     metadata: entry.metadata,
     protection: entry.protection,
   })
@@ -88,6 +92,7 @@ function stampAppliedEdit(
     id: edit.id,
     blastRadius,
     ...(edit.reason === undefined ? {} : { reason: edit.reason }),
+    ...(edit.rollbackDegraded === undefined ? {} : { rollbackDegraded: edit.rollbackDegraded }),
     ...fields,
   }
 }
@@ -251,6 +256,7 @@ export function applyRefinementProposal(
             kind: edit.kind,
             version: 1,
             content,
+            ...(edit.title === undefined ? {} : { title: edit.title }),
             ...(edit.description === undefined ? {} : { description: edit.description }),
             ...(edit.reference === undefined ? {} : { reference: edit.reference }),
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
@@ -262,6 +268,7 @@ export function applyRefinementProposal(
             kind: edit.kind,
             version: 1,
             content,
+            ...(edit.title === undefined ? {} : { title: edit.title }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
@@ -279,6 +286,7 @@ export function applyRefinementProposal(
       ...currentEntry,
       version: currentEntry.version + 1,
       content,
+      ...(edit.title === undefined ? {} : { title: edit.title }),
       ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
       updatedAt: now,
     }
