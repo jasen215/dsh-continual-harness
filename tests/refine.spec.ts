@@ -106,7 +106,33 @@ describe('full entry snapshots and rollback', () => {
     const rollback = rollbackProposal(result)
     expect(rollback.edits[0]).toMatchObject({
       action: 'update', kind: 'memory', id: 'm', content: 'old', title: 'old title',
+      metadata: { sourceSession: 's1', lifecycleState: 'active' },
     })
+    const { state: reverted } = applyRefinementProposal(next, rollback, {
+      id: rollback.id, rollbackOf: result.id, scope: 'local', baselineState: next,
+    })
+    expect(reverted.entries.memory['m']?.metadata).toEqual({ sourceSession: 's1', lifecycleState: 'active' })
+  })
+
+  it('restores metadata when rolling back a delete', () => {
+    const state = freshState()
+    state.entries.memory['m'] = {
+      id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't',
+      metadata: { sourceSession: 's2', lifecycleState: 'archived', pinned: true },
+    }
+    const { result, state: next } = applyRefinementProposal(state, {
+      id: 'r-delete', summary: 'delete',
+      edits: [{ action: 'delete', kind: 'memory', id: 'm', reason: 'remove' }],
+    }, { id: 'r-delete', scope: 'local', baselineState: state })
+    const rollback = rollbackProposal(result)
+    expect(rollback.edits[0]).toMatchObject({
+      action: 'create', id: 'm', content: 'old',
+      metadata: { sourceSession: 's2', lifecycleState: 'archived', pinned: true },
+    })
+    const { state: reverted } = applyRefinementProposal(next, rollback, {
+      id: rollback.id, rollbackOf: result.id, scope: 'local', baselineState: next,
+    })
+    expect(reverted.entries.memory['m']?.metadata).toEqual({ sourceSession: 's2', lifecycleState: 'archived', pinned: true })
   })
 
   it('flags rollbackDegraded when the source edit lacks full snapshots', () => {

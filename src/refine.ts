@@ -197,6 +197,7 @@ export function applyRefinementProposal(
             ...(edit.description === undefined ? {} : { description: edit.description }),
             ...(edit.reference === undefined ? {} : { reference: edit.reference }),
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
+            ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
             updatedAt: now,
           }
         : {
@@ -204,6 +205,7 @@ export function applyRefinementProposal(
             kind: edit.kind,
             version: 1,
             content,
+            ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
             updatedAt: now,
           }
       next.entries[edit.kind][edit.id] = entry
@@ -215,6 +217,7 @@ export function applyRefinementProposal(
       ...currentEntry,
       version: currentEntry.version + 1,
       content,
+      ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
       updatedAt: now,
     }
     next.entries[edit.kind][edit.id] = nextEntry
@@ -254,6 +257,7 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
       edits.push({
         action: 'create', kind: edit.kind, id: edit.id,
         ...(before.title === undefined ? {} : { title: before.title }),
+        ...(before.metadata === undefined ? {} : { metadata: before.metadata }),
         content: before.content,
         reason,
         ...(edit.beforeEntry === undefined ? { rollbackDegraded: true } : {}),
@@ -262,6 +266,7 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
       edits.push({
         action: 'update', kind: edit.kind, id: edit.id,
         ...(edit.beforeEntry.title === undefined ? {} : { title: edit.beforeEntry.title }),
+        ...(edit.beforeEntry.metadata === undefined ? {} : { metadata: edit.beforeEntry.metadata }),
         content: edit.beforeEntry.content,
         reason,
       })
