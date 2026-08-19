@@ -120,6 +120,14 @@ describe('applyRefinementProposal', () => {
     }, { id: 'archive', scope: 'local', baselineState: archiveState, sourceSession: 'current' })
     expect(archived.entries.memory['m']?.metadata?.sourceSession).toBe('original')
 
+    const pinState = freshState()
+    pinState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
+    const { state: pinned } = applyRefinementProposal(pinState, {
+      id: 'pin', summary: 'pin',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', pin: true }],
+    }, { id: 'pin', scope: 'local', baselineState: pinState, sourceSession: 'current' })
+    expect(pinned.entries.memory['m']?.metadata?.sourceSession).toBeUndefined()
+
     const noMetadataState = freshState()
     noMetadataState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
     const { state: noMetadataUpdated } = applyRefinementProposal(noMetadataState, {
