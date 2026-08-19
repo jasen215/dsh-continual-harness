@@ -113,6 +113,8 @@ export function applyRefinementProposal(
     globalEntries?: HarnessState['entries']
     /** True when the commit rides the automatic path (gate), enabling protected-layer checks. */
     automatic?: boolean
+    /** Session provenance stamped on create/content-update edits. */
+    sourceSession?: string
   },
 ): { result: RefinementResult; state: HarnessState } {
   const now = new Date().toISOString()
@@ -238,6 +240,11 @@ export function applyRefinementProposal(
       continue
     }
     if (edit.action === 'create') {
+      const finalSourceSession = edit.metadata?.sourceSession ?? options.sourceSession
+      const metadata = {
+        ...(edit.metadata ?? {}),
+        ...(finalSourceSession === undefined ? {} : { sourceSession: finalSourceSession }),
+      }
       const entry = edit.kind === 'skill'
         ? {
             id: edit.id,
@@ -247,7 +254,7 @@ export function applyRefinementProposal(
             ...(edit.description === undefined ? {} : { description: edit.description }),
             ...(edit.reference === undefined ? {} : { reference: edit.reference }),
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
-            ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
+            ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
         : {
@@ -255,18 +262,24 @@ export function applyRefinementProposal(
             kind: edit.kind,
             version: 1,
             content,
-            ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
+            ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
       next.entries[edit.kind][edit.id] = entry
       appliedEdits.push(stampAppliedEdit(edit, { after: content, afterEntry: structuredClone(entry), applied: true }))
       continue
     }
+    const finalSourceSession = edit.metadata?.sourceSession ?? options.sourceSession
+    const metadata = {
+      ...(currentEntry.metadata ?? {}),
+      ...(edit.metadata ?? {}),
+      ...(finalSourceSession === undefined ? {} : { sourceSession: finalSourceSession }),
+    }
     const nextEntry = {
       ...currentEntry,
       version: currentEntry.version + 1,
       content,
-      ...(edit.metadata === undefined ? {} : { metadata: edit.metadata }),
+      ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
       updatedAt: now,
     }
     next.entries[edit.kind][edit.id] = nextEntry

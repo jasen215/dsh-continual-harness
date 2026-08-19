@@ -69,6 +69,22 @@ describe('applyRefinementProposal', () => {
     expect(result.appliedEdits.find(edit => edit.id === 'missing')?.error).toBe('entry not found')
   })
 
+  it('stamps sourceSession on create and preserves it on update', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 's1', summary: 'create',
+      edits: [{ action: 'create', kind: 'memory', id: 'm', content: 'x' }],
+    }, { id: 's1', scope: 'local', baselineState: state, sourceSession: 'session-9' })
+    expect(created.entries.memory['m']?.metadata?.sourceSession).toBe('session-9')
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 's2', summary: 'update',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'y' }],
+    }, { id: 's2', scope: 'local', baselineState: created, sourceSession: 'session-9' })
+    expect(updated.entries.memory['m']?.metadata?.sourceSession).toBe('session-9')
+    expect(updated.entries.memory['m']?.content).toBe('y')
+  })
+
   it('rejects edits whose baseline entry changed during planning', () => {
     const baseline = freshState()
     baseline.entries.memory['pin-versions'] = { id: 'pin-versions', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }

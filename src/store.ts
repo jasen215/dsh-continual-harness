@@ -169,6 +169,7 @@ export class HarnessStore {
       ...(global ? {} : { globalEntries: this.globalState().entries }),
       ...(options.automatic === undefined ? {} : { automatic: options.automatic }),
       ...(options.rollbackOf === undefined ? {} : { rollbackOf: options.rollbackOf }),
+      sourceSession: String(agent.session.id),
     })
     if (global) {
       saveHarnessState(getGlobalHarnessStateDir(this.home), state)
