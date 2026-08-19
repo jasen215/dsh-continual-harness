@@ -373,6 +373,47 @@ describe('governance config defaults', () => {
   })
 })
 
+describe('benchmark tool registration', () => {
+  it('registers the harness_benchmark tool by default and skips it when disabled', async () => {
+    const on = new Context()
+    await on.plugin(SystemPrompt)
+    await on.plugin(AgentRegistry)
+    await on.plugin(ToolRuntime)
+    await on.plugin(plugin, pluginConfig(tempHome()))
+    expect(on.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
+
+    const off = new Context()
+    await off.plugin(SystemPrompt)
+    await off.plugin(AgentRegistry)
+    await off.plugin(ToolRuntime)
+    await off.plugin(plugin, { ...pluginConfig(tempHome()), benchmark: { enabled: false } })
+    expect(off.tools.get('harness_benchmark')).toBeUndefined()
+  })
+
+  it('accepts explicit benchmark config and still registers the tool', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, {
+      ...pluginConfig(tempHome()),
+      benchmark: { enabled: true, defaultRuns: 2, maxRuns: 5, passThreshold: 70, regressionTolerance: 5, maxFailedCells: 1 },
+    })
+    expect(ctx.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
+  })
+
+  it('keeps the existing tools registered when the benchmark tool is on', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, pluginConfig(tempHome()))
+    expect(ctx.tools.get('harness_refine')?.name).toBe('harness_refine')
+    expect(ctx.tools.get('harness_wrapup')?.name).toBe('harness_wrapup')
+    expect(ctx.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
+  })
+})
+
 describe('harness-state projection', () => {
   it('injects the overview when the digest changes and skips when it does not', async () => {
     const home = tempHome()
