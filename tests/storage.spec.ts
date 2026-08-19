@@ -28,6 +28,12 @@ afterEach(() => {
 })
 
 describe('harness state storage', () => {
+  it('keeps global and local stores directly under the harness home', () => {
+    const home = tempHome()
+    expect(getGlobalHarnessStateDir(home)).toBe(home)
+    expect(getLocalHarnessStateDir(home, 'session-1')).toBe(join(home, 'sessions', 'session-1'))
+  })
+
   it('round-trips state through save and load', () => {
     const home = tempHome()
     const dir = getLocalHarnessStateDir(home, 'session-1')

@@ -28,14 +28,14 @@ export function emptyHarnessState(): HarnessState {
   return { schemaVersion: HARNESS_SCHEMA_VERSION, entries: structuredClone(EMPTY_ENTRIES), refinements: [] }
 }
 
-/** Directory of the session-local store. */
+/** Directory of the session-local store under the plugin-owned harness home. */
 export function getLocalHarnessStateDir(home: string, sessionKey: string): string {
-  return join(home, 'sessions', sessionKey, HARNESS_DIR_NAME)
+  return join(home, 'sessions', sessionKey)
 }
 
-/** Directory of the cross-session global store. */
+/** Directory of the cross-session global store: the plugin-owned harness home itself. */
 export function getGlobalHarnessStateDir(home: string): string {
-  return join(home, HARNESS_DIR_NAME)
+  return home
 }
 
 /** Read one store file; a missing or corrupt file degrades to empty state. */

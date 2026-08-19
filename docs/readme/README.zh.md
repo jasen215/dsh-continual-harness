@@ -42,10 +42,13 @@ tests/           7 个 spec，46 个用例（storage / refine / planner / store 
 ### 数据布局
 
 ```
-<harnessRoot>/                      默认 dsh 数据目录下 harness/（可通过 Config.harnessRoot 覆盖）
-  harness_state.json                全局共享状态（跨会话）
-  refinements.jsonl                 全局精修历史（追加式）
-  sessions/<sessionKey>/harness/
+<harnessRoot>/                      ESP 共享经验根目录，默认 ~/.dsh/harness/
+  harness_state.json                全局共享状态（ESP）
+  refinements.jsonl                 全局精修历史（追加式，ESP）
+  reviews.jsonl                     跨批次 gate/审计历史（ESP 扩展）
+  continual-harness.log             continual-harness 实现日志（JSONL、0600）
+  continual-harness.log.1           continual-harness 日志轮转文件
+  sessions/<sessionKey>/
     harness_state.json              会话本地状态（遮蔽同 id 全局条目）
     refinements.jsonl               会话精修历史
 ```
