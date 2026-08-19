@@ -20,7 +20,7 @@ import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { HarnessStore } from './store.ts'
-import { registerHarnessTool } from './tool.ts'
+import { registerHarnessTool, registerHarnessWrapup } from './tool.ts'
 import type { RefinementKind } from './types.ts'
 
 export const name = 'continual-harness'
@@ -62,6 +62,8 @@ export interface Config {
   autoRefine?: AutoRefineConfig
   /** Require explicit human approval before a global refinement commits. */
   requireGlobalApproval: boolean
+  /** Register the harness_wrapup tool. */
+  wrapupEnabled?: boolean
   /** Audit automatic review verdicts into the session log. */
   auditReviews: boolean
   /** Persist harness logs to a file. */
@@ -88,6 +90,7 @@ export const Config: z<Config> = z.object({
     compact: z.boolean().default(true),
   }).default({ enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }),
   requireGlobalApproval: z.boolean().default(false),
+  wrapupEnabled: z.boolean().default(true),
   auditReviews: z.boolean().default(true),
   logToFile: z.boolean().default(true),
   logMaxBytes: z.number().step(1).min(1).default(5 * 1024 * 1024),
@@ -115,6 +118,9 @@ export function apply(ctx: Context, config: Config): void {
     plannerMaxTokens: config.plannerMaxTokens,
     requireGlobalApproval: config.requireGlobalApproval,
   })
+  if (config.wrapupEnabled) {
+    registerHarnessWrapup(ctx, store)
+  }
   registerHarnessProjection(ctx, store)
   const autoRefine = config.autoRefine ?? { enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }
   registerHarnessDriver(ctx, store, {

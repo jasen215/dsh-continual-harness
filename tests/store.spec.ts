@@ -157,6 +157,39 @@ describe('HarnessStore', () => {
     expect(store.render(agent).overview).toContain('global-note')
   })
 
+  it('promotes a local entry to global by copy, leaving local unchanged', () => {
+    const ctx = new Context()
+    const store = testStore(ctx, tempHome())
+    const { agent } = stubAgent('promote-1')
+    store.applyRefinement(agent, {
+      id: 'rp1', summary: 'local seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'lesson', content: 'durable' }],
+    }, {})
+    const out = store.promoteEntry(agent, 'lesson')
+    expect(out.applied).toBe(true)
+    expect(store.globalState().entries.memory['lesson']?.content).toBe('durable')
+    expect(store.localState(agent).entries.memory['lesson']?.content).toBe('durable')
+  })
+
+  it('promote conflicts when the global id already exists and leaves everything unchanged', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('promote-2')
+    store.applyRefinement(agent, {
+      id: 'rp2', summary: 'seed both',
+      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'local' }],
+    }, {})
+    store.applyRefinement(agent, {
+      id: 'rp3', summary: 'seed global',
+      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'global' }],
+    }, { global: true })
+    const out = store.promoteEntry(agent, 'same')
+    expect(out.applied).toBe(false)
+    expect(out.error).toBe('global id conflict')
+    expect(store.globalState().entries.memory['same']?.content).toBe('global')
+  })
+
   it('renders an empty overview when nothing is stored', () => {
     const store = testStore(new Context(), tempHome())
     const { agent } = stubAgent('agent-4')

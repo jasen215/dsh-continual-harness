@@ -28,7 +28,7 @@ import {
   saveHarnessState,
 } from './storage.ts'
 import { aggregateUsage } from './usage.ts'
-import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
+import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult, SkillEntry } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
@@ -181,6 +181,31 @@ export class HarnessStore {
     this.materializeSkills(agent, result)
     agentEvents(this.ctx, agent).emit('harness/refined', { result })
     return result
+  }
+
+  /** Promote a local entry to global by copy: local stays unchanged; a same-id
+   * global is a deterministic conflict. Not a cross-store transaction. */
+  promoteEntry(agent: Agent, id: string): { applied: boolean; error?: string } {
+    const local = this.localState(agent)
+    const global = this.globalState()
+    const hit = (Object.keys(local.entries) as RefinementKind[])
+      .map(kind => ({ kind, entry: local.entries[kind][id] }))
+      .find(candidate => candidate.entry !== undefined)
+    if (hit === undefined) return { applied: false, error: `local entry not found: ${id}` }
+    if (global.entries[hit.kind][id] !== undefined) return { applied: false, error: 'global id conflict' }
+    const entry = hit.entry!
+    this.applyRefinement(agent, {
+      id: `promote_${Date.now()}`,
+      summary: `Promote local ${hit.kind}:${id} to global`,
+      edits: [{
+        action: 'create', kind: hit.kind, id,
+        content: entry.content,
+        ...(entry.title === undefined ? {} : { title: entry.title }),
+        ...(hit.kind === 'skill' && (entry as SkillEntry).description !== undefined ? { description: (entry as SkillEntry).description } : {}),
+        reason: 'promote from session wrap-up',
+      }],
+    }, { global: true })
+    return { applied: true }
   }
 
   /**
