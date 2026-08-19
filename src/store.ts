@@ -12,7 +12,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, rollbackProposal } from './refine.ts'
-import { formatHarnessStateForPrompt } from './render.ts'
+import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
 import { reconcileSkillFiles } from './skills.ts'
 import {
   appendGlobalRefinement,
@@ -53,6 +53,8 @@ export class HarnessStore {
   private readonly maxEntryGrowth: number | undefined
   /** Kinds protected from the automatic path; plumbed for Config wiring. */
   private readonly protectedKinds: readonly RefinementKind[] | undefined
+  /** Per-kind cap for ranked prompt injection. */
+  private readonly maxInjectedEntriesPerKind: number
   /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
   private usage: Record<string, { injectionCount: number; lastInjectedAt?: string }> | undefined
 
@@ -63,12 +65,14 @@ export class HarnessStore {
       skillsDir?: string
       maxEntryGrowth?: number
       protectedKinds?: readonly RefinementKind[]
+      maxInjectedEntriesPerKind?: number
     } = {},
   ) {
     this.home = options.harnessRoot ?? defaultHarnessHome()
     this.skillsDir = options.skillsDir ?? dshHomePath('skills')
     this.maxEntryGrowth = options.maxEntryGrowth
     this.protectedKinds = options.protectedKinds
+    this.maxInjectedEntriesPerKind = options.maxInjectedEntriesPerKind ?? DEFAULT_ENTRIES_PER_KIND
   }
 
   /** The session-local state for an agent. */
@@ -94,9 +98,15 @@ export class HarnessStore {
     return mergeRefinementHistory(local, loadGlobalRefinementHistory(this.home))
   }
 
-  /** Compact overview for prompt injection. */
-  render(agent: Agent): string {
-    return formatHarnessStateForPrompt(this.state(agent))
+  /** Structured overview + injected keys for prompt injection. */
+  render(agent: Agent): { overview: string; injectedKeys: string[] } {
+    const state = this.state(agent)
+    const local = this.localState(agent)
+    return formatHarnessStateForPromptStructured(state, buildQueryFromSession(agent.session), {
+      maxPerKind: this.maxInjectedEntriesPerKind,
+      sessionId: String(agent.session.id),
+      isLocal: (kind, id) => local.entries[kind][id] !== undefined,
+    })
   }
 
   /** Lazy-load injection telemetry into memory. */

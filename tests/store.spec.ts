@@ -154,14 +154,14 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, plan, { global: true })
     expect(store.state(agent).entries.prompt['global-note']?.content).toBe('cross-session')
     expect(store.history(agent).map(entry => entry.id)).toContain('refine_3')
-    expect(store.render(agent)).toContain('global-note')
+    expect(store.render(agent).overview).toContain('global-note')
   })
 
   it('renders an empty overview when nothing is stored', () => {
     const store = testStore(new Context(), tempHome())
     const { agent } = stubAgent('agent-4')
-    expect(store.render(agent)).toContain('# Continual Harness State')
-    expect(store.render(agent)).toContain('- none')
+    expect(store.render(agent).overview).toContain('# Continual Harness State')
+    expect(store.render(agent).overview).toContain('- none')
   })
 
   it('materializes skill edits as SKILL.md bundles and restores them on rollback', () => {

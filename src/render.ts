@@ -4,7 +4,8 @@
  * @module dsh-continual-harness
  */
 
-import type { HarnessState, RefinementKind, RefinementResult } from './types.ts'
+import type { Session } from '@deepseek-ai/dsh-session'
+import type { HarnessEntry, HarnessState, RefinementKind, RefinementResult } from './types.ts'
 
 /** Default per-kind entry cap in the full overview. */
 export const DEFAULT_ENTRIES_PER_KIND = 6
@@ -29,36 +30,73 @@ function formatEntry(entry: { id: string; version: number; content: string; desc
   return `- ${entry.id} v${entry.version}: ${truncate(summary, max)}${legacy}`
 }
 
-/** Render the full `# Continual Harness State` overview block. */
-export function formatHarnessStateForPrompt(state: HarnessState): string {
+/** Max query length fed to ranking. */
+export const MAX_QUERY_CHARS = 400
+/** Full-message acknowledgement phrases dropped from the query. */
+export const ACK_PHRASES: ReadonlySet<string> = new Set(['好', '好的', '可以', '行', '收到', '明白', '继续', '谢谢', 'ok', 'okay', 'yes', 'thanks'])
+
+function collapseWhitespace(text: string): string { return text.replace(/\s+/g, ' ').trim() }
+function isPurePunctuation(text: string): boolean { return text.length > 0 && !/[\p{L}\p{N}]/u.test(text) }
+
+/** Build the ranked-injection query from the most recent effective direct-user message. */
+export function buildQueryFromSession(session: Session, maxChars: number = MAX_QUERY_CHARS): string {
+  for (let index = session.events.length - 1; index >= 0; index -= 1) {
+    const event = session.events[index]
+    if (event?.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
+    const text = (Array.isArray(event.data?.content) ? event.data.content : [])
+      .filter(block => block?.type === 'text' && typeof block.text === 'string')
+      .map(block => (block as { text: string }).text).join('\n')
+    const normalized = collapseWhitespace(text)
+    if (!normalized || isPurePunctuation(normalized) || ACK_PHRASES.has(normalized.toLowerCase())) continue
+    return normalized.slice(0, maxChars)
+  }
+  return ''
+}
+
+function relevanceScore(entry: HarnessEntry, query: string): number {
+  if (!query) return 0
+  const q = query.toLowerCase()
+  if ((entry.title ?? '').toLowerCase().includes(q)) return 2
+  if (entry.content.toLowerCase().includes(q)) return 1
+  return 0
+}
+
+/** Structured injection render: ranked overview and scope-qualified keys. */
+export function formatHarnessStateForPromptStructured(state: HarnessState, query: string, opts: { maxPerKind?: number; sessionId: string; isLocal: (kind: RefinementKind, id: string) => boolean }): { overview: string; injectedKeys: string[] } {
+  const maxPerKind = opts.maxPerKind ?? DEFAULT_ENTRIES_PER_KIND
   const lines = ['# Continual Harness State', '']
+  const injectedKeys: string[] = []
   const kinds: RefinementKind[] = ['prompt', 'memory', 'skill', 'subagent']
   for (const kind of kinds) {
-    const records = Object.values(state.entries[kind])
-    lines.push(`## ${kind} (${records.length})`)
-    if (records.length === 0) {
-      lines.push('- none')
-    } else {
-      for (const entry of records.slice(-DEFAULT_ENTRIES_PER_KIND)) {
+    const active = Object.entries(state.entries[kind])
+      .filter(([key, entry]) => entry.metadata?.lifecycleState !== 'archived' && !key.startsWith('local:'))
+      .map(([, entry]) => entry)
+    const ranked = [...active].sort((a, b) => relevanceScore(b, query) - relevanceScore(a, query) || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id))
+    const selected = ranked.slice(0, maxPerKind)
+    lines.push(`## ${kind} (${active.length})`)
+    if (selected.length === 0) lines.push('- none')
+    else {
+      for (const entry of selected) {
         lines.push(formatEntry(entry, DEFAULT_CONTENT_MAX_CHARS))
+        injectedKeys.push(opts.isLocal(kind, entry.id) ? `local:${opts.sessionId}:${kind}:${entry.id}` : `global:${kind}:${entry.id}`)
       }
-      if (records.length > DEFAULT_ENTRIES_PER_KIND) {
-        lines.push(`- … ${records.length - DEFAULT_ENTRIES_PER_KIND} more`)
-      }
+      if (active.length > maxPerKind) lines.push(`- … ${active.length - maxPerKind} more`)
     }
     lines.push('')
   }
   lines.push(`## recent refinements (${state.refinements.length})`)
-  if (state.refinements.length === 0) {
-    lines.push('- none')
-  } else {
-    for (const result of state.refinements.slice(-DEFAULT_REFINEMENTS_IN_OVERVIEW)) {
-      const applied = result.appliedEdits.filter(edit => edit.applied).length
-      const failed = result.appliedEdits.length - applied
-      lines.push(`- ${result.id} (${result.scope}, +${applied}${failed > 0 ? `, ${failed} failed` : ''}): ${truncate(result.summary, DEFAULT_CONTENT_MAX_CHARS)}`)
-    }
+  if (state.refinements.length === 0) lines.push('- none')
+  else for (const result of state.refinements.slice(-DEFAULT_REFINEMENTS_IN_OVERVIEW)) {
+    const applied = result.appliedEdits.filter(edit => edit.applied).length
+    const failed = result.appliedEdits.length - applied
+    lines.push(`- ${result.id} (${result.scope}, +${applied}${failed > 0 ? `, ${failed} failed` : ''}): ${truncate(result.summary, DEFAULT_CONTENT_MAX_CHARS)}`)
   }
-  return lines.join('\n')
+  return { overview: lines.join('\n'), injectedKeys }
+}
+
+/** Render the full overview using structured rendering for compatibility. */
+export function formatHarnessStateForPrompt(state: HarnessState): string {
+  return formatHarnessStateForPromptStructured(state, '', { sessionId: '', isLocal: () => false }).overview
 }
 
 /** Render a shorter routing overview (more entries, truncated content). */

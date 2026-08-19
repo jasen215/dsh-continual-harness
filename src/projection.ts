@@ -73,7 +73,7 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
     const state = store.state(agent)
     const hasContent = Object.values(state.entries).some(records => Object.keys(records).length > 0)
       || state.refinements.length > 0
-    const overview = store.render(agent)
+    const { overview } = store.render(agent)
     const digest = digestOf(overview)
     const lastDigest = injectedDigests.get(agent)
     if (digest === lastDigest || (!hasContent && lastDigest === undefined)) return decision
