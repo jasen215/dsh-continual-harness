@@ -30,6 +30,31 @@ describe('edit reason contract', () => {
     expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', reason: 'why' }))
       .toBeUndefined()
   })
+
+  it('rejects a non-string reason without throwing', () => {
+    const message = (id: string) => `edit "${id}"缺 reason被拒绝，请补充 reason后重新提交`
+    // parseProposal does no field validation, so the model can emit a number
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', reason: 123, content: 'x' }))
+      .toBe(message('m'))
+    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', reason: 123 }))
+      .toBe(message('m'))
+    // and applying such a proposal rejects per-edit instead of crashing the apply
+    const state = freshState()
+    state.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
+    const proposal: RefinementProposal = {
+      id: 'refine_rules_nonstring',
+      summary: 'non-string reason',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 123, content: 'new' }],
+    }
+    const { result } = applyRefinementProposal(state, proposal, {
+      id: proposal.id,
+      scope: 'local',
+      baselineState: state,
+    })
+    const rejected = result.appliedEdits[0]!
+    expect(rejected.applied).toBe(false)
+    expect(rejected.error).toBe(message('m'))
+  })
 })
 
 describe('edit blastRadius contract', () => {
@@ -102,6 +127,29 @@ describe('applied edit persistence', () => {
     const rejected = result.appliedEdits[0]!
     expect(rejected.applied).toBe(false)
     expect(rejected.error).toBe('entry not found')
+    expect(rejected.blastRadius).toBe('general')
+  })
+
+  it('normalizes an invalid blastRadius to general on rejected edits', () => {
+    const state = freshState()
+    const proposal: RefinementProposal = {
+      id: 'refine_rules_bogus',
+      summary: 'bogus radius',
+      edits: [
+        // parseProposal does no field validation, so 'bogus' can reach apply
+        { action: 'update', kind: 'memory', id: 'missing', reason: 'why', blastRadius: 'bogus', content: 'x' },
+      ],
+    }
+    const { result } = applyRefinementProposal(state, proposal, {
+      id: proposal.id,
+      scope: 'local',
+      baselineState: state,
+    })
+    const rejected = result.appliedEdits[0]!
+    expect(rejected.applied).toBe(false)
+    expect(rejected.error).toBe('invalid blastRadius: bogus')
+    // the rejected record must carry a schema-valid blastRadius so the tool
+    // result still passes OUTPUT_SCHEMA validation
     expect(rejected.blastRadius).toBe('general')
   })
 })

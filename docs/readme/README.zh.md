@@ -57,6 +57,7 @@ tests/           12 个 spec，120 个用例（storage / store / refine / rules 
 - 合并视图：本地条目优先；被遮蔽的全局条目以 `local:<id>` 前缀保留可见。
 - 应用时校验基线：规划期间条目被并发修改则拒绝该编辑（`entry changed during refinement planning`）。
 - `base_system_prompt` 为受保护 id，任何编辑都会被拒绝。
+- **旧版布局不会自动迁移**：早于扁平布局的安装（状态位于 `~/.dsh/harness/harness/` 与 `sessions/<id>/harness/`）**不会被自动迁移**——请把状态文件移动到上面的扁平布局（或重新播种）以继续使用。新安装不受影响。
 - **skill 是真正的 dsh skill**：每次应用的 skill 编辑都会把生效（合并后）的条目物化为 `<name>/SKILL.md` 目录束（YAML `name` + `description` frontmatter、kebab-case id），写入 `Config.skillsDir`（默认 `$DSH_HOME/skills`）——dsh 的文件系统 skill provider（`dsh-skill-filesystem`）实时发现它，`dsh-tool-skill` 把它暴露给模型。删除会移除目录束，回滚会还原；只处理提交触及的 id，不会碰同目录下用户自有的 skill。每个目录束都会盖上 `metadata` 溯源标记（`author: dsh-continual-harness`、`source: esp`），便于与手写 skill 区分。
 
 ### 经验固化协议 (ESP)

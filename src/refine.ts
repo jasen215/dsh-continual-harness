@@ -35,7 +35,7 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
   if (!edit.id) return 'edit id is required'
   if (edit.kind === 'skill' && !KEBAB_CASE_PATTERN.test(edit.id)) return 'skill ids must be kebab-case'
   if ((edit.action === 'update' || edit.action === 'delete')
-      && (edit.reason === undefined || edit.reason.trim() === '')) {
+      && (typeof edit.reason !== 'string' || edit.reason.trim() === '')) {
     return `edit "${edit.id}"缺 reason被拒绝，请补充 reason后重新提交`
   }
   if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
@@ -50,11 +50,18 @@ function stampAppliedEdit(
   edit: RefinementEdit,
   fields: { applied: boolean; error?: string; before?: string; after?: string },
 ): AppliedRefinementEdit {
+  const radius = edit.blastRadius
+  // parseProposal does no field validation, so an out-of-enum value must be
+  // normalized: the tool result is validated against OUTPUT_SCHEMA and an
+  // invalid blastRadius would hard-fail the whole result as INVALID_TOOL_OUTPUT.
+  const blastRadius: BlastRadius = radius !== undefined && BLAST_RADIUS_VALUES.includes(radius)
+    ? radius
+    : 'general'
   return {
     action: edit.action,
     kind: edit.kind,
     id: edit.id,
-    blastRadius: edit.blastRadius ?? 'general',
+    blastRadius,
     ...(edit.reason === undefined ? {} : { reason: edit.reason }),
     ...fields,
   }
