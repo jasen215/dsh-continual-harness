@@ -111,6 +111,7 @@ export function apply(ctx: Context, config: Config): void {
     defaultGlobal: config.defaultGlobal,
     maxTrajectoryChars: config.maxTrajectoryChars,
     plannerMaxTokens: config.plannerMaxTokens,
+    requireGlobalApproval: config.requireGlobalApproval,
   })
   registerHarnessProjection(ctx, store)
   const autoRefine = config.autoRefine ?? { enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }

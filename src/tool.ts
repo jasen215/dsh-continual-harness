@@ -7,6 +7,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { requireGlobalApproval } from './approval.ts'
 import { completeViaAgent } from './complete.ts'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import { overviewForPrompt, historyForPrompt } from './render.ts'
@@ -23,6 +24,8 @@ export interface ToolOptions {
   maxTrajectoryChars: number
   /** Output budget for the planning call. */
   plannerMaxTokens: number
+  /** Require explicit human approval before a global write commits. */
+  requireGlobalApproval: boolean
 }
 
 const OUTPUT_SCHEMA = {
@@ -92,6 +95,17 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
         scopeInstruction: scopeInstruction(global),
         ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
       }, completeViaAgent(ctx, agent, options.plannerMaxTokens), exec.signal)
+      // The conservative approval gate rides the plan path only: the user sees
+      // the planner's own summary before any global write commits. Rollback
+      // restores recorded state and never requires approval.
+      if (options.requireGlobalApproval && global) {
+        try {
+          await requireGlobalApproval(ctx, agent, exec.signal,
+            `目标：global store；planner 计划：${plan.summary}`)
+        } catch (error) {
+          return { refinement_id: 'none', scope: 'global' as const, summary: `global 写入未获批：${String(error)}`, applied: 0, failed: 0, edits: [] }
+        }
+      }
       const result = store.applyRefinement(agent, plan, { global })
       return summarize(result.id, result.scope, result.summary, result.appliedEdits)
     },

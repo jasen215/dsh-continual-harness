@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
@@ -86,6 +86,26 @@ function pluginConfig(root: string) {
   return { defaultGlobal: true, harnessRoot: root, skillsDir: join(root, 'skills') }
 }
 
+/** Llm stand-in that yields one plan JSON per planning call. */
+function makePlanLlm(plan: Record<string, unknown>) {
+  let calls = 0
+  return {
+    get callCount() { return calls },
+    async *stream() {
+      calls += 1
+      yield { type: 'text-delta' as const, text: JSON.stringify(plan) }
+      yield { type: 'finish' as const, reason: { kind: 'success' as const } }
+    },
+  }
+}
+
+/** A valid global memory-create plan the fake llm returns. */
+const PLAN = {
+  id: 'refine_appr',
+  summary: 'approve the global write',
+  edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }],
+}
+
 describe('plugin registration', () => {
   it('mounts the plugin and registers the harness_refine tool', async () => {
     const ctx = new Context()
@@ -119,6 +139,76 @@ describe('plugin registration', () => {
 
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
     expect(fresh.globalState().entries.memory['seed']).toBeUndefined()
+  })
+})
+
+describe('conservative global approval mode', () => {
+  it('default mode performs a global write without consulting the approval service', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm(PLAN) as never)
+
+    const stub = { ask: vi.fn(async () => ({ value: 'approve' })) }
+    ;(ctx as { userQuestions?: unknown }).userQuestions = stub
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const result = await execute(ctx, 'harness_refine', { global: true }, stubAgent('default-mode').agent)
+    const json = resultJson(result)
+    expect(json.refinement_id).toBe('refine_appr')
+    expect(json.applied).toBe(1)
+    expect(stub.ask).not.toHaveBeenCalled()
+
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.globalState().entries.memory['m1']?.content).toBe('learned')
+  })
+
+  it('conservative mode blocks a global write the user rejects', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm(PLAN) as never)
+
+    const stub = { ask: vi.fn(async () => ({ value: 'reject' })) }
+    ;(ctx as { userQuestions?: unknown }).userQuestions = stub
+    await ctx.plugin(plugin, { ...pluginConfig(home), requireGlobalApproval: true })
+
+    const result = await execute(ctx, 'harness_refine', { global: true }, stubAgent('reject-mode').agent)
+    const json = resultJson(result)
+    expect(json.refinement_id).toBe('none')
+    expect(json.scope).toBe('global')
+    expect(json.summary).toContain('未获批')
+    expect(json.applied).toBe(0)
+    expect(stub.ask).toHaveBeenCalledOnce()
+
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.globalState().entries.memory['m1']).toBeUndefined()
+  })
+
+  it('conservative mode allows a global write the user approves', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm(PLAN) as never)
+
+    const stub = { ask: vi.fn(async () => ({ value: 'approve' })) }
+    ;(ctx as { userQuestions?: unknown }).userQuestions = stub
+    await ctx.plugin(plugin, { ...pluginConfig(home), requireGlobalApproval: true })
+
+    const result = await execute(ctx, 'harness_refine', { global: true }, stubAgent('approve-mode').agent)
+    const json = resultJson(result)
+    expect(json.refinement_id).toBe('refine_appr')
+    expect(json.applied).toBe(1)
+    expect(stub.ask).toHaveBeenCalledOnce()
+
+    const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    expect(fresh.globalState().entries.memory['m1']?.content).toBe('learned')
   })
 })
 
