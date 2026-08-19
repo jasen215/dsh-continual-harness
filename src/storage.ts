@@ -13,6 +13,7 @@ import {
   HARNESS_SCHEMA_VERSION,
   HARNESS_STATE_FILE_NAME,
   REFINEMENT_HISTORY_FILE_NAME,
+  USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
 import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
 
@@ -38,23 +39,43 @@ export function getGlobalHarnessStateDir(home: string): string {
   return home
 }
 
-/** Read one store file; a missing or corrupt file degrades to empty state. */
+/** Migrate a parsed state payload to the current schema version. */
+export function migrateHarnessState(parsed: unknown): { state: HarnessState; diagnostics: string[] } {
+  const diagnostics: string[] = []
+  const source = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as Partial<HarnessState>
+  if (typeof source.schemaVersion === 'number' && source.schemaVersion > HARNESS_SCHEMA_VERSION) {
+    throw new Error(`unsupported harness state schemaVersion ${source.schemaVersion}`)
+  }
+  const entries = structuredClone(EMPTY_ENTRIES)
+  const raw = (source.entries ?? {}) as Partial<HarnessState['entries']>
+  for (const kind of Object.keys(entries) as Array<keyof HarnessState['entries']>) {
+    const candidate = raw[kind]
+    if (candidate !== undefined && !isPlainObject(candidate)) {
+      diagnostics.push(`skipping invalid ${kind} bucket`)
+      continue
+    }
+    const bucket = (candidate ?? {}) as Record<string, unknown>
+    for (const [id, value] of Object.entries(bucket)) {
+      if (!isHarnessEntry(value)) {
+        diagnostics.push(`skipping invalid ${kind} entry ${id}`)
+        continue
+      }
+      entries[kind][id] = value as HarnessEntry
+    }
+  }
+  const refinements = Array.isArray(source.refinements)
+    ? (source.refinements as HarnessState['refinements'])
+    : []
+  return { state: { schemaVersion: HARNESS_SCHEMA_VERSION, entries, refinements }, diagnostics }
+}
+
+/** Read one store file: missing → empty; corrupt/future → empty and never overwritten; old version → migrate. */
 export function loadHarnessState(dir: string): HarnessState {
   const file = join(dir, HARNESS_STATE_FILE_NAME)
   if (!existsSync(file)) return emptyHarnessState()
   try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<HarnessState>
-    if (parsed.schemaVersion !== HARNESS_SCHEMA_VERSION) return emptyHarnessState()
-    return {
-      schemaVersion: HARNESS_SCHEMA_VERSION,
-      entries: {
-        prompt: parsed.entries?.prompt ?? {},
-        memory: parsed.entries?.memory ?? {},
-        skill: parsed.entries?.skill ?? {},
-        subagent: parsed.entries?.subagent ?? {},
-      },
-      refinements: Array.isArray(parsed.refinements) ? parsed.refinements : [],
-    }
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    return migrateHarnessState(parsed).state
   } catch {
     return emptyHarnessState()
   }
@@ -131,6 +152,31 @@ export function mergeRefinementHistory(local: RefinementResult[], global: Refine
   return merged
 }
 
+/** Append one injection telemetry event line under the harness home. */
+export function appendUsageEvent(home: string, event: { key: string; at: string }): void {
+  mkdirSync(home, { recursive: true })
+  appendFileSync(join(home, USAGE_EVENTS_FILE_NAME), `${JSON.stringify(event)}\n`, 'utf8')
+}
+
+/** Read the injection telemetry log; missing file → empty, bad lines skipped. */
+export function loadUsageEvents(home: string): Array<{ key: string; at: string }> {
+  const file = join(home, USAGE_EVENTS_FILE_NAME)
+  if (!existsSync(file)) return []
+  const events: Array<{ key: string; at: string }> = []
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const event = JSON.parse(line) as { key?: unknown; at?: unknown }
+      if (typeof event.key === 'string' && typeof event.at === 'string') {
+        events.push({ key: event.key, at: event.at })
+      }
+    } catch {
+      // skip the corrupt line
+    }
+  }
+  return events
+}
+
 /** Resolve the default harness home under the dsh home directory. */
 export function defaultHarnessHome(): string {
   return dshHomePath(HARNESS_DIR_NAME)
@@ -146,13 +192,30 @@ export function storeDirExists(dir: string): boolean {
   return existsSync(dir)
 }
 
+/** Whether a value is a plain object suitable for an id-to-entry map or metadata. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
 /** Validate an entry record shape (used by the invariant companion). */
 export function isHarnessEntry(value: unknown): value is HarnessEntry {
-  if (typeof value !== 'object' || value === null) return false
+  if (!isPlainObject(value)) return false
   const entry = value as Record<string, unknown>
-  return typeof entry.id === 'string'
-    && typeof entry.kind === 'string'
-    && typeof entry.version === 'number'
-    && typeof entry.content === 'string'
-    && typeof entry.updatedAt === 'string'
+  if (typeof entry.id !== 'string'
+    || !['prompt', 'memory', 'skill', 'subagent'].includes(entry.kind as string)
+    || typeof entry.version !== 'number'
+    || typeof entry.content !== 'string'
+    || typeof entry.updatedAt !== 'string') return false
+  if (entry.metadata !== undefined) {
+    if (!isPlainObject(entry.metadata)) return false
+    const metadata = entry.metadata
+    const lifecycleState = metadata.lifecycleState
+    if (lifecycleState !== undefined && lifecycleState !== 'active' && lifecycleState !== 'archived') return false
+    if (metadata.sourceSession !== undefined && typeof metadata.sourceSession !== 'string') return false
+    if (metadata.pinned !== undefined && typeof metadata.pinned !== 'boolean') return false
+    if (metadata.lastInjectedAt !== undefined && typeof metadata.lastInjectedAt !== 'string') return false
+  }
+  return true
 }

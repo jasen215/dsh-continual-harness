@@ -142,7 +142,12 @@ export class HarnessStore {
       .map(edit => edit.id)
     if (touched.length === 0) return
     try {
-      reconcileSkillFiles(this.skillsDir, this.state(agent).entries.skill, touched)
+      const effective = this.state(agent).entries.skill
+      const activeSkills: typeof effective = {}
+      for (const [id, entry] of Object.entries(effective)) {
+        if (entry.metadata?.lifecycleState !== 'archived') activeSkills[id] = entry
+      }
+      reconcileSkillFiles(this.skillsDir, activeSkills, touched)
     } catch (error) {
       this.ctx.logger('harness').warn(`skill materialization failed: ${String(error)}`)
     }

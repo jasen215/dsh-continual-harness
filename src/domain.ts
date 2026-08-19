@@ -18,7 +18,9 @@ export const HARNESS_REFINEMENT_EVENT = 'harness/refinement'
 /** Message source kind of injected harness-state overviews. */
 export const HARNESS_STATE_SOURCE = 'harness-state'
 /** Monotonic schema version of the harness state file. */
-export const HARNESS_SCHEMA_VERSION = 1
+export const HARNESS_SCHEMA_VERSION = 2
+/** Append-only injection telemetry event log under the harness home. */
+export const USAGE_EVENTS_FILE_NAME = 'usage.events.jsonl'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
