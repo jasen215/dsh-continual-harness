@@ -37,9 +37,7 @@ export function aggregateUsage(events: UsageEvent[]): Record<string, UsageStats>
   for (const event of events) {
     const current = stats[event.key] ?? { injectionCount: 0 }
     current.injectionCount += 1
-    if (current.lastInjectedAt === undefined || event.at > current.lastInjectedAt) {
-      current.lastInjectedAt = event.at
-    }
+    current.lastInjectedAt = event.at
     stats[event.key] = current
   }
   return stats

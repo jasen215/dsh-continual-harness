@@ -102,7 +102,12 @@ export class HarnessStore {
   /** Lazy-load injection telemetry into memory. */
   private usageStats(): Record<string, { injectionCount: number; lastInjectedAt?: string }> {
     if (this.usage === undefined) {
-      this.usage = aggregateUsage(loadUsageEvents(this.home))
+      try {
+        this.usage = aggregateUsage(loadUsageEvents(this.home))
+      } catch (error) {
+        this.ctx.logger('harness').warn(`usage load failed: ${String(error)}`)
+        this.usage = {}
+      }
     }
     return this.usage
   }

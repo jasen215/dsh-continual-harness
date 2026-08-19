@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -56,6 +56,59 @@ describe('HarnessStore', () => {
   function testStore(ctx: Context, root: string): HarnessStore {
     return new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
   }
+
+  it('records injections and exposes persisted usage stats', () => {
+    const home = tempHome()
+    const store = testStore(new Context(), home)
+    const { agent } = stubAgent('usage-agent')
+
+    store.recordInjections(agent, ['global:memory:fact', 'global:memory:fact', 'local:usage-agent:memory:note'])
+
+    expect(store.usageStatsFor('global:memory:fact')).toEqual({ injectionCount: 2, lastInjectedAt: expect.any(String) })
+    expect(store.usageStatsFor('local:usage-agent:memory:note')).toEqual({ injectionCount: 1, lastInjectedAt: expect.any(String) })
+    const lines = readFileSync(join(home, 'usage.events.jsonl'), 'utf8').trim().split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines.map(line => JSON.parse(line).key)).toEqual([
+      'global:memory:fact',
+      'global:memory:fact',
+      'local:usage-agent:memory:note',
+    ])
+  })
+
+  it('does nothing for an empty injection list', () => {
+    const home = tempHome()
+    const store = testStore(new Context(), home)
+    const { agent } = stubAgent('usage-empty')
+
+    store.recordInjections(agent, [])
+
+    expect(existsSync(join(home, 'usage.events.jsonl'))).toBe(false)
+    expect(store.usageStatsFor('global:memory:missing')).toBeUndefined()
+  })
+
+  it('lazy-loads usage stats from an existing event log', () => {
+    const home = tempHome()
+    writeFileSync(join(home, 'usage.events.jsonl'), [
+      JSON.stringify({ key: 'global:memory:fact', at: '2026-01-01T00:00:00.000Z' }),
+      JSON.stringify({ key: 'global:memory:fact', at: '2026-01-02T00:00:00.000Z' }),
+    ].join('\n') + '\n')
+    const store = testStore(new Context(), home)
+
+    expect(store.usageStatsFor('global:memory:fact')).toEqual({
+      injectionCount: 2,
+      lastInjectedAt: '2026-01-02T00:00:00.000Z',
+    })
+  })
+
+  it('does not throw when usage log loading fails', () => {
+    const home = tempHome()
+    mkdirSync(join(home, 'usage.events.jsonl'))
+    const store = testStore(new Context(), home)
+    const { agent } = stubAgent('usage-failure')
+
+    expect(() => store.recordInjections(agent, ['global:memory:fact'])).not.toThrow()
+    expect(store.usageStatsFor('global:memory:fact')?.injectionCount).toBe(1)
+  })
 
   it('applies a refinement locally: state file, session event, and merged view', () => {
     const ctx = new Context()

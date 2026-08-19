@@ -17,4 +17,12 @@ describe('usage telemetry', () => {
     expect(agg['local:s1:memory:x']?.injectionCount).toBe(1)
     expect(agg['global:memory:nope']).toBeUndefined()
   })
+
+  it('uses the later event in file order even when its timestamp is earlier', () => {
+    const agg = aggregateUsage([
+      { key: 'global:memory:fact', at: '2026-01-02T00:00:00.000Z' },
+      { key: 'global:memory:fact', at: '2026-01-01T00:00:00.000Z' },
+    ])
+    expect(agg['global:memory:fact']).toEqual({ injectionCount: 2, lastInjectedAt: '2026-01-01T00:00:00.000Z' })
+  })
 })
