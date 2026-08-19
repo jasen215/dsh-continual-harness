@@ -7,7 +7,8 @@ import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { HarnessStore, serializeTrajectory } from '../src/store.ts'
-import { HARNESS_REFINEMENT_EVENT } from '../src/domain.ts'
+import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
+import { getGlobalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
 import type { RefinementProposal } from '../src/types.ts'
 
 const tempDirs: string[] = []
@@ -128,6 +129,62 @@ describe('HarnessStore', () => {
     store.rollbackRefinement(agent, 'refine_skill', {})
     expect(existsSync(bundle)).toBe(false)
     expect(store.state(agent).entries.skill['repro']).toBeUndefined()
+  })
+
+  it('applies store-configured growth limit and protected layers', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = new HarnessStore(ctx, {
+      harnessRoot: home,
+      skillsDir: join(home, 'skills'),
+      maxEntryGrowth: 0.1,
+      protectedKinds: ['skill'],
+    })
+    const { agent } = stubAgent('agent-gov')
+
+    // growth limit: an update growing 100 -> 200 chars (100% > 10%) is rejected
+    store.applyRefinement(agent, {
+      id: 'refine_seed',
+      summary: 'seed a long memory',
+      edits: [{ action: 'create', kind: 'memory', id: 'long', content: 'x'.repeat(100) }],
+    }, {})
+    const grown = store.applyRefinement(agent, {
+      id: 'refine_grow',
+      summary: 'grow too much',
+      edits: [{ action: 'update', kind: 'memory', id: 'long', reason: 'grow', content: 'y'.repeat(200) }],
+    }, {})
+    expect(grown.appliedEdits[0]!.applied).toBe(false)
+    expect(grown.appliedEdits[0]!.error).toBe('条目增长率超过 maxEntryGrowth上限')
+    expect(store.state(agent).entries.memory['long']!.content).toBe('x'.repeat(100))
+
+    // protected layer: an automatic-path write of a protected global skill is rejected
+    saveHarnessState(getGlobalHarnessStateDir(home), {
+      schemaVersion: HARNESS_SCHEMA_VERSION,
+      entries: {
+        prompt: {},
+        memory: {},
+        skill: {
+          'pinned-skill': {
+            id: 'pinned-skill',
+            kind: 'skill',
+            version: 1,
+            content: 'protected body',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            protection: 'pinned',
+          },
+        },
+        subagent: {},
+      },
+      refinements: [],
+    })
+    const automatic = store.applyRefinement(agent, {
+      id: 'refine_auto',
+      summary: 'automatic write',
+      edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', reason: 'auto', content: 'tampered' }],
+    }, { automatic: true, global: true })
+    expect(automatic.appliedEdits[0]!.applied).toBe(false)
+    expect(automatic.appliedEdits[0]!.error).toBe('受保护条目仅显式用户会话可改')
+    expect(store.state(agent).entries.skill['pinned-skill']?.content).toBe('protected body')
   })
 })
 

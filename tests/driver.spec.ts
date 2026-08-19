@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { loadReviews, REVIEWS_FILE_NAME } from '../src/audit.ts'
 import { registerHarnessDriver } from '../src/driver.ts'
 import { HarnessStore } from '../src/store.ts'
 
@@ -58,6 +59,19 @@ function makeLlm(replies: ReadonlyArray<Record<string, unknown>>): FakeLlm {
       const reply = replies[Math.min(calls, replies.length - 1)]
       calls += 1
       yield { type: 'text-delta', text: JSON.stringify(reply) }
+      yield { type: 'finish', reason: { kind: 'success' } }
+    },
+  }
+}
+
+/** Llm stand-in that yields non-JSON prose, so parseAutoRefineReview throws. */
+function makeFailingLlm(): FakeLlm {
+  let calls = 0
+  return {
+    get callCount() { return calls },
+    async *stream() {
+      calls += 1
+      yield { type: 'text-delta', text: 'the model replied with prose, not JSON' }
       yield { type: 'finish', reason: { kind: 'success' } }
     },
   }
@@ -119,6 +133,7 @@ describe('registerHarnessDriver', () => {
       compact: true,
       plannerMaxTokens: 1000,
       maxTrajectoryChars: 500,
+      auditReviews: false,
     })
     const agent = stubAgent('driver-1')
     agents.register(agent)
@@ -146,6 +161,7 @@ describe('registerHarnessDriver', () => {
       compact: true,
       plannerMaxTokens: 1000,
       maxTrajectoryChars: 500,
+      auditReviews: false,
     })
     const agent = stubAgent('driver-2')
     agents.register(agent)
@@ -175,6 +191,7 @@ describe('registerHarnessDriver', () => {
       compact: true,
       plannerMaxTokens: 1000,
       maxTrajectoryChars: 500,
+      auditReviews: false,
     })
     const agent = stubAgent('driver-3')
     agents.register(agent)
@@ -202,6 +219,7 @@ describe('registerHarnessDriver', () => {
       compact: true,
       plannerMaxTokens: 1000,
       maxTrajectoryChars: 500,
+      auditReviews: false,
     })
     const session = Session.create(SessionId('driver-4'))
 
@@ -209,5 +227,215 @@ describe('registerHarnessDriver', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
 
     expect(llm.callCount).toBe(0)
+  })
+
+  it('records an approved gate verdict with rejected edits to the audit file', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      {
+        id: 'auto_1',
+        summary: 'auto',
+        edits: [
+          // update without a reason: validateEdit rejects it
+          { action: 'update', kind: 'memory', id: 'm1', content: 'rewritten' },
+          { action: 'create', kind: 'memory', id: 'm2', content: 'learned' },
+        ],
+      },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-5')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(1)
+    const review = reviews[0]
+    expect(review?.outcome).toBe('approved')
+    expect(review?.refinementId).toBe('auto_1')
+    expect(review?.trigger).toBe('turn-interval')
+    expect(review?.sessionId).toBe(String(agent.session.id))
+    expect(review?.rejectedEdits).toHaveLength(1)
+    expect(review?.rejectedEdits?.[0]).toMatchObject({ kind: 'memory', id: 'm1', action: 'update' })
+    expect(review?.rejectedEdits?.[0]?.error).toContain('reason')
+    // the valid create still applied
+    expect(store.state(agent).entries.memory['m2']?.content).toBe('learned')
+  })
+
+  it('records a declined gate verdict with its rationale', async () => {
+    ctx = new Context()
+    const llm = makeLlm([{ approved: false, rationale: 'nothing to fix' }])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-6')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]?.outcome).toBe('declined')
+    expect(reviews[0]?.rationale).toBe('nothing to fix')
+    expect(llm.callCount).toBe(1)
+  })
+
+  it('records an assessed gate verdict when the plan is empty', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-7')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]?.outcome).toBe('assessed')
+    expect(reviews[0]?.rationale).toBe('interval reached')
+    expect(llm.callCount).toBe(2)
+  })
+
+  it('records a failed gate verdict and keeps the turn counter so the gate re-triggers', async () => {
+    ctx = new Context()
+    const llm = makeFailingLlm()
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-8')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(1)
+    const first = loadReviews(home)
+    expect(first).toHaveLength(1)
+    expect(first[0]?.outcome).toBe('failed')
+    expect(first[0]?.rationale).toContain('JSON')
+
+    // The failed gate did not reset turnCount: the next turn/end re-triggers it.
+    turnEnd(agent.session, 2)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(llm.callCount).toBe(2)
+    expect(loadReviews(home)).toHaveLength(2)
+  })
+
+  it('does not create the audit file when auditing is disabled', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: false,
+    })
+    const agent = stubAgent('driver-9')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(llm.callCount).toBe(2)
+    expect(store.state(agent).entries.memory['m1']?.content).toBe('learned')
+    expect(existsSync(join(home, REVIEWS_FILE_NAME))).toBe(false)
+  })
+
+  it('swallows an audit write failure and still completes the gate', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    // reviews.jsonl path is occupied by a directory: appendReview must throw
+    mkdirSync(join(home, REVIEWS_FILE_NAME))
+    const store = testStore(home)
+    registerHarnessDriver(ctx, store, {
+      enabled: true,
+      turnInterval: 1,
+      cooldownMs: 0,
+      compact: true,
+      plannerMaxTokens: 1000,
+      maxTrajectoryChars: 500,
+      auditReviews: true,
+    })
+    const agent = stubAgent('driver-10')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // the audit failure was swallowed; the gate still planned and applied
+    expect(llm.callCount).toBe(2)
+    expect(store.state(agent).entries.memory['m1']?.content).toBe('learned')
   })
 })

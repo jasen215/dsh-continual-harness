@@ -29,16 +29,24 @@ You receive the current harness state, the recent refinement history, a tail-bia
 - 'skill' entries are real dsh skills, materialized as SKILL.md bundles: "description" is a one-line summary, "content" is the markdown body (step-by-step instructions), and the id must be kebab-case.
 - 'subagent' entries are reusable delegation specs: purpose, instructions, when to invoke.
 - Prefer 'update' over creating near-duplicates; 'delete' entries that are stale, contradicted, or never useful.
+- Scope policy: 'global' is only for stable cross-session lessons, durable preferences, reusable skills, and project-scoped facts; everything else belongs in 'local'. Local entries shadow same-id global entries.
+- Update preference, in this order: 1) update a related entry used this session; 2) update an existing class-level umbrella entry; 3) add supporting content to an existing entry (references/templates/scripts analog); 4) only then create a new class-level entry. Never create one skill per session, and never name entries after PR numbers, raw error strings, or "fix-X-today"-style titles.
+- 'reason': every 'update'/'delete' edit MUST carry a one-line 'reason' stating why this write is made; 'create' may omit it. Rollback reasons are system-generated — never supply them.
+- 'blastRadius' is optional: one of general|project|session, defaulting to 'general'.
+- Do NOT capture environment-dependent failures (missing binaries, missing commands, unconfigured credentials), negative assertions about tools or features ("tool X is broken"), transient session errors, one-off task narratives, or unresolved failed attempts as durable rules. Only the fix — the install command or config steps — may be captured.
 - If nothing durable is worth persisting, return edits: [].
 - The summary is one line.
 
 Respond with ONLY a JSON object:
-{"id":"refine_<timestamp>","summary":"one line","edits":[{"action":"create|update|delete","kind":"prompt|memory|skill|subagent","id":"kebab-case","content":"...","description":"..."}]}`
+{"id":"refine_<timestamp>","summary":"one line","edits":[{"action":"create|update|delete","kind":"prompt|memory|skill|subagent","id":"kebab-case","content":"...","description":"...","reason":"...","blastRadius":"general"}]}
+Note: 'reason' is required for 'update'/'delete' edits; 'create' may omit it. 'blastRadius' defaults to 'general'.`
 
 /** System prompt for the automatic refinement review gate. */
 export const AUTO_REFINE_REVIEW_SYSTEM_PROMPT = `You are the gatekeeper of an agent's continual harness. Given the current harness state, the recent refinement history, and a tail-biased trajectory excerpt, decide whether persisting a refinement NOW would materially help future steps of this session.
 
 Approve only when the trajectory shows durable lessons: a repeated failure with an identified fix, a reusable tactic or delegation role, or a fact worth remembering. Reject when the session is too short, nothing new emerged, or the evidence is thin. You cannot see the future; base the verdict only on the evidence presented.
+
+Negative assertions about tools or features and environment-dependent failures are NOT durable lessons (Do NOT capture).
 
 Respond with ONLY a JSON object:
 {"approved":true|false,"rationale":"one sentence"}`
@@ -102,7 +110,7 @@ export async function reviewAutoRefine(
 /** Build the store-scope instruction line for the planner. */
 export function scopeInstruction(global: boolean): string {
   return global
-    ? 'Target store: global — entries persist across sessions and serve every session.'
+    ? 'Target store: global — entries persist across sessions and serve every session. Global writes only stable cross-session lessons: durable preferences, reusable skills, and project-scoped facts. update/delete edits must carry a reason.'
     : 'Target store: local — entries are session-scoped and shadow same-id global entries.'
 }
 

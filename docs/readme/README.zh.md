@@ -25,7 +25,7 @@ src/
   domain.ts      事件声明合并（SessionEventMap / MessageSourceMap / cordis Events）
   types.ts       HarnessState / RefinementProposal / RefinementResult 等类型
   storage.ts     状态与历史的磁盘读写（原子写、损坏降级、local/global 合并、jsonl 历史）
-  refine.ts      校验、应用、回滚（基线冲突检测、版本递增、内容收窄守卫）
+  refine.ts      校验、应用、回滚（基线冲突检测、版本递增、增长率上限）
   skills.ts      SKILL.md 渲染 + 文件协调（生成的 skill 是真正的 dsh skill）
   render.ts      面向模型的概览 / 摘要 / 历史渲染
   planner.ts     LLM 规划提示词与 JSON 解析（plan / auto-refine review 两条提示词）
@@ -36,7 +36,7 @@ src/
   driver.ts      自动精修驱动器（turn 间隔门 / 压缩门 / 冷却 / 防重入）
   invariant.ts   运行时不变量校验插件
   index.ts       插件入口与 Config
-tests/           7 个 spec，46 个用例（storage / refine / planner / store / driver / invariant / plugin 集成）
+tests/           12 个 spec，120 个用例（storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin 集成）
 ```
 
 ### 数据布局
@@ -57,6 +57,7 @@ tests/           7 个 spec，46 个用例（storage / refine / planner / store 
 - 合并视图：本地条目优先；被遮蔽的全局条目以 `local:<id>` 前缀保留可见。
 - 应用时校验基线：规划期间条目被并发修改则拒绝该编辑（`entry changed during refinement planning`）。
 - `base_system_prompt` 为受保护 id，任何编辑都会被拒绝。
+- **旧版布局不会自动迁移**：早于扁平布局的安装（状态位于 `~/.dsh/harness/harness/` 与 `sessions/<id>/harness/`）**不会被自动迁移**——请把状态文件移动到上面的扁平布局（或重新播种）以继续使用。新安装不受影响。
 - **skill 是真正的 dsh skill**：每次应用的 skill 编辑都会把生效（合并后）的条目物化为 `<name>/SKILL.md` 目录束（YAML `name` + `description` frontmatter、kebab-case id），写入 `Config.skillsDir`（默认 `$DSH_HOME/skills`）——dsh 的文件系统 skill provider（`dsh-skill-filesystem`）实时发现它，`dsh-tool-skill` 把它暴露给模型。删除会移除目录束，回滚会还原；只处理提交触及的 id，不会碰同目录下用户自有的 skill。每个目录束都会盖上 `metadata` 溯源标记（`author: dsh-continual-harness`、`source: esp`），便于与手写 skill 区分。
 
 ### 经验固化协议 (ESP)
@@ -110,10 +111,38 @@ pnpm dsh --profile <name> "…"
 | `maxTrajectoryChars` | 80000 | 复盘轨迹的最大字符数（tail-biased 截断） |
 | `plannerMaxTokens` | 32000 | 规划器 LLM 调用的最大 token 数 |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | 自动精修：turn 间隔门、压缩结束门、冷却时间、禁用开关 |
+| `requireGlobalApproval` | `false` | 全局写入提交前是否要求显式人工审批（保守模式） |
+| `auditReviews` | `true` | 每个 gate 裁决追加到 harness 根目录 `reviews.jsonl` |
+| `logToFile` | `true` | 把 harness 日志持久化到 `continual-harness.log`（JSONL、`0600`、轮转） |
+| `logMaxBytes` | `5242880`（5 MB） | harness 日志文件轮转上限 |
+| `maxEntryGrowth` | `0.5` | 单次提交条目增长率上限；`0` 关闭检查 |
+| `protectedKinds` | `['skill']` | 自动路径不可修改的 kind（预留；实际生效的是条目级 `protection`） |
+
+## 治理（Governance）
+
+所有写入路径——`harness_refine` 工具与自动 gate——都经由一个三层规则层把关，并以可逆性兜底：
+
+1. **影响面最小化** ——每次编辑在写入前都先按固定契约校验。`create` 可省略 `reason`；`update`/`delete` 必须携带一行 `reason`（缺失时以 `edit "<id>"缺 reason被拒绝，请补充 reason后重新提交` 拒绝该编辑）。可选 `blastRadius`（`general | project | session`）默认 `general`。`base_system_prompt` 不可变。`maxEntryGrowth`（默认 `0.5`）限制一次提交中条目可增长的比例（超限报 `条目增长率超过 maxEntryGrowth上限`；`0` 关闭该检查）。
+2. **合法性硬拒** ——受保护条目（带 `protection` 的条目）在自动路径上不可改（`受保护条目仅显式用户会话可改`）；`local` 精修期间全局 store 只读，触碰未遮蔽的全局条目必须先创建 local 遮蔽条目（`global条目在 local精修期间只读，请创建 local遮蔽条目`）。
+3. **必要性软把关** ——任何自动精修前，评审 gate 都会判断「现在固化是否值得」；被否决的评审不会进入 store，且每个裁决都会落审计。
+
+**可逆性兜底**：每个已提交的精修都可按 id 回滚，回滚自带系统生成的 `rollback:<id>` reason。
+
+全局写入**默认零审批**：工具提交全局精修时不咨询任何审批服务。设置 `requireGlobalApproval: true` 进入保守模式：全局写入先经 `dsh-user-questions` 服务询问用户，用户拒绝则跳过（`global写入未获批：<error>`）。
+
+gate 与插件会在 harness 根目录保留两份产物：每个 gate 裁决追加到 `reviews.jsonl`（结果 `approved | declined | assessed | failed`），`harness` / `continual-harness` logger 的日志行追加到 `continual-harness.log`（JSONL、`0600`，超过 `logMaxBytes` 轮转到 `.1`）。
+
+实时查看插件日志：
+
+```sh
+tail -f ~/.dsh/harness/continual-harness.log
+```
+
+（专门的治理工具入口推迟实现。）
 
 ## 开发
 
-插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（55 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
+插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（120 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
 
 ## Known Limitations and Deferred Work
 
@@ -122,3 +151,4 @@ pnpm dsh --profile <name> "…"
 - 投影去重是进程内 `WeakMap<Agent, digest>`：会话重启后首步会重新注入（无状态、幂等，但多一次注入）。
 - 并发写入是 last-writer-wins：同目录多进程同时精修可能互相覆盖，规划期的基线冲突检测只能拦截「读后写」竞争，不能串行化。
 - 自动精修失败静默降级（只记日志），不打断会话。
+- 内容收缩守卫（限制单次 update 把条目收缩到阈值以下）是待办跟进项，尚未实现；当前只有 `maxEntryGrowth` 限制条目增长。

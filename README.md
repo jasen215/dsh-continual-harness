@@ -25,7 +25,7 @@ src/
   domain.ts      event declaration merging (SessionEventMap / MessageSourceMap / cordis Events)
   types.ts       HarnessState / RefinementProposal / RefinementResult and other types
   storage.ts     disk read/write of state and history (atomic writes, corruption degradation, local/global merge, jsonl history)
-  refine.ts      validation, application, rollback (baseline conflict detection, version increments, content-shrink guard)
+  refine.ts      validation, application, rollback (baseline conflict detection, version increments, growth limit)
   skills.ts      SKILL.md rendering + file reconciliation (generated skills are real dsh skills)
   render.ts      model-facing overview / summary / history rendering
   planner.ts     LLM planning prompts and JSON parsing (plan / auto-refine review prompts)
@@ -36,7 +36,7 @@ src/
   driver.ts      automatic refinement driver (turn-interval gate / compaction gate / cooldown / re-entry guard)
   invariant.ts   runtime invariant plugin
   index.ts       plugin entry and Config
-tests/           7 specs, 46 cases (storage / refine / planner / store / driver / invariant / plugin integration)
+tests/           12 specs, 120 cases (storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin integration)
 ```
 
 ### Data layout
@@ -57,6 +57,7 @@ tests/           7 specs, 46 cases (storage / refine / planner / store / driver 
 - Merged view: local entries win; a shadowed global entry remains visible under the `local:<id>` prefix.
 - Baseline validation on apply: an edit is rejected if the entry changed concurrently during planning (`entry changed during refinement planning`).
 - `base_system_prompt` is a protected id; any edit to it is rejected.
+- **No auto-migration from the legacy layout:** installs that predate the flat layout (state under `~/.dsh/harness/harness/` and `sessions/<id>/harness/`) are **not auto-migrated** — move the state files into the flat layout above (or re-seed) to keep using the harness. New installs are unaffected.
 - **Skills are real dsh skills.** Every applied skill edit materializes the effective merged entry as a `<name>/SKILL.md` bundle (YAML `name` + `description` frontmatter, kebab-case id) under `Config.skillsDir` (default `$DSH_HOME/skills`), where dsh's filesystem skill provider (`dsh-skill-filesystem`) discovers it live and `dsh-tool-skill` exposes it to the model. Deletes remove the bundle; rollbacks restore it. Only ids touched by a commit are written or removed, so user-owned skills in the same directory are never touched. Each bundle stamps a `metadata` provenance block (`author: dsh-continual-harness`, `source: esp`) so generated skills are distinguishable from hand-written ones.
 
 ### Experience Solidification Protocol (ESP)
@@ -118,12 +119,40 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `maxTrajectoryChars` | 80000 | Max characters of the review trajectory (tail-biased truncation) |
 | `plannerMaxTokens` | 32000 | Max tokens for the planner LLM call |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | Auto-refine: turn-interval gate, compaction-end gate, cooldown, disable switch |
+| `requireGlobalApproval` | `false` | Require explicit human approval before a global write commits (conservative mode) |
+| `auditReviews` | `true` | Append every gate verdict to `reviews.jsonl` under the harness root |
+| `logToFile` | `true` | Persist harness logs to `continual-harness.log` (JSONL, `0600`, rotated) |
+| `logMaxBytes` | `5242880` (5 MB) | Rotation cap for the harness log file |
+| `maxEntryGrowth` | `0.5` | Per-commit entry growth fraction cap; `0` disables the check |
+| `protectedKinds` | `['skill']` | Kinds the automatic path may not modify (reserved; per-entry `protection` is the enforced guard) |
+
+## Governance
+
+Every write path — the `harness_refine` tool and the automatic gate — funnels through a rule layer with three tiers, plus a reversibility backstop:
+
+1. **Impact minimization** — every edit is validated against a fixed contract before any write. `create` may omit a `reason`; `update`/`delete` must carry a one-line `reason` (a missing one rejects the edit with `edit "<id>"缺 reason被拒绝，请补充 reason后重新提交`). Optional `blastRadius` (`general | project | session`) defaults to `general`. `base_system_prompt` is immutable. `maxEntryGrowth` (default `0.5`) caps how much an update may grow an entry in one commit (`条目增长率超过 maxEntryGrowth上限`; `0` disables the check).
+2. **Legality hard rejects** — Protected entries (those carrying `protection`) are immutable on the automatic path (`受保护条目仅显式用户会话可改`); during a `local` refinement the global store is read-only, so touching an unshadowed global entry requires creating a local shadow first (`global条目在 local精修期间只读，请创建 local遮蔽条目`).
+3. **Necessity soft gate** — before any automatic refinement the review gate decides whether persisting now is worthwhile; a declined review never reaches the store, and every verdict is audited.
+
+**Reversibility** is the backstop: every committed refinement rolls back by id, and rollbacks carry a system-generated `rollback:<id>` reason.
+
+Global writes are **zero-approval by default**: the tool commits a global refinement without consulting any approval service. Set `requireGlobalApproval: true` for the conservative mode, in which a global write first asks the user through the `dsh-user-questions` service and is skipped on rejection (`global写入未获批：<error>`).
+
+The gate and the plugin keep two artifacts under the harness root: every gate verdict is appended to `reviews.jsonl` (outcomes `approved | declined | assessed | failed`), and harness log lines from the `harness` / `continual-harness` loggers are appended to `continual-harness.log` (JSONL, `0600`, rotated to `.1` once `logMaxBytes` is exceeded).
+
+Watch the plugin log live with:
+
+```sh
+tail -f ~/.dsh/harness/continual-harness.log
+```
+
+(A dedicated tool entry for governance is deferred.)
 
 ## Development
 
 The plugin is self-contained: `devDependencies` pin the published
 `@deepseek-ai/*` packages (rc versions), so `pnpm install`, `pnpm run
-typecheck`, `pnpm test` (47 cases), and `pnpm run build` (tsc emits
+typecheck`, `pnpm test` (120 cases), and `pnpm run build` (tsc emits
 `lib/types/*.js + *.d.ts`; the `"."` and `"./invariant"` exports point at the
 artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
@@ -136,3 +165,4 @@ run the same steps. `peerDependencies` declare the semver ranges consumers
 - Projection dedup is an in-process `WeakMap<Agent, digest>`: the first step after a session restart re-injects (stateless and idempotent, but one extra injection).
 - Concurrent writes are last-writer-wins: multiple processes refining the same directory concurrently may overwrite each other; baseline conflict detection during planning can only catch read-after-write races, not serialize them.
 - A failed automatic refinement degrades silently (only logged) and never interrupts the session.
+- A content-shrink guard (rejecting updates that shrink an entry too far in one commit) is a planned follow-up and is not yet implemented; today only `maxEntryGrowth` caps how much an update may grow an entry.

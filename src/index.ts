@@ -11,14 +11,17 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
+import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { HarnessStore } from './store.ts'
 import { registerHarnessTool } from './tool.ts'
+import type { RefinementKind } from './types.ts'
 
 export const name = 'continual-harness'
 export const inject = ['agents', 'tools']
@@ -57,6 +60,18 @@ export interface Config {
   plannerMaxTokens: number
   /** Automatic refinement gate settings. */
   autoRefine?: AutoRefineConfig
+  /** Require explicit human approval before a global refinement commits. */
+  requireGlobalApproval: boolean
+  /** Audit automatic review verdicts into the session log. */
+  auditReviews: boolean
+  /** Persist harness logs to a file. */
+  logToFile: boolean
+  /** Cap on the harness log file size in bytes. */
+  logMaxBytes: number
+  /** Per-commit entry growth fraction cap; 0 disables the check. */
+  maxEntryGrowth: number
+  /** Kinds the automatic path may not modify. */
+  protectedKinds: RefinementKind[]
 }
 
 /** Schemastery configuration for the continual harness plugin. */
@@ -72,6 +87,12 @@ export const Config: z<Config> = z.object({
     cooldownMs: z.number().step(1).min(1).default(DEFAULT_COOLDOWN_MS),
     compact: z.boolean().default(true),
   }).default({ enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }),
+  requireGlobalApproval: z.boolean().default(false),
+  auditReviews: z.boolean().default(true),
+  logToFile: z.boolean().default(true),
+  logMaxBytes: z.number().step(1).min(1).default(5 * 1024 * 1024),
+  maxEntryGrowth: z.number().min(0).default(0.5),
+  protectedKinds: z.array(z.union(['prompt', 'memory', 'skill', 'subagent'])).default(['skill']),
 })
 
 /**
@@ -85,11 +106,14 @@ export function apply(ctx: Context, config: Config): void {
   const store = new HarnessStore(ctx, {
     ...(config.harnessRoot === undefined ? {} : { harnessRoot: config.harnessRoot }),
     ...(config.skillsDir === undefined ? {} : { skillsDir: config.skillsDir }),
+    maxEntryGrowth: config.maxEntryGrowth,
+    protectedKinds: config.protectedKinds,
   })
   registerHarnessTool(ctx, store, {
     defaultGlobal: config.defaultGlobal,
     maxTrajectoryChars: config.maxTrajectoryChars,
     plannerMaxTokens: config.plannerMaxTokens,
+    requireGlobalApproval: config.requireGlobalApproval,
   })
   registerHarnessProjection(ctx, store)
   const autoRefine = config.autoRefine ?? { enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }
@@ -100,5 +124,12 @@ export function apply(ctx: Context, config: Config): void {
     compact: autoRefine.compact,
     plannerMaxTokens: config.plannerMaxTokens,
     maxTrajectoryChars: config.maxTrajectoryChars,
+    auditReviews: config.auditReviews,
   })
+  if (config.logToFile) {
+    attachFileLog(ctx, {
+      file: join(store.home, PLUGIN_LOG_FILE_NAME),
+      maxBytes: config.logMaxBytes,
+    })
+  }
 }

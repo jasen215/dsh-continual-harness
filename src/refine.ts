@@ -7,8 +7,10 @@
 import { HARNESS_SCHEMA_VERSION } from './domain.ts'
 import type {
   AppliedRefinementEdit,
+  BlastRadius,
   HarnessState,
   RefinementEdit,
+  RefinementKind,
   RefinementResult,
   RefinementProposal,
 } from './types.ts'
@@ -19,6 +21,8 @@ export const REFINEMENT_KINDS = ['prompt', 'memory', 'skill', 'subagent'] as con
 export const REFINEMENT_ACTIONS = ['create', 'update', 'delete'] as const
 /** Identifier of the immutable base system prompt; never an editable id. */
 export const BASE_SYSTEM_PROMPT_ID = 'base_system_prompt'
+/** Valid blast radius values for a refinement edit. */
+export const BLAST_RADIUS_VALUES: readonly BlastRadius[] = ['general', 'project', 'session']
 
 /** Kebab-case pattern dsh requires for skill names (and the safe path form). */
 export const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -30,8 +34,37 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
   if (edit.id === BASE_SYSTEM_PROMPT_ID) return 'the base system prompt is immutable'
   if (!edit.id) return 'edit id is required'
   if (edit.kind === 'skill' && !KEBAB_CASE_PATTERN.test(edit.id)) return 'skill ids must be kebab-case'
+  if ((edit.action === 'update' || edit.action === 'delete')
+      && (typeof edit.reason !== 'string' || edit.reason.trim() === '')) {
+    return `edit "${edit.id}"缺 reason被拒绝，请补充 reason后重新提交`
+  }
+  if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
+    return `invalid blastRadius: ${edit.blastRadius}`
+  }
   if (edit.action !== 'delete' && edit.content === undefined) return 'non-delete edits require content'
   return undefined
+}
+
+/** Stamp the shared reason/blastRadius fields onto an applied edit record. */
+function stampAppliedEdit(
+  edit: RefinementEdit,
+  fields: { applied: boolean; error?: string; before?: string; after?: string },
+): AppliedRefinementEdit {
+  const radius = edit.blastRadius
+  // parseProposal does no field validation, so an out-of-enum value must be
+  // normalized: the tool result is validated against OUTPUT_SCHEMA and an
+  // invalid blastRadius would hard-fail the whole result as INVALID_TOOL_OUTPUT.
+  const blastRadius: BlastRadius = radius !== undefined && BLAST_RADIUS_VALUES.includes(radius)
+    ? radius
+    : 'general'
+  return {
+    action: edit.action,
+    kind: edit.kind,
+    id: edit.id,
+    blastRadius,
+    ...(edit.reason === undefined ? {} : { reason: edit.reason }),
+    ...fields,
+  }
 }
 
 /**
@@ -42,7 +75,20 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
 export function applyRefinementProposal(
   state: HarnessState,
   proposal: RefinementProposal,
-  options: { id: string; rollbackOf?: string; scope: 'local' | 'global'; baselineState: HarnessState },
+  options: {
+    id: string
+    rollbackOf?: string
+    scope: 'local' | 'global'
+    baselineState: HarnessState
+    /** Entry growth fraction cap; 0 disables the check. */
+    maxEntryGrowth?: number
+    /** Kinds protected from the automatic path (plumbed; the per-edit rule keys off the entry's own protection). */
+    protectedKinds?: readonly RefinementKind[]
+    /** Global entries for the local-during-global read-only rule. */
+    globalEntries?: HarnessState['entries']
+    /** True when the commit rides the automatic path (gate), enabling protected-layer checks. */
+    automatic?: boolean
+  },
 ): { result: RefinementResult; state: HarnessState } {
   const now = new Date().toISOString()
   const appliedEdits: AppliedRefinementEdit[] = []
@@ -50,16 +96,53 @@ export function applyRefinementProposal(
   for (const edit of proposal.edits) {
     const invalid = validateEdit(edit)
     if (invalid) {
-      appliedEdits.push({ action: edit.action, kind: edit.kind, id: edit.id, applied: false, error: invalid })
+      appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: invalid }))
+      continue
+    }
+    // Rule 1: during a local refinement the global store is read-only. An id
+    // present in the global store but absent from the local target state is an
+    // unshadowed global entry; the model must create a local shadow instead.
+    if (options.scope === 'local'
+        && (edit.action === 'update' || edit.action === 'delete')
+        && options.globalEntries?.[edit.kind]?.[edit.id] !== undefined
+        && state.entries[edit.kind]?.[edit.id] === undefined) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: 'global条目在 local精修期间只读，请创建 local遮蔽条目',
+      }))
       continue
     }
     const current = state.entries[edit.kind][edit.id]
     if (edit.action === 'create' && current !== undefined) {
-      appliedEdits.push({ action: edit.action, kind: edit.kind, id: edit.id, applied: false, error: 'entry already exists' })
+      appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: 'entry already exists' }))
       continue
     }
     if ((edit.action === 'update' || edit.action === 'delete') && current === undefined) {
-      appliedEdits.push({ action: edit.action, kind: edit.kind, id: edit.id, applied: false, error: 'entry not found' })
+      appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: 'entry not found' }))
+      continue
+    }
+    // Rule 2: protected entries are immutable on the automatic path; the tool
+    // (explicit user session) path may still edit them.
+    if (options.automatic === true
+        && (edit.action === 'update' || edit.action === 'delete')
+        && current!.protection !== undefined) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: '受保护条目仅显式用户会话可改',
+      }))
+      continue
+    }
+    // Rule 3: growth limit on update; empty old content skips the check.
+    const growthLimit = options.maxEntryGrowth ?? 0
+    if (edit.action === 'update'
+        && growthLimit > 0
+        && current!.content.length > 0
+        && edit.content !== undefined
+        && (edit.content.length - current!.content.length) / current!.content.length > growthLimit) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: '条目增长率超过 maxEntryGrowth上限',
+      }))
       continue
     }
     const baseline = options.baselineState.entries[edit.kind][edit.id]
@@ -67,23 +150,14 @@ export function applyRefinementProposal(
       ? baseline === undefined
       : baseline !== undefined && baseline.content === current!.content
     if (!baselineMatches) {
-      appliedEdits.push({
-        action: edit.action,
-        kind: edit.kind,
-        id: edit.id,
+      appliedEdits.push(stampAppliedEdit(edit, {
         applied: false,
         error: 'entry changed during refinement planning',
-      })
+      }))
       continue
     }
     if (edit.action === 'delete') {
-      appliedEdits.push({
-        action: edit.action,
-        kind: edit.kind,
-        id: edit.id,
-        before: current!.content,
-        applied: true,
-      })
+      appliedEdits.push(stampAppliedEdit(edit, { before: current!.content, applied: true }))
       delete next.entries[edit.kind][edit.id]
       continue
     }
@@ -91,7 +165,7 @@ export function applyRefinementProposal(
     // narrowing explicit under exactOptionalPropertyTypes.
     const content = edit.content
     if (content === undefined) {
-      appliedEdits.push({ action: edit.action, kind: edit.kind, id: edit.id, applied: false, error: 'edit content is required' })
+      appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: 'edit content is required' }))
       continue
     }
     if (edit.action === 'create') {
@@ -114,7 +188,7 @@ export function applyRefinementProposal(
             updatedAt: now,
           }
       next.entries[edit.kind][edit.id] = entry
-      appliedEdits.push({ action: edit.action, kind: edit.kind, id: edit.id, after: content, applied: true })
+      appliedEdits.push(stampAppliedEdit(edit, { after: content, applied: true }))
       continue
     }
     const currentEntry = current!
@@ -124,14 +198,11 @@ export function applyRefinementProposal(
       content,
       updatedAt: now,
     }
-    appliedEdits.push({
-      action: edit.action,
-      kind: edit.kind,
-      id: edit.id,
+    appliedEdits.push(stampAppliedEdit(edit, {
       before: currentEntry.content,
       after: content,
       applied: true,
-    })
+    }))
   }
   const result: RefinementResult = {
     id: options.id,
@@ -145,21 +216,21 @@ export function applyRefinementProposal(
   return { result, state: next }
 }
 
-/**
- * Revert a committed result from its snapshots: reverse edit order, restoring
+/** Revert a committed result from its snapshots: reverse edit order, restoring
  * `before` content or deleting created entries.
  */
 export function rollbackProposal(target: RefinementResult): RefinementProposal {
   const edits: RefinementEdit[] = []
   for (const edit of [...target.appliedEdits].reverse()) {
     if (!edit.applied) continue
+    const reason = `rollback:${target.id}`
     if (edit.action === 'create') {
-      edits.push({ action: 'delete', kind: edit.kind, id: edit.id })
+      edits.push({ action: 'delete', kind: edit.kind, id: edit.id, reason })
     } else if (edit.action === 'delete') {
       if (edit.before === undefined) continue
-      edits.push({ action: 'create', kind: edit.kind, id: edit.id, content: edit.before })
+      edits.push({ action: 'create', kind: edit.kind, id: edit.id, content: edit.before, reason })
     } else if (edit.before !== undefined) {
-      edits.push({ action: 'update', kind: edit.kind, id: edit.id, content: edit.before })
+      edits.push({ action: 'update', kind: edit.kind, id: edit.id, content: edit.before, reason })
     }
   }
   return {

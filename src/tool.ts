@@ -7,11 +7,12 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { requireGlobalApproval } from './approval.ts'
 import { completeViaAgent } from './complete.ts'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import { overviewForPrompt, historyForPrompt } from './render.ts'
 import type { HarnessStore } from './store.ts'
-import type { RefinementAction, RefinementKind } from './types.ts'
+import type { BlastRadius, RefinementAction, RefinementKind } from './types.ts'
 
 const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
 
@@ -23,6 +24,8 @@ export interface ToolOptions {
   maxTrajectoryChars: number
   /** Output budget for the planning call. */
   plannerMaxTokens: number
+  /** Require explicit human approval before a global write commits. */
+  requireGlobalApproval: boolean
 }
 
 const OUTPUT_SCHEMA = {
@@ -46,6 +49,8 @@ const OUTPUT_SCHEMA = {
           id: { type: 'string', required: true },
           applied: { type: 'boolean', required: true },
           error: { type: 'string' },
+          reason: { type: 'string' },
+          blastRadius: { type: 'string', enum: ['general', 'project', 'session'] },
         },
       },
     },
@@ -90,6 +95,17 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
         scopeInstruction: scopeInstruction(global),
         ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
       }, completeViaAgent(ctx, agent, options.plannerMaxTokens), exec.signal)
+      // The conservative approval gate rides the plan path only: the user sees
+      // the planner's own summary before any global write commits. Rollback
+      // restores recorded state and never requires approval.
+      if (options.requireGlobalApproval && global) {
+        try {
+          await requireGlobalApproval(ctx, agent, exec.signal,
+            `目标：global store；planner 计划：${plan.summary}`)
+        } catch (error) {
+          return { refinement_id: 'none', scope: 'global' as const, summary: `global 写入未获批：${String(error)}`, applied: 0, failed: 0, edits: [] }
+        }
+      }
       const result = store.applyRefinement(agent, plan, { global })
       return summarize(result.id, result.scope, result.summary, result.appliedEdits)
     },
@@ -101,7 +117,15 @@ function summarize(
   id: string,
   scope: 'local' | 'global',
   summary: string,
-  edits: ReadonlyArray<{ action: RefinementAction; kind: RefinementKind; id: string; applied: boolean; error?: string }>,
+  edits: ReadonlyArray<{
+    action: RefinementAction
+    kind: RefinementKind
+    id: string
+    applied: boolean
+    error?: string
+    reason?: string
+    blastRadius?: BlastRadius
+  }>,
 ) {
   return {
     refinement_id: id,
@@ -115,6 +139,8 @@ function summarize(
       id: edit.id,
       applied: edit.applied,
       ...(edit.error === undefined ? {} : { error: edit.error }),
+      ...(edit.reason === undefined ? {} : { reason: edit.reason }),
+      ...(edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }),
     })),
   }
 }
