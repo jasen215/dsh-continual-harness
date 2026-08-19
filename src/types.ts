@@ -9,6 +9,12 @@ export type RefinementKind = 'prompt' | 'memory' | 'skill' | 'subagent'
 /** Which edit an entry undergoes. */
 export type RefinementAction = 'create' | 'update' | 'delete'
 
+/** How far an edit's effects may reach beyond the entry itself. */
+export type BlastRadius = 'general' | 'project' | 'session'
+
+/** Governance protection a harness entry carries. */
+export type Protection = 'bundled' | 'pinned' | 'user-owned'
+
 /** A versioned harness entry. */
 export interface HarnessEntry {
   /** Stable identifier, unique within (scope, kind). */
@@ -20,6 +26,8 @@ export interface HarnessEntry {
   content: string
   /** ISO timestamp of the last applied edit. */
   updatedAt: string
+  /** Governance protection; absent entries are unprotected. */
+  protection?: Protection
 }
 
 /** Reusable prompt notes; `base_system_prompt` is immutable and never stored here. */
@@ -60,6 +68,10 @@ export interface RefinementEdit {
   content?: string
   /** One-line summary; used by `skill` edits as the SKILL.md description. */
   description?: string
+  /** Why this edit is made; required for `update`/`delete`, stamped by rollback. */
+  reason?: string
+  /** How far this edit's effects may reach; defaults to `general` on apply. */
+  blastRadius?: BlastRadius
   /** Legacy fields, tolerated for state compatibility. */
   reference?: string
   arguments?: string
@@ -83,6 +95,10 @@ export interface AppliedRefinementEdit {
   before?: string
   /** Content snapshot after the edit; absent for `delete`. */
   after?: string
+  /** Why this edit was made; `rollback:<id>` for generated rollbacks. */
+  reason?: string
+  /** How far this edit's effects reach; always present, defaults to `general`. */
+  blastRadius: BlastRadius
   /** Set when validation or the baseline conflict check rejected the edit. */
   error?: string
   applied: boolean

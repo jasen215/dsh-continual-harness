@@ -27,14 +27,14 @@ describe('validateEdit', () => {
     expect(validateEdit({ action: 'create', kind: 'skill', id: 'Not Kebab', content: 'c' })).toContain('kebab-case')
     expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', description: 'summary' }))
       .toBeUndefined()
-    expect(validateEdit({ action: 'delete', kind: 'skill', id: 's' })).toBeUndefined()
+    expect(validateEdit({ action: 'delete', kind: 'skill', id: 's', reason: 'why' })).toBeUndefined()
     // legacy python-contract fields remain tolerated for state compatibility
     expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', reference: 'r', arguments: '{}' }))
       .toBeUndefined()
   })
 
   it('requires content for non-delete edits', () => {
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'x' })).toContain('content')
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'x', reason: 'why' })).toContain('content')
   })
 })
 
@@ -45,8 +45,8 @@ describe('applyRefinementProposal', () => {
     edits: [
       { action: 'create', kind: 'memory', id: 'pin-versions', content: 'always pin versions' },
       { action: 'create', kind: 'skill', id: 'repro', content: 'repro skill', description: 'reproduce a bug fast' },
-      { action: 'update', kind: 'memory', id: 'missing', content: 'x' },
-      { action: 'delete', kind: 'memory', id: 'stale', content: '' },
+      { action: 'update', kind: 'memory', id: 'missing', reason: 'why', content: 'x' },
+      { action: 'delete', kind: 'memory', id: 'stale', reason: 'why', content: '' },
     ],
   }
 
@@ -77,7 +77,7 @@ describe('applyRefinementProposal', () => {
     const { result } = applyRefinementProposal(state, {
       id: 'refine_2',
       summary: 'update',
-      edits: [{ action: 'update', kind: 'memory', id: 'pin-versions', content: 'newest' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'pin-versions', reason: 'why', content: 'newest' }],
     }, { id: 'refine_2', scope: 'local', baselineState: baseline })
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(false)

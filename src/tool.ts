@@ -11,7 +11,7 @@ import { completeViaAgent } from './complete.ts'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import { overviewForPrompt, historyForPrompt } from './render.ts'
 import type { HarnessStore } from './store.ts'
-import type { RefinementAction, RefinementKind } from './types.ts'
+import type { BlastRadius, RefinementAction, RefinementKind } from './types.ts'
 
 const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
 
@@ -46,6 +46,8 @@ const OUTPUT_SCHEMA = {
           id: { type: 'string', required: true },
           applied: { type: 'boolean', required: true },
           error: { type: 'string' },
+          reason: { type: 'string' },
+          blastRadius: { type: 'string', enum: ['general', 'project', 'session'] },
         },
       },
     },
@@ -101,7 +103,15 @@ function summarize(
   id: string,
   scope: 'local' | 'global',
   summary: string,
-  edits: ReadonlyArray<{ action: RefinementAction; kind: RefinementKind; id: string; applied: boolean; error?: string }>,
+  edits: ReadonlyArray<{
+    action: RefinementAction
+    kind: RefinementKind
+    id: string
+    applied: boolean
+    error?: string
+    reason?: string
+    blastRadius?: BlastRadius
+  }>,
 ) {
   return {
     refinement_id: id,
@@ -115,6 +125,8 @@ function summarize(
       id: edit.id,
       applied: edit.applied,
       ...(edit.error === undefined ? {} : { error: edit.error }),
+      ...(edit.reason === undefined ? {} : { reason: edit.reason }),
+      ...(edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }),
     })),
   }
 }
