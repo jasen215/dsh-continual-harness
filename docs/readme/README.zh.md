@@ -2,6 +2,15 @@
 
 [English](../../README.md) | 中文
 
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/v/dsh-continual-harness" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/dm/dsh-continual-harness" alt="npm downloads"></a>
+  <img src="https://img.shields.io/badge/node-22+-339933.svg" alt="Node Version">
+  <img src="https://img.shields.io/badge/typescript-6.0+-3178C6.svg" alt="TypeScript">
+  <a href="https://github.com/jasen215/dsh-continual-harness/actions/workflows/ci.yml"><img src="https://github.com/jasen215/dsh-continual-harness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个插件为 agent 提供「持久记忆 + 定期复盘精修 + 全局共享知识 + 失败自动回滚」闭环（plan → validate → apply → rollback），并以 dsh 的插件机制（session 事件、agent 作用域事件、pre-step 瀑布、tools 服务）实现。
 
 设计灵感来自 Prime Intellect 开源的 [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)，一个自改进的编码 harness。
