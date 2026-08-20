@@ -4,11 +4,11 @@
 
 <p>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
-  <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/v/dsh-continual-harness" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/v/dsh-continual-harness?cacheSeconds=86400" alt="npm version"></a>
   <img src="https://img.shields.io/badge/node-22+-339933.svg" alt="Node Version">
   <img src="https://img.shields.io/badge/typescript-6.0+-3178C6.svg" alt="TypeScript">
   <a href="https://github.com/jasen215/dsh-continual-harness/actions/workflows/ci.yml"><img src="https://github.com/jasen215/dsh-continual-harness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/jasen215/dsh-continual-harness/stargazers"><img src="https://img.shields.io/github/stars/jasen215/dsh-continual-harness" alt="GitHub stars"></a>
+  <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/dm/dsh-continual-harness?cacheSeconds=86400" alt="npm downloads"></a>
 </p>
 
 DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个插件为 agent 提供「持久记忆 + 定期复盘精修 + 全局共享知识 + 失败自动回滚」闭环（plan → validate → apply → rollback），并以 dsh 的插件机制（session 事件、agent 作用域事件、pre-step 瀑布、tools 服务）实现。
