@@ -11,13 +11,13 @@
   <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/dm/dsh-continual-harness?cacheSeconds=86400" alt="npm downloads"></a>
 </p>
 
-DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个插件为 agent 提供「持久记忆 + 定期复盘精修 + 全局共享知识 + 失败自动回滚」闭环（plan → validate → apply → rollback），并以 dsh 的插件机制（session 事件、agent 作用域事件、pre-step 瀑布、tools 服务）实现。
+DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个插件为 agent 提供「持久记忆 + 定期复盘精修 + 全局共享知识 + 失败自动回滚」闭环（plan → validate → apply → rollback）。
 
 设计灵感来自 Prime Intellect 开源的 [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)，一个自改进的编码 harness。
 
-## 一个插件就够
+## 核心能力
 
-不需要拆分多个包：本插件是一个独立 npm 包（`dsh-continual-harness`），挂载后通过以下扩展点全部生效：
+一个独立 npm 包（`dsh-continual-harness`），挂载后通过以下扩展点生效：
 
 | 能力 | 机制 |
 | --- | --- |
@@ -45,12 +45,15 @@ src/
   planner.ts     LLM 规划提示词与 JSON 解析（plan / auto-refine review 两条提示词）
   store.ts       HarnessStore：组合存储 + 事件发布（session 事件 + agent 作用域事件）
   complete.ts    completeViaAgent：经 ctx.get('llm') 调用补全
-  tool.ts        harness_refine 工具
+  benchmark.ts   基准用例/快照 + 基准 store 原子持久化
+  evaluate.ts    隔离的逐 cell 执行器/评审器评估（evidence + score）
+  score.ts       代码拥有的聚合与 ACCEPTED/REJECTED 决策
+  tool.ts        harness_refine / harness_wrapup / harness_benchmark 工具
   projection.ts  pre-step 投影（digest 去重、<harness_state> 注入）
   driver.ts      自动精修驱动器（turn 间隔门 / 压缩门 / 冷却 / 防重入）
   invariant.ts   运行时不变量校验插件
   index.ts       插件入口与 Config
-tests/           17 个测试文件，163 个用例（storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin 集成 / rank / projection / archive / usage / wrapup）
+tests/           23 个测试文件，287 个用例（storage / store / refine / rules / planner / driver / approval / audit / logfile / skills / invariant / plugin 集成 / rank / projection / archive / usage / wrapup / benchmark / evaluate / score / isolation / tool / benchmark 集成）
 ```
 
 ### 数据布局
@@ -68,12 +71,7 @@ tests/           17 个测试文件，163 个用例（storage / store / refine /
     refinements.jsonl               会话精修历史
 ```
 
-- 状态条目按 `prompt / memory / skill / subagent` 四类存放，均带 `version`（每次更新递增）。
-- 合并视图：本地条目优先；被遮蔽的全局条目以 `local:<id>` 前缀保留可见。
-- 应用时校验基线：规划期间条目被并发修改则拒绝该编辑（`entry changed during refinement planning`）。
-- `base_system_prompt` 为受保护 id，任何编辑都会被拒绝。
-- **旧版布局不会自动迁移**：早于扁平布局的安装（状态位于 `~/.dsh/harness/harness/` 与 `sessions/<id>/harness/`）**不会被自动迁移**——请把状态文件移动到上面的扁平布局（或重新播种）以继续使用。新安装不受影响。
-- **skill 是真正的 dsh skill**：每次应用的 skill 编辑都会把生效（合并后）的条目物化为 `<name>/SKILL.md` 目录束（YAML `name` + `description` frontmatter、kebab-case id），写入 `Config.skillsDir`（默认 `$DSH_HOME/skills`）——dsh 的文件系统 skill provider（`dsh-skill-filesystem`）实时发现它，`dsh-tool-skill` 把它暴露给模型。删除会移除目录束，回滚会还原；只处理提交触及的 id，不会碰同目录下用户自有的 skill。每个目录束都会盖上 `metadata` 溯源标记（`author: dsh-continual-harness`、`source: esp`），便于与手写 skill 区分。
+- **skill 是真正的 dsh skill**：应用的 skill 编辑会物化为 `<name>/SKILL.md` 目录束（含溯源 metadata）写入 `Config.skillsDir`，删除/回滚保持同步，不会碰同目录用户自有的 skill。
 
 ### 经验固化协议 (ESP)
 
@@ -87,17 +85,19 @@ tests/           17 个测试文件，163 个用例（storage / store / refine /
 | 精修通知 | agent 事件 `harness/refined` | payload `{agent, result}`，供不变量等插件订阅 |
 | 经验注入 | 消息源 `harness-state`（携带 `digest`） | 预注入模型上下文，按摘要变化去重 |
 
-任何 dsh 插件都可以按这套协议读写经验（写状态文件、追加历史、发布事件、注入消息）；本包是协议的**参考实现与主要消费方**（规划/精修/投影/自动门）。未来若要把经验读写抽成独立可复用协议包，可据此拆出 `dsh-esp`，harness 退化为 ESP 的一个消费方。
-
-### 事件与消息源
-
-- session 事件 `harness/refinement`（RefinementResult）——每次应用/回滚都写入会话日志（model-visible ⟺ logged）。
-- agent 作用域事件 `harness/refined`（payload `{agent, result}`）——供不变量等其他插件订阅。
-- 预注入消息 `source.kind === 'harness-state'`，携带 `digest` 供去重。
+任何 dsh 插件都可以按这套协议读写经验（写状态文件、追加历史、发布事件、注入消息）；本包是协议的**参考实现与主要消费方**（规划/精修/投影/自动门）。
 
 ## 挂载（dsh profile）
 
-以 `cordis.patch.yml` 形式叠加到 dsh profile（例如 `~/.dsh/profiles/<name>/cordis.patch.yml`），见仓库内 [cordis.patch.yml](../../cordis.patch.yml) 示例。patch 层必须是**顶层 YAML 数组**（`insert` 行追加插件条目，id 定向行覆盖已有条目）：
+发布到 npm，一行安装到 profile：
+
+```sh
+dsh plugin --profile <name> add dsh-continual-harness
+```
+
+包声明了 `dsh.bundle`，因此 `dsh plugin` 会把它作为 profile 层安装并应用其 `cordis.patch.yml`。升级用 `dsh plugin --profile <name> update dsh-continual-harness@latest`。
+
+手动叠加（发布前，或固定本地检出）：把 [cordis.patch.yml](../../cordis.patch.yml) 应用到 profile，如 `~/.dsh/profiles/<name>/cordis.patch.yml`；patch 层必须是**顶层 YAML 数组**（`insert` 行追加插件条目，id 定向行覆盖已有条目）：
 
 ```yaml
 - insert:
@@ -105,13 +105,6 @@ tests/           17 个测试文件，163 个用例（storage / store / refine /
       name: dsh-continual-harness
       config:
         defaultGlobal: true
-```
-
-安装方式：
-
-```sh
-pnpm add dsh-continual-harness        # 或 link: 到本仓库源码（见下）
-pnpm dsh --profile <name> "…"
 ```
 
 前置要求：`tools`、`agents`、`session`、`llm`、`systemPrompt` 等能力插件先于本插件加载（插件的 `inject` 声明了依赖，未加载时挂载会延迟）。
@@ -134,32 +127,54 @@ pnpm dsh --profile <name> "…"
 | `logMaxBytes` | `5242880`（5 MB） | harness 日志文件轮转上限 |
 | `maxEntryGrowth` | `0.5` | 单次提交条目增长率上限；`0` 关闭检查 |
 | `protectedKinds` | `['skill']` | 自动路径不可修改的 kind（预留；实际生效的是条目级 `protection`） |
+| `benchmark` | `{enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0}` | 显式 `harness_benchmark` 工具：每例每侧迭代次数、运行上限、仅报告的通过线、非回归容差、候选失败 cell 上限 |
 
 ## 治理（Governance）
 
-所有写入路径——`harness_refine` 工具与自动 gate——都经由一个三层规则层把关，并以可逆性兜底：
+所有写入路径都经过三道把关：**影响面最小化**（固定契约校验；`update`/`delete` 必须携带一行 `reason`；`maxEntryGrowth` 限制单次提交增长）、**合法性硬拒**（`base_system_prompt` 与受保护条目不可变；`local` 精修期间全局条目只读）、**必要性软把关**（被否决的评审不会进入 store）。每个已提交的精修都可按 id 回滚。
 
-1. **影响面最小化** ——每次编辑在写入前都先按固定契约校验。`create` 可省略 `reason`；`update`/`delete` 必须携带一行 `reason`（缺失时以 `edit "<id>" rejected: missing reason` 拒绝该编辑）。可选 `blastRadius`（`general | project | session`）默认 `general`。`base_system_prompt` 不可变。`maxEntryGrowth`（默认 `0.5`）限制一次提交中条目可增长的比例（超限报 `entry growth exceeds the maxEntryGrowth cap`；`0` 关闭该检查）。
-2. **合法性硬拒** ——受保护条目（带 `protection` 的条目）在自动路径上不可改（`protected entries are mutable only in explicit user sessions`）；`local` 精修期间全局 store 只读，触碰未遮蔽的全局条目必须先创建 local 遮蔽条目（`global entries are read-only during a local refinement; create a local shadow first`）。
-3. **必要性软把关** ——任何自动精修前，评审 gate 都会判断「现在固化是否值得」；被否决的评审不会进入 store，且每个裁决都会落审计。
-
-**可逆性兜底**：每个已提交的精修都可按 id 回滚，回滚自带系统生成的 `rollback:<id>` reason。
-
-全局写入**默认零审批**：工具提交全局精修时不咨询任何审批服务。设置 `requireGlobalApproval: true` 进入保守模式：全局写入先经 `dsh-user-questions` 服务询问用户，用户拒绝则跳过（`global write not approved: <error>`）。
-
-gate 与插件会在 harness 根目录保留两份产物：每个 gate 裁决追加到 `reviews.jsonl`（结果 `approved | declined | assessed | failed`），`harness` / `continual-harness` logger 的日志行追加到 `continual-harness.log`（JSONL、`0600`，超过 `logMaxBytes` 轮转到 `.1`）。
-
-实时查看插件日志：
+全局写入**默认零审批**；设置 `requireGlobalApproval: true` 则先询问用户。实时查看插件日志：
 
 ```sh
 tail -f ~/.dsh/harness/continual-harness.log
 ```
 
-（专门的治理工具入口推迟实现。）
+## Benchmark
+
+验证层**显式且单一入口**：一个 `harness_benchmark` action 工具驱动整个流程，且绝不会自动触发精修——benchmark 路径上没有任何东西会发起 `harness_refine` 或自动 gate，`REJECTED` 决策也只报告与记录，永不回滚。store 位于 `<harnessRoot>/benchmark/`（见上文数据布局）。
+
+最小流程是 `new → add-case → freeze → capture-reference → apply refinement → run → status`（冻结用例不可变且有哈希；`status` 列出用例、快照与近期运行）。其中两步有真正的细节：
+
+- `capture-reference` 必须**先于**你要验证的精修执行：候选态之后由*捕获的参考快照 + 恰好该精修*推导，改动后再捕获会让增量无法证明。
+- `run` 针对参考快照做指定精修的 A/B 评估（`reference_snapshot_id` + `refinement_id`）。候选必须是**单一指定增量**——由参考快照加该精修记录的应用编辑推导，并在评估前于代码中证明；漂移或多次变更的候选会被拒绝（`benchmark:run:candidate-delta`）。两侧以相同顺序运行同一批冻结用例，使用相同的 `runs`/`provider`/`model`。
+
+`run` 返回代码拥有的决策（`src/score.ts`），而非模型裁决：
+
+```json
+{
+  "action": "run",
+  "ok": true,
+  "run_id": "run-...",
+  "refinement_id": "refine-1",
+  "status": "ACCEPTED",
+  "reference_overall": 70,
+  "candidate_overall": 90,
+  "regression_cases": [],
+  "failed_cells": 0,
+  "feedback": ["reference ok", "candidate better"],
+  "auto_rollback": false,
+  "runs": 1,
+  "cells": 2
+}
+```
+
+- 每个 cell 的分数为 `0..100`；失败的 cell 记 `score: null`——失败永不计为 `0`——并从总体均值中排除。
+- `passThreshold`（默认 `60`）**仅作报告**：它从不决定是否接受。只有当两侧都有可用 cell、候选失败 cell 数在 `maxFailedCells` 内、且总体与逐用例回归都不超过 `regressionTolerance`（默认 `0`）时，run 才是 `ACCEPTED`。
+- 每次 run 都会把完整记录（含执行器 evidence 的 cells + 决策）追加到 `benchmark/runs.jsonl`；评估只读捕获的快照、只写这一条记录，绝不触碰 `reviews.jsonl`、harness 状态、注入遥测或 skill 文件。
 
 ## 开发
 
-插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`（163 用例）、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
+插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
 
 ## Known Limitations and Deferred Work
 
@@ -169,3 +184,4 @@ tail -f ~/.dsh/harness/continual-harness.log
 - 并发写入是 last-writer-wins：同目录多进程同时精修可能互相覆盖，规划期的基线冲突检测只能拦截「读后写」竞争，不能串行化。
 - 自动精修失败静默降级（只记日志），不打断会话。
 - 内容收缩守卫（限制单次 update 把条目收缩到阈值以下）是待办跟进项，尚未实现；当前只有 `maxEntryGrowth` 限制条目增长。
+- 专门的治理工具入口推迟实现。

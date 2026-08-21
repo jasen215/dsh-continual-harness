@@ -11,13 +11,13 @@ English | [中文](docs/readme/README.zh.md)
   <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/dm/dsh-continual-harness?cacheSeconds=86400" alt="npm downloads"></a>
 </p>
 
-A **continual self-refinement plugin** for DeepSeek Harness: one plugin gives the agent a closed loop of *persistent memory + periodic review-and-refine + cross-session shared knowledge + automatic rollback on failure* (plan → validate → apply → rollback), implemented through dsh's plugin mechanisms (session events, agent-scoped events, pre-step waterfall, tools service).
+A **continual self-refinement plugin** for DeepSeek Harness: one plugin gives the agent a closed loop of *persistent memory + periodic review-and-refine + cross-session shared knowledge + automatic rollback on failure* (plan → validate → apply → rollback).
 
 The design is inspired by the open-source [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) from Prime Intellect, a self-improving coding harness.
 
-## One plugin is enough
+## Capabilities
 
-There is no need to split into multiple packages: this plugin is a single npm package (`dsh-continual-harness`) that takes effect through the following extension points once mounted:
+A single npm package (`dsh-continual-harness`) takes effect through the following extension points once mounted:
 
 | Capability | Mechanism |
 | --- | --- |
@@ -76,12 +76,7 @@ tests/           23 test files, 287 cases (storage / store / refine / rules / pl
     refinements.jsonl               session refinement history
 ```
 
-- Entries are stored in four kinds — `prompt / memory / skill / subagent` — each with a `version` (incremented on every update).
-- Merged view: local entries win; a shadowed global entry remains visible under the `local:<id>` prefix.
-- Baseline validation on apply: an edit is rejected if the entry changed concurrently during planning (`entry changed during refinement planning`).
-- `base_system_prompt` is a protected id; any edit to it is rejected.
-- **No auto-migration from the legacy layout:** installs that predate the flat layout (state under `~/.dsh/harness/harness/` and `sessions/<id>/harness/`) are **not auto-migrated** — move the state files into the flat layout above (or re-seed) to keep using the harness. New installs are unaffected.
-- **Skills are real dsh skills.** Every applied skill edit materializes the effective merged entry as a `<name>/SKILL.md` bundle (YAML `name` + `description` frontmatter, kebab-case id) under `Config.skillsDir` (default `$DSH_HOME/skills`), where dsh's filesystem skill provider (`dsh-skill-filesystem`) discovers it live and `dsh-tool-skill` exposes it to the model. Deletes remove the bundle; rollbacks restore it. Only ids touched by a commit are written or removed, so user-owned skills in the same directory are never touched. Each bundle stamps a `metadata` provenance block (`author: dsh-continual-harness`, `source: esp`) so generated skills are distinguishable from hand-written ones.
+- **Skills are real dsh skills:** applied skill edits materialize as `<name>/SKILL.md` bundles (with provenance metadata) under `Config.skillsDir`, kept in sync by deletes/rollbacks without touching user-owned skills in the same directory.
 
 ### Experience Solidification Protocol (ESP)
 
@@ -95,13 +90,7 @@ The Experience Solidification Protocol (ESP) is the **protocol surface** of this
 | Refinement notification | agent event `harness/refined` | Payload `{agent, result}`; subscribable by invariant and other plugins |
 | Experience injection | message source `harness-state` (carries `digest`) | Pre-injected into the model context; deduplicated by digest change |
 
-Any dsh plugin can read and write experience through this protocol (write state files, append history, publish events, inject messages); this package is the protocol's **reference implementation and primary consumer** (planning / refinement / projection / automatic gate). If the experience read/write layer is ever extracted into a standalone reusable protocol package, `dsh-esp` can be split out along these lines, with the harness degrading to a consumer of ESP.
-
-### Events and message sources
-
-- Session event `harness/refinement` (RefinementResult) — written to the session log on every apply/rollback (model-visible ⟺ logged).
-- Agent-scoped event `harness/refined` (payload `{agent, result}`) — subscribable by invariant and other plugins.
-- Pre-injected message `source.kind === 'harness-state'`, carrying a `digest` for deduplication.
+Any dsh plugin can read and write experience through this protocol (write state files, append history, publish events, inject messages); this package is the protocol's **reference implementation and primary consumer** (planning / refinement / projection / automatic gate).
 
 ## Mounting (dsh profile)
 
@@ -112,9 +101,7 @@ dsh plugin --profile <name> add dsh-continual-harness
 ```
 
 The package declares `dsh.bundle`, so `dsh plugin` installs it as a profile
-layer: the dependency is added and its `cordis.patch.yml` is applied as that
-bundle's patch. The plugin's runtime imports of `@deepseek-ai/*` resolve
-through the profile's flat fallback `node_modules` directory. Update with
+layer and applies its `cordis.patch.yml`. Update with
 `dsh plugin --profile <name> update dsh-continual-harness@latest`.
 
 Manual overlay (before publish, or to pin a local checkout): apply
@@ -154,43 +141,22 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 
 ## Governance
 
-Every write path — the `harness_refine` tool and the automatic gate — funnels through a rule layer with three tiers, plus a reversibility backstop:
+Every write path funnels through three guardrails: **impact minimization** (fixed contract validation; `update`/`delete` require a one-line `reason`; `maxEntryGrowth` caps per-commit growth), **legality hard rejects** (`base_system_prompt` and protected entries are immutable; global entries are read-only during a `local` refinement), and a **necessity soft gate** (a declined review never reaches the store). Every committed refinement rolls back by id.
 
-1. **Impact minimization** — every edit is validated against a fixed contract before any write. `create` may omit a `reason`; `update`/`delete` must carry a one-line `reason` (a missing one rejects the edit with `edit "<id>" rejected: missing reason`). Optional `blastRadius` (`general | project | session`) defaults to `general`. `base_system_prompt` is immutable. `maxEntryGrowth` (default `0.5`) caps how much an update may grow an entry in one commit (`entry growth exceeds the maxEntryGrowth cap`; `0` disables the check).
-2. **Legality hard rejects** — Protected entries (those carrying `protection`) are immutable on the automatic path (`protected entries are mutable only in explicit user sessions`); during a `local` refinement the global store is read-only, so touching an unshadowed global entry requires creating a local shadow first (`global entries are read-only during a local refinement; create a local shadow first`).
-3. **Necessity soft gate** — before any automatic refinement the review gate decides whether persisting now is worthwhile; a declined review never reaches the store, and every verdict is audited.
-
-**Reversibility** is the backstop: every committed refinement rolls back by id, and rollbacks carry a system-generated `rollback:<id>` reason.
-
-Global writes are **zero-approval by default**: the tool commits a global refinement without consulting any approval service. Set `requireGlobalApproval: true` for the conservative mode, in which a global write first asks the user through the `dsh-user-questions` service and is skipped on rejection (`global write not approved: <error>`).
-
-The gate and the plugin keep two artifacts under the harness root: every gate verdict is appended to `reviews.jsonl` (outcomes `approved | declined | assessed | failed`), and harness log lines from the `harness` / `continual-harness` loggers are appended to `continual-harness.log` (JSONL, `0600`, rotated to `.1` once `logMaxBytes` is exceeded).
-
-Watch the plugin log live with:
+Global writes are **zero-approval by default**; set `requireGlobalApproval: true` to ask the user first. Watch the plugin log live with:
 
 ```sh
 tail -f ~/.dsh/harness/continual-harness.log
 ```
 
-(A dedicated tool entry for governance is deferred.)
-
 ## Benchmark
 
-The validation layer is **explicit and single-entry**: one `harness_benchmark` action tool drives the whole workflow, and it never auto-triggers a refinement — nothing in the benchmark path starts a `harness_refine` or the automatic gate, and a `REJECTED` decision never auto-rolls back. The benchmark store lives under `<harnessRoot>/benchmark/` (`cases.json`, `snapshots/`, `runs.jsonl`).
+The validation layer is **explicit and single-entry**: one `harness_benchmark` action tool drives the whole workflow and never auto-triggers a refinement — nothing in the benchmark path starts a `harness_refine` or the automatic gate, and a `REJECTED` decision is reported and recorded only, never rolled back. The store lives under `<harnessRoot>/benchmark/` (see the data layout above).
 
-The minimal sequence:
+The minimal sequence is `new → add-case → freeze → capture-reference → apply refinement → run → status` (frozen case material is immutable and hashed; `status` lists cases, snapshots, and recent runs). Two steps carry real subtleties:
 
-```
-new → add-case → freeze → capture-reference → apply refinement → run → status
-```
-
-1. `new` — initialize the benchmark store.
-2. `add-case` — add a draft case (`case_id`, `title`, `statement`, `rubric`, optional `capability`).
-3. `freeze` — freeze the draft; frozen case material is immutable and hashed.
-4. `capture-reference` — persist a reference snapshot of the merged harness state **BEFORE** applying the refinement you want to validate (`snapshot_id`). Reference capture must precede the refinement: the candidate is later derived as *this captured reference plus exactly that refinement*, so capturing after the change would make the delta unprovable.
-5. Apply the refinement (`harness_refine`, or any path that lands a refinement in the store history) — the run needs its real id.
-6. `run` — evaluate the named refinement A/B against the reference snapshot (`reference_snapshot_id` + `refinement_id`). The candidate must be the **single specified delta**: the run derives it from the captured reference plus the refinement's recorded applied edits and proves it in code before any evaluation; a drifted or multi-change candidate is refused with a `benchmark:run:candidate-delta` error. Both sides run the same frozen cases in stored order with the same `runs`/`provider`/`model`.
-7. `status` — list cases, snapshots, and recent runs.
+- `capture-reference` must run **BEFORE** the refinement you want to validate: the candidate is later derived as *the captured reference plus exactly that refinement*, so capturing after the change would make the delta unprovable.
+- `run` evaluates the named refinement A/B against the reference (`reference_snapshot_id` + `refinement_id`). The candidate must be the **single specified delta** — derived from the reference plus the refinement's recorded applied edits and proved in code before any evaluation; a drifted or multi-change candidate is refused (`benchmark:run:candidate-delta`). Both sides run the same frozen cases in stored order with the same `runs`/`provider`/`model`.
 
 A `run` returns the code-owned decision (`src/score.ts`), not a model verdict:
 
@@ -212,16 +178,15 @@ A `run` returns the code-owned decision (`src/score.ts`), not a model verdict:
 }
 ```
 
-- Scores are on a `0..100` scale (`score` in each cell). A failed cell carries `score: null` — failure is never counted as `0` — and is excluded from the overall means.
-- `passThreshold` (default `60`) is **report-only** (§4.5): it never gates acceptance. A run is `ACCEPTED` only when neither side lacks usable cells, candidate failed cells stay within `maxFailedCells`, and no overall or per-case regression exceeds `regressionTolerance` (default `0`).
-- Every run appends its full record (cells with executor evidence + the decision) to `benchmark/runs.jsonl`. Evaluation reads only the captured snapshots and writes only that record — it never touches `reviews.jsonl`, the harness state, injection telemetry, or skill files.
-- `REJECTED` is reported and recorded only; `auto_rollback` is always `false` in MVP and no rollback is ever invoked.
+- Scores are `0..100` per cell; a failed cell carries `score: null` — failure is never counted as `0` — and is excluded from the overall means.
+- `passThreshold` (default `60`) is **report-only**: it never gates acceptance. A run is `ACCEPTED` only when neither side lacks usable cells, candidate failed cells stay within `maxFailedCells`, and no overall or per-case regression exceeds `regressionTolerance` (default `0`).
+- Every run appends its full record (cells with executor evidence + the decision) to `benchmark/runs.jsonl`; evaluation reads only the captured snapshots and writes only that record, never touching `reviews.jsonl`, the harness state, injection telemetry, or skill files.
 
 ## Development
 
 The plugin is self-contained: `devDependencies` pin the published
 `@deepseek-ai/*` packages (rc versions), so `pnpm install`, `pnpm run
-typecheck`, `pnpm test` (287 cases), and `pnpm run build` (tsc emits
+typecheck`, `pnpm test`, and `pnpm run build` (tsc emits
 `lib/types/*.js + *.d.ts`; the `"."` and `"./invariant"` exports point at the
 artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
@@ -235,3 +200,4 @@ run the same steps. `peerDependencies` declare the semver ranges consumers
 - Concurrent writes are last-writer-wins: multiple processes refining the same directory concurrently may overwrite each other; baseline conflict detection during planning can only catch read-after-write races, not serialize them.
 - A failed automatic refinement degrades silently (only logged) and never interrupts the session.
 - A content-shrink guard (rejecting updates that shrink an entry too far in one commit) is a planned follow-up and is not yet implemented; today only `maxEntryGrowth` caps how much an update may grow an entry.
+- A dedicated governance tool entry is deferred.
