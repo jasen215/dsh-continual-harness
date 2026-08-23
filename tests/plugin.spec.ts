@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -554,5 +554,52 @@ describe('harness-state projection', () => {
     const blocks = derived.filter(message => message.source?.kind === HARNESS_STATE_SOURCE)
     expect(blocks).toHaveLength(1)
     expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
+  })
+})
+
+describe('harness_refine bundle materialization result', () => {
+  it('reports materialization status and writes the bundle files', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_bundle',
+      summary: 'create a bundle skill',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'bundle-demo',
+        description: 'Use whenever bundling',
+        content: '## Steps\n1. Run `scripts/bundle.py`',
+        files: { 'scripts/bundle.py': 'print(1)', 'references/t.md': '# t' },
+      }],
+    }) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const result = await execute(ctx, 'harness_refine', { global: true }, stubAgent('executor').agent)
+    const json = resultJson(result)
+    expect(json.applied).toBe(1)
+    const materialization = json.materialization as {
+      status: string
+      written: string[]
+      unchanged: string[]
+      skipped: string[]
+      stale_candidates: string[]
+      errors: unknown[]
+    }
+    expect(materialization).toEqual({
+      status: 'completed',
+      written: [
+        join(home, 'skills', 'bundle-demo', 'SKILL.md'),
+        join(home, 'skills', 'bundle-demo', 'scripts', 'bundle.py'),
+        join(home, 'skills', 'bundle-demo', 'references', 't.md'),
+      ],
+      unchanged: [],
+      skipped: [],
+      stale_candidates: [],
+      errors: [],
+    })
+    expect(existsSync(join(home, 'skills', 'bundle-demo', 'SKILL.md'))).toBe(true)
+    expect(readFileSync(join(home, 'skills', 'bundle-demo', 'scripts', 'bundle.py'), 'utf8')).toBe('print(1)')
   })
 })

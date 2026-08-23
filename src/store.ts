@@ -296,7 +296,11 @@ export class HarnessStore {
   }
 
   /** Roll back a committed refinement by id from the merged history. */
-  rollbackRefinement(agent: Agent, rollbackId: string, options: CommitOptions = {}): RefinementResult {
+  rollbackRefinement(
+    agent: Agent,
+    rollbackId: string,
+    options: CommitOptions = {},
+  ): RefinementResult & { materialization: MaterializationResult } {
     const global = options.global === true
     const history = global ? loadGlobalRefinementHistory(this.home) : this.history(agent)
     const target = history.find(result => result.id === rollbackId)

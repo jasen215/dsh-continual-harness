@@ -38,7 +38,7 @@ import { overviewForPrompt, historyForPrompt } from './render.ts'
 import { decideBenchmark } from './score.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { HarnessStore } from './store.ts'
-import type { BlastRadius, HarnessState, RefinementAction, RefinementKind, RefinementResult } from './types.ts'
+import type { BlastRadius, HarnessState, MaterializationResult, RefinementAction, RefinementKind, RefinementResult } from './types.ts'
 import { suggestWrapup } from './wrapup.ts'
 
 const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. Prefer this tool over any standalone skill-authoring skill whenever the user asks to turn what we just did into a reusable skill — e.g. "把xxx流程做成skill", "save our process as a skill", "create a skill from this workflow". The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
@@ -78,6 +78,31 @@ const OUTPUT_SCHEMA = {
           error: { type: 'string' },
           reason: { type: 'string' },
           blastRadius: { type: 'string', enum: ['general', 'project', 'session'] },
+          files: { type: 'object', additionalProperties: true },
+        },
+      },
+    },
+    materialization: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        status: { type: 'string', enum: ['completed', 'partial', 'failed'] },
+        written: { type: 'array', items: { type: 'string' } },
+        unchanged: { type: 'array', items: { type: 'string' } },
+        skipped: { type: 'array', items: { type: 'string' } },
+        stale_candidates: { type: 'array', items: { type: 'string' } },
+        errors: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              path: { type: 'string' },
+              code: { type: 'string' },
+              retryable: { type: 'boolean' },
+              message: { type: 'string' },
+            },
+          },
         },
       },
     },
@@ -189,7 +214,7 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
       const global = args.global ?? options.defaultGlobal
       if (args.rollback_id) {
         const result = store.rollbackRefinement(agent, args.rollback_id, { global })
-        return summarize(result.id, result.scope, result.summary, result.appliedEdits)
+        return summarize(result.id, result.scope, result.summary, result.appliedEdits, result.materialization)
       }
       // Capture the target store's state before planning: the commit compares
       // the current entries against this baseline and rejects any edit whose
@@ -205,6 +230,7 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
         scopeInstruction: scopeInstruction(global),
         ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
       }, completeViaAgent(ctx, agent, options.plannerMaxTokens), exec.signal)
+      validatePlannerFiles(plan)
       // The conservative approval gate rides the plan path only: the user sees
       // the planner's own summary before any global write commits. Rollback
       // restores recorded state and never requires approval.
@@ -217,10 +243,24 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
         }
       }
       const result = store.applyRefinement(agent, plan, { global, baseline })
-      return summarize(result.id, result.scope, result.summary, result.appliedEdits)
+      return summarize(result.id, result.scope, result.summary, result.appliedEdits, result.materialization)
     },
     presentCall: () => ({ card: 'generic' as const, title: 'Refine continual harness', kind: 'other' as const }),
   }))
+}
+
+function validatePlannerFiles(plan: { edits: ReadonlyArray<{ kind?: unknown; files?: unknown }> }): void {
+  for (const [editIndex, edit] of plan.edits.entries()) {
+    if (edit.kind !== 'skill' || edit.files === undefined) continue
+    if (typeof edit.files !== 'object' || edit.files === null || Array.isArray(edit.files)) {
+      throw new Error(`edit ${editIndex} files must be an object with string values`)
+    }
+    for (const [path, value] of Object.entries(edit.files)) {
+      if (typeof value !== 'string') {
+        throw new Error(`edit ${editIndex} files[${JSON.stringify(path)}] must be a string`)
+      }
+    }
+  }
 }
 
 function summarize(
@@ -236,6 +276,7 @@ function summarize(
     reason?: string
     blastRadius?: BlastRadius
   }>,
+  materialization?: MaterializationResult,
 ) {
   return {
     refinement_id: id,
@@ -252,6 +293,16 @@ function summarize(
       ...(edit.reason === undefined ? {} : { reason: edit.reason }),
       ...(edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }),
     })),
+    ...(materialization === undefined ? {} : {
+      materialization: {
+        status: materialization.status,
+        written: materialization.written,
+        unchanged: materialization.unchanged,
+        skipped: materialization.skipped,
+        stale_candidates: materialization.staleCandidates,
+        errors: materialization.errors,
+      },
+    }),
   }
 }
 
