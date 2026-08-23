@@ -8,6 +8,7 @@ import {
   reconcileSkillFiles,
   referencedFilePaths,
   renderSkillMarkdown,
+  validateBundleFiles,
   validateSkillBundle,
 } from '../src/skills.ts'
 import type { HarnessEntry } from '../src/types.ts'
@@ -176,5 +177,45 @@ describe('validateSkillBundle (L2 structural quality)', () => {
     const longBody = Array.from({ length: 501 }, (_, i) => `line ${i}`).join('\n')
     const issues = validateSkillBundle(skillEntry('repro', longBody, 'Use whenever repro'))
     expect(issues.some(issue => issue.code === 'body-too-long' && issue.severity === 'warning')).toBe(true)
+  })
+})
+
+describe('validateBundleFiles (L1 bundle limits)', () => {
+  it('accepts a valid scripts/references map', () => {
+    expect(validateBundleFiles({
+      'scripts/oq_quantize.py': 'print(1)',
+      'references/template.md': '# x',
+    })).toBeUndefined()
+  })
+
+  it('rejects traversal, absolute, dot, empty-segment, and ./ keys', () => {
+    expect(validateBundleFiles({ '../evil': 'x' })).toContain('invalid path segment')
+    expect(validateBundleFiles({ '/abs': 'x' })).toContain('relative')
+    expect(validateBundleFiles({ 'scripts/./x': 'x' })).toContain('invalid path segment')
+    expect(validateBundleFiles({ 'scripts//x': 'x' })).toContain('invalid path segment')
+    expect(validateBundleFiles({ './scripts/x': 'x' })).toContain('./')
+  })
+
+  it('rejects keys outside scripts/ and references/, and SKILL.md', () => {
+    expect(validateBundleFiles({ 'lib/x': 'x' })).toContain('scripts/ or references/')
+    expect(validateBundleFiles({ 'SKILL.md': 'x' })).toContain('generated from content')
+  })
+
+  it('rejects backslashes, URL encoding, and empty keys', () => {
+    expect(validateBundleFiles({ 'scripts\\x': 'x' })).toContain('forward slashes')
+    expect(validateBundleFiles({ 'scripts/%2e%2e/x': 'x' })).toContain('URL-encoded')
+    expect(validateBundleFiles({ '': 'x' })).toContain('must not be empty')
+  })
+
+  it('rejects over-limit file counts and byte sizes measured in UTF-8', () => {
+    const many: Record<string, string> = {}
+    for (let i = 0; i < 21; i += 1) many[`scripts/f${i}.py`] = 'x'
+    expect(validateBundleFiles(many)).toContain('maxSkillFiles')
+    expect(validateBundleFiles({ 'scripts/big.py': 'x'.repeat(256 * 1024 + 1) })).toContain('maxSkillFileBytes')
+    // 5 files × ~261 KiB each (87_000 × 3-byte chars) stays under the per-file
+    // cap (262144) but totals ~1.24 MiB — only the bundle cap trips
+    const multi: Record<string, string> = {}
+    for (let i = 0; i < 5; i += 1) multi[`scripts/f${i}.py`] = '中'.repeat(87_000)
+    expect(validateBundleFiles(multi)).toContain('maxSkillBundleBytes')
   })
 })

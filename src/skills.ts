@@ -32,6 +32,61 @@ export const SKILL_AUTHOR = 'dsh-continual-harness'
 /** Provenance marker: the skill came out of the experience-solidification loop. */
 export const SKILL_SOURCE = 'esp'
 
+/** Skill bundle size/number limits (spec §7.4/§7.10). */
+export interface SkillBundleLimits {
+  maxSkillFiles: number
+  maxSkillFileBytes: number
+  maxSkillBundleBytes: number
+}
+
+/** Default bundle limits: 20 files, 256 KiB per file, 1 MiB total (UTF-8 bytes). */
+export const DEFAULT_SKILL_BUNDLE_LIMITS: SkillBundleLimits = {
+  maxSkillFiles: 20,
+  maxSkillFileBytes: 256 * 1024,
+  maxSkillBundleBytes: 1024 * 1024,
+}
+
+/**
+ * L1 hard validation of a skill bundle `files` map (spec §7.4): returns the
+ * failure reason or undefined when every key passes. Runs before any write.
+ */
+export function validateBundleFiles(
+  files: Record<string, string>,
+  limits: SkillBundleLimits = DEFAULT_SKILL_BUNDLE_LIMITS,
+): string | undefined {
+  const keys = Object.keys(files)
+  if (keys.length === 0) return undefined
+  if (keys.length > limits.maxSkillFiles) {
+    return `skill bundle exceeds maxSkillFiles (${keys.length} > ${limits.maxSkillFiles})`
+  }
+  let totalBytes = 0
+  for (const key of keys) {
+    if (key === '') return 'bundle file key must not be empty'
+    if (key.includes('\\')) return `bundle file key "${key}" must use forward slashes`
+    if (key.startsWith('/')) return `bundle file key "${key}" must be relative`
+    if (key.startsWith('./')) return `bundle file key "${key}" must not start with "./"`
+    if (key.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
+      return `bundle file key "${key}" contains an invalid path segment`
+    }
+    if (key === 'SKILL.md') return 'SKILL.md is generated from content and must not appear in files'
+    if (!/^(scripts|references)\//.test(key)) {
+      return `bundle file key "${key}" must start with scripts/ or references/`
+    }
+    if (/%[0-9a-fA-F]{2}/.test(key)) {
+      return `bundle file key "${key}" must not contain URL-encoded characters`
+    }
+    const bytes = Buffer.byteLength(files[key]!, 'utf8')
+    if (bytes > limits.maxSkillFileBytes) {
+      return `bundle file "${key}" exceeds maxSkillFileBytes (${bytes} > ${limits.maxSkillFileBytes})`
+    }
+    totalBytes += bytes
+  }
+  if (totalBytes > limits.maxSkillBundleBytes) {
+    return `skill bundle exceeds maxSkillBundleBytes (${totalBytes} > ${limits.maxSkillBundleBytes})`
+  }
+  return undefined
+}
+
 /** Skill entries may carry the optional one-line description. */
 export type SkillEntryLike = HarnessEntry & { description?: string }
 

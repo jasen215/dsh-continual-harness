@@ -68,6 +68,8 @@ export interface SkillEntry extends HarnessEntry {
   /** Legacy execution-contract fields from the pre-file era; kept for state compatibility. */
   reference?: string
   arguments?: string
+  /** Bundle 附属文件：相对 skill 目录的正斜杠路径 → 内容。仅 scripts/** 与 references/**。 */
+  files?: Record<string, string>
 }
 
 /** A reusable delegation spec. */
@@ -90,6 +92,8 @@ export interface RefinementEdit {
   /** Legacy fields, tolerated for state compatibility. */
   reference?: string
   arguments?: string
+  /** skill 编辑的附属文件映射（仅 scripts/**、references/** 下）；update 缺省保持旧值、{} 清空、完整 map 替换。 */
+  files?: Record<string, string>
   /** Internal lifecycle edit fields; not required in model JSON. */
   archive?: boolean
   pin?: boolean
@@ -185,4 +189,20 @@ export interface RefinementPlanInput {
   trajectoryText: string
   scopeInstruction: string
   instructions?: string
+}
+
+/** Skill bundle materialization outcome for one committed refinement (spec §7.7). */
+export interface MaterializationResult {
+  /** completed: all targets written or confirmed unchanged; partial: some targets failed or were skipped; failed: nothing succeeded. */
+  status: 'completed' | 'partial' | 'failed'
+  /** Absolute paths of files written, in stable order. */
+  written: string[]
+  /** Absolute paths of files already matching the target entry (not rewritten). */
+  unchanged: string[]
+  /** Absolute paths skipped because the bundle is not harness-owned. */
+  skipped: string[]
+  /** Relative paths found on disk but absent from the entry; never auto-deleted. */
+  staleCandidates: string[]
+  /** Per-path failure or skip details; non-retryable entries are warnings. */
+  errors: Array<{ path?: string; code: string; retryable: boolean; message: string }>
 }
