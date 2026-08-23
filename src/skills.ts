@@ -7,10 +7,10 @@
  * @module dsh-continual-harness
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { KEBAB_CASE_PATTERN } from './refine.ts'
-import type { HarnessEntry } from './types.ts'
+import type { HarnessEntry, MaterializationResult } from './types.ts'
 
 /** Length cap for the single-line frontmatter description. */
 export const MAX_DESCRIPTION_CHARS = 200
@@ -131,39 +131,159 @@ export function skillBundleDir(dir: string, id: string): string {
   return join(dir, id)
 }
 
+/** Injectable fs surface so materialization write faults are testable (spec §7.11). */
+export interface SkillFsOps {
+  existsSync(path: string): boolean
+  readdirSync(path: string): string[]
+  statSync(path: string): { isDirectory(): boolean }
+  mkdirSync(path: string, opts?: { recursive?: boolean }): void
+  writeFileSync(path: string, data: string, encoding: 'utf8'): void
+  renameSync(oldPath: string, newPath: string): void
+  readFileSync(path: string, encoding: 'utf8'): string
+  rmSync(path: string, opts?: { recursive?: boolean; force?: boolean }): void
+}
+
+/** The default fs surface: direct `node:fs` bindings. */
+export const defaultSkillFsOps: SkillFsOps = {
+  existsSync,
+  readdirSync,
+  statSync,
+  mkdirSync,
+  writeFileSync,
+  renameSync,
+  readFileSync,
+  rmSync,
+}
+
+function collectRelativeFiles(dir: string, fsOps: SkillFsOps, prefix = ''): string[] {
+  if (!fsOps.existsSync(dir)) return []
+  const files: string[] = []
+  for (const name of fsOps.readdirSync(dir)) {
+    const rel = prefix ? `${prefix}/${name}` : name
+    const full = join(dir, name)
+    if (fsOps.statSync(full).isDirectory()) files.push(...collectRelativeFiles(full, fsOps, rel))
+    else files.push(rel)
+  }
+  return files
+}
+
+function recordError(
+  result: MaterializationResult,
+  path: string | undefined,
+  code: string,
+  retryable: boolean,
+  message: string,
+): void {
+  result.errors.push({ ...(path === undefined ? {} : { path }), code, retryable, message })
+}
+
 /**
- * Reconcile the SKILL.md files for the skill ids touched by a committed
- * refinement against the effective (merged) skill entries: write the bundle
- * for ids that still have an effective entry, remove the bundle directory for
- * ids that no longer do (deleted or unshadowed-away). Only kebab-case ids are
- * ever written or removed; ids outside `touchedIds` are never touched, so
- * user-owned skills in the same directory are left alone.
- * @returns the absolute paths of files written, in stable order.
+ * Materialize the bundle files (SKILL.md + entry.files) for the skill ids
+ * touched by a committed refinement (spec §7.5/§7.7). JSON is the source of
+ * truth; the disk is a renderable projection. Only kebab-case ids are ever
+ * touched; ids outside `touchedIds` are never touched. A bundle is only
+ * written to or deleted when its existing SKILL.md carries the full harness
+ * provenance; otherwise it is skipped with a `not-harness-owned` entry.
+ * Stale files are reported, never deleted. Write faults are collected; the
+ * committed refinement is never failed by this function.
  */
 export function reconcileSkillFiles(
   dir: string,
   effectiveSkills: Readonly<Record<string, SkillEntryLike>>,
   touchedIds: ReadonlyArray<string>,
-): string[] {
-  const written: string[] = []
+  fsOps: SkillFsOps = defaultSkillFsOps,
+): MaterializationResult {
+  const result: MaterializationResult = {
+    status: 'completed',
+    written: [],
+    unchanged: [],
+    skipped: [],
+    staleCandidates: [],
+    errors: [],
+  }
+  let removedCount = 0
   for (const id of touchedIds) {
     if (!KEBAB_CASE_PATTERN.test(id)) continue
     const bundle = skillBundleDir(dir, id)
     const entry = effectiveSkills[id]
     if (entry === undefined) {
-      rmSync(bundle, { recursive: true, force: true })
+      // delete/archive: only a harness-owned bundle may be removed
+      if (fsOps.existsSync(bundle)) {
+        if (!fsOps.statSync(bundle).isDirectory()) {
+          recordError(result, bundle, 'not-a-directory', true, `"${id}" bundle path is not a directory; skipped`)
+          result.skipped.push(bundle)
+          continue
+        }
+        const markdown = fsOps.existsSync(join(bundle, 'SKILL.md'))
+          ? fsOps.readFileSync(join(bundle, 'SKILL.md'), 'utf8')
+          : ''
+        if (isHarnessOwnedBundle(markdown)) {
+          try {
+            fsOps.rmSync(bundle, { recursive: true, force: true })
+            removedCount += 1
+          } catch (error) {
+            recordError(result, bundle, 'remove-failed', true, String(error))
+          }
+        } else {
+          recordError(result, bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; left untouched`)
+          result.skipped.push(bundle)
+        }
+      }
       continue
     }
-    const content = renderSkillMarkdown(entry)
-    const file = join(bundle, 'SKILL.md')
-    if (existsSync(file) && readFileSync(file, 'utf8') === content) continue
-    mkdirSync(bundle, { recursive: true })
-    const tmp = `${file}.tmp`
-    writeFileSync(tmp, content, 'utf8')
-    renameSync(tmp, file)
-    written.push(file)
+    const targets: Record<string, string> = {
+      'SKILL.md': renderSkillMarkdown(entry),
+      ...(entry.files === undefined ? {} : entry.files),
+    }
+    // a bundle path that is a regular file (or other non-directory) cannot be reconciled
+    if (fsOps.existsSync(bundle) && !fsOps.statSync(bundle).isDirectory()) {
+      recordError(result, bundle, 'not-a-directory', true, `"${id}" bundle path is not a directory; skipped`)
+      result.skipped.push(bundle)
+      continue
+    }
+    // stale candidates: every on-disk file absent from the entry; never auto-deleted
+    for (const rel of collectRelativeFiles(bundle, fsOps)) {
+      if (targets[rel] === undefined) result.staleCandidates.push(rel)
+    }
+    // ownership: an existing bundle must be harness-owned to write; a missing bundle is a create
+    if (fsOps.existsSync(join(bundle, 'SKILL.md'))) {
+      const markdown = fsOps.readFileSync(join(bundle, 'SKILL.md'), 'utf8')
+      if (!isHarnessOwnedBundle(markdown)) {
+        recordError(result, bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; skipped`)
+        result.skipped.push(bundle)
+        continue
+      }
+    }
+    for (const [rel, content] of Object.entries(targets)) {
+      const file = join(bundle, rel)
+      if (fsOps.existsSync(file) && fsOps.readFileSync(file, 'utf8') === content) {
+        result.unchanged.push(file)
+        continue
+      }
+      try {
+        fsOps.mkdirSync(join(bundle, dirname(rel)), { recursive: true })
+        const tmp = `${file}.tmp`
+        fsOps.writeFileSync(tmp, content, 'utf8')
+        fsOps.renameSync(tmp, file)
+        result.written.push(file)
+      } catch (error) {
+        try {
+          fsOps.rmSync(`${file}.tmp`, { force: true })
+        } catch {
+          // best-effort cleanup; the original write error is the finding
+        }
+        recordError(result, file, 'write-failed', true, String(error))
+      }
+    }
   }
-  return written
+  const successful = result.written.length + result.unchanged.length + removedCount
+  const fatal = result.errors.some(error => error.retryable)
+  if (fatal) {
+    result.status = successful > 0 || result.skipped.length > 0 ? 'partial' : 'failed'
+  } else if (result.errors.length > 0 || result.skipped.length > 0) {
+    result.status = 'partial'
+  }
+  return result
 }
 
 /** One L2 structural-quality finding for a skill entry. Advisory: never blocks a write (L0/L1 are the hard gates). */

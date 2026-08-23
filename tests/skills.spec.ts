@@ -6,7 +6,9 @@ import {
   embeddedFilePaths,
   parseFrontmatterName,
   reconcileSkillFiles,
+  defaultSkillFsOps,
   referencedFilePaths,
+  type SkillFsOps,
   renderSkillMarkdown,
   validateBundleFiles,
   validateSkillBundle,
@@ -72,30 +74,31 @@ describe('renderSkillMarkdown', () => {
 describe('reconcileSkillFiles', () => {
   it('writes a SKILL.md bundle for each touched id with an effective entry', () => {
     const dir = tempDir()
-    const written = reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body', 'summary') }, ['repro'])
-    expect(written).toEqual([join(dir, 'repro', 'SKILL.md')])
+    const result = reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body', 'summary') }, ['repro'])
+    expect(result.written).toEqual([join(dir, 'repro', 'SKILL.md')])
+    expect(result.status).toBe('completed')
     expect(readFileSync(join(dir, 'repro', 'SKILL.md'), 'utf8')).toContain('name: repro')
-    expect(readFileSync(join(dir, 'repro', 'SKILL.md'), 'utf8')).toContain('summary')
   })
 
-  it('removes the bundle directory for a touched id with no effective entry', () => {
+  it('removes a harness-owned bundle directory for a touched id with no effective entry', () => {
     const dir = tempDir()
     reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body') }, ['repro'])
     expect(existsSync(join(dir, 'repro', 'SKILL.md'))).toBe(true)
-    reconcileSkillFiles(dir, {}, ['repro'])
+    const removed = reconcileSkillFiles(dir, {}, ['repro'])
+    expect(removed.status).toBe('completed')
     expect(existsSync(join(dir, 'repro'))).toBe(false)
   })
 
   it('never writes or removes ids outside touchedIds, and skips non-kebab ids', () => {
     const dir = tempDir()
     mkdirSync(join(dir, 'mine'), { recursive: true })
-    writeFileSync(join(dir, 'mine', 'SKILL.md'), 'user skill')
-    const written = reconcileSkillFiles(dir, {
+    writeFileSync(join(dir, 'mine', 'SKILL.md'), '---\nname: mine\n---\nuser skill')
+    const result = reconcileSkillFiles(dir, {
       mine: skillEntry('mine', 'user'),
       'Not Kebab': skillEntry('Not Kebab', 'bad'),
     }, ['Not Kebab'])
-    expect(written).toEqual([])
-    expect(readFileSync(join(dir, 'mine', 'SKILL.md'), 'utf8')).toBe('user skill')
+    expect(result.written).toEqual([])
+    expect(readFileSync(join(dir, 'mine', 'SKILL.md'), 'utf8')).toBe('---\nname: mine\n---\nuser skill')
   })
 
   it('skips rewriting when the file already matches', () => {
@@ -103,8 +106,162 @@ describe('reconcileSkillFiles', () => {
     reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body') }, ['repro'])
     const file = join(dir, 'repro', 'SKILL.md')
     const mtime = readFileSync(file, 'utf8')
-    reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body') }, ['repro'])
+    const again = reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body') }, ['repro'])
+    expect(again.written).toEqual([])
+    expect(again.unchanged).toEqual([file])
     expect(readFileSync(file, 'utf8')).toBe(mtime)
+  })
+})
+
+describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
+  const entry = (id: string, files?: Record<string, string>, content = '## Steps\n1. run `scripts/x.py`') =>
+    ({
+      ...skillEntry(id, content, 'Use whenever x'),
+      ...(files === undefined ? {} : { files }),
+    }) as ReturnType<typeof skillEntry> & { files?: Record<string, string> }
+
+  it('materializes SKILL.md plus every files entry under the right subdirectories', () => {
+    const dir = tempDir()
+    const result = reconcileSkillFiles(dir, {
+      oq: entry('oq', { 'scripts/oq_quantize.py': 'print(1)', 'references/template.md': '# t' }),
+    }, ['oq'])
+    expect(result.status).toBe('completed')
+    expect(result.written).toEqual([
+      join(dir, 'oq', 'SKILL.md'),
+      join(dir, 'oq', 'scripts', 'oq_quantize.py'),
+      join(dir, 'oq', 'references', 'template.md'),
+    ])
+    expect(readFileSync(join(dir, 'oq', 'scripts', 'oq_quantize.py'), 'utf8')).toBe('print(1)')
+  })
+
+  it('replaces changed files, keeps unchanged ones, and reports stale files without deleting them', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/oq_quantize.py': 'v1' }) }, ['oq'])
+    writeFileSync(join(dir, 'oq', 'extra.md'), 'user file')
+    const result = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/oq_quantize.py': 'v2' }) }, ['oq'])
+    expect(readFileSync(join(dir, 'oq', 'scripts', 'oq_quantize.py'), 'utf8')).toBe('v2')
+    expect(result.written).toEqual([join(dir, 'oq', 'scripts', 'oq_quantize.py')])
+    expect(result.staleCandidates).toEqual(['extra.md'])
+    expect(existsSync(join(dir, 'oq', 'extra.md'))).toBe(true)
+  })
+
+  it('skips a bundle whose existing SKILL.md lacks harness provenance', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'mine'), { recursive: true })
+    writeFileSync(join(dir, 'mine', 'SKILL.md'), '---\nname: mine\n---\nuser skill')
+    const result = reconcileSkillFiles(dir, { mine: entry('mine', { 'scripts/x.py': 'x' }) }, ['mine'])
+    expect(result.written).toEqual([])
+    expect(result.skipped).toEqual([join(dir, 'mine')])
+    expect(result.errors.some(error => error.code === 'not-harness-owned')).toBe(true)
+    expect(result.status).toBe('partial')
+    expect(readFileSync(join(dir, 'mine', 'SKILL.md'), 'utf8')).toBe('---\nname: mine\n---\nuser skill')
+  })
+
+  it('does not delete a non-harness-owned bundle on delete/archive', () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'mine'), { recursive: true })
+    writeFileSync(join(dir, 'mine', 'SKILL.md'), '---\nname: mine\n---\nuser skill')
+    const result = reconcileSkillFiles(dir, {}, ['mine'])
+    expect(result.skipped).toEqual([join(dir, 'mine')])
+    expect(existsSync(join(dir, 'mine', 'SKILL.md'))).toBe(true)
+  })
+
+  it('collects write faults and reports partial/failed status (injected fs fault)', () => {
+    const dir = tempDir()
+    const base = defaultSkillFsOps
+    const failing: SkillFsOps = {
+      ...base,
+      writeFileSync(path, data, encoding) {
+        if (path.includes('oq_quantize.py')) throw new Error('disk full')
+        base.writeFileSync(path, data, encoding)
+      },
+    }
+    const result = reconcileSkillFiles(dir, {
+      oq: entry('oq', { 'scripts/oq_quantize.py': 'x', 'references/t.md': '# t' }),
+    }, ['oq'], failing)
+    expect(result.status).toBe('partial')
+    expect(result.written.some(path => path.endsWith('SKILL.md'))).toBe(true)
+    expect(result.errors.some(error => error.code === 'write-failed' && error.retryable === true)).toBe(true)
+    expect(existsSync(join(dir, 'oq', 'SKILL.md'))).toBe(true)
+    expect(existsSync(join(dir, 'oq', 'scripts', 'oq_quantize.py'))).toBe(false)
+
+    const allFail: SkillFsOps = { ...base, writeFileSync: () => { throw new Error('read-only') } }
+    const failedDir = tempDir()
+    const failed = reconcileSkillFiles(failedDir, { oq: entry('oq', { 'scripts/x.py': 'x' }) }, ['oq'], allFail)
+    expect(failed.status).toBe('failed')
+  })
+
+  it('counts unchanged files as successful when another touched file fails', () => {
+    const dir = tempDir()
+    const initial = { oq: entry('oq', { 'scripts/stable.py': 'v1', 'scripts/fault.py': 'v1' }) }
+    reconcileSkillFiles(dir, initial, ['oq'])
+    const failing: SkillFsOps = {
+      ...defaultSkillFsOps,
+      writeFileSync(path, data, encoding) {
+        if (path.endsWith('fault.py.tmp')) throw new Error('disk full')
+        defaultSkillFsOps.writeFileSync(path, data, encoding)
+      },
+    }
+    const result = reconcileSkillFiles(dir, {
+      oq: entry('oq', { 'scripts/stable.py': 'v1', 'scripts/fault.py': 'v2' }),
+    }, ['oq'], failing)
+    expect(result.status).toBe('partial')
+    expect(result.unchanged).toContain(join(dir, 'oq', 'scripts', 'stable.py'))
+    expect(result.errors.some(error => error.code === 'write-failed')).toBe(true)
+  })
+
+  it('counts a successful removal as success when another operation fails (partial)', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { gone: entry('gone', { 'scripts/x.py': 'x' }) }, ['gone'])
+    const failing: SkillFsOps = {
+      ...defaultSkillFsOps,
+      writeFileSync(path, data, encoding) {
+        if (path.includes('fail')) throw new Error('disk full')
+        defaultSkillFsOps.writeFileSync(path, data, encoding)
+      },
+    }
+    const result = reconcileSkillFiles(dir, {
+      fail: entry('fail', { 'scripts/x.py': 'x' }),
+    }, ['gone', 'fail'], failing)
+    expect(existsSync(join(dir, 'gone'))).toBe(false)
+    expect(result.status).toBe('partial')
+    expect(result.errors.some(error => error.code === 'write-failed')).toBe(true)
+  })
+
+  it('skips a delete whose bundle path is a regular file', () => {
+    const dir = tempDir()
+    writeFileSync(join(dir, 'odd'), 'not a directory')
+    const result = reconcileSkillFiles(dir, {}, ['odd'])
+    expect(result.skipped).toEqual([join(dir, 'odd')])
+    expect(result.errors.some(error => error.code === 'not-a-directory' && error.retryable === true)).toBe(true)
+    expect(result.status).toBe('partial')
+    expect(readFileSync(join(dir, 'odd'), 'utf8')).toBe('not a directory')
+  })
+
+  it('removes a temporary file when an atomic rename fails', () => {
+    const dir = tempDir()
+    const failing: SkillFsOps = {
+      ...defaultSkillFsOps,
+      renameSync: () => { throw new Error('rename failed') },
+    }
+    const result = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/fault.py': 'x' }) }, ['oq'], failing)
+    const file = join(dir, 'oq', 'scripts', 'fault.py')
+    expect(result.errors.some(error => error.code === 'write-failed')).toBe(true)
+    expect(existsSync(`${file}.tmp`)).toBe(false)
+  })
+
+  it('skips a regular-file bundle path and continues processing other touched ids', () => {
+    const dir = tempDir()
+    const bundle = join(dir, 'bad')
+    writeFileSync(bundle, 'not a directory')
+    const result = reconcileSkillFiles(dir, {
+      bad: entry('bad'),
+      good: entry('good'),
+    }, ['bad', 'good'])
+    expect(result.status).toBe('partial')
+    expect(result.skipped).toContain(bundle)
+    expect(result.errors.some(error => error.path === bundle && error.code === 'not-a-directory' && error.retryable === true)).toBe(true)
+    expect(result.written).toContain(join(dir, 'good', 'SKILL.md'))
   })
 })
 
