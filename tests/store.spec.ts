@@ -317,6 +317,23 @@ describe('HarnessStore', () => {
     expect(result.materialization.written).toHaveLength(3)
   })
 
+  it('rejects a create edit whose target is an existing empty directory', () => {
+    const root = tempHome()
+    const ctx = new Context()
+    const store = new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    mkdirSync(join(root, 'skills', 'empty'), { recursive: true })
+    const { agent } = stubAgent('m')
+    const result = store.applyRefinement(agent, {
+      id: 'refine_empty_conflict',
+      summary: 'take an existing directory',
+      edits: [{ action: 'create', kind: 'skill', id: 'empty', content: 'body' }],
+    }, { global: true })
+    const failed = result.appliedEdits.find(edit => edit.id === 'empty')
+    expect(failed?.applied).toBe(false)
+    expect(failed?.error).toContain('not harness-owned')
+    expect(existsSync(join(root, 'skills', 'empty', 'SKILL.md'))).toBe(false)
+  })
+
   it('rejects a create edit whose target directory holds a non-harness-owned SKILL.md', () => {
     const root = tempHome()
     const ctx = new Context()

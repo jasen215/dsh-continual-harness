@@ -157,6 +157,35 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
     expect(readFileSync(join(dir, 'mine', 'SKILL.md'), 'utf8')).toBe('---\nname: mine\n---\nuser skill')
   })
 
+  it('skips an existing directory without SKILL.md instead of adopting it', () => {
+    const dir = tempDir()
+    const bundle = join(dir, 'mine')
+    mkdirSync(bundle, { recursive: true })
+    writeFileSync(join(bundle, 'user.txt'), 'user file')
+    const result = reconcileSkillFiles(dir, {
+      mine: entry('mine', { 'scripts/x.py': 'x' }),
+    }, ['mine'])
+    expect(result.skipped).toEqual([bundle])
+    expect(result.errors.some(error => error.code === 'not-harness-owned' && error.retryable === false)).toBe(true)
+    expect(result.status).toBe('partial')
+    expect(readFileSync(join(bundle, 'user.txt'), 'utf8')).toBe('user file')
+    expect(existsSync(join(bundle, 'scripts'))).toBe(false)
+  })
+
+  it('skips an existing empty directory instead of adopting it', () => {
+    const dir = tempDir()
+    const bundle = join(dir, 'empty')
+    mkdirSync(bundle, { recursive: true })
+    const result = reconcileSkillFiles(dir, {
+      empty: entry('empty', { 'scripts/x.py': 'x' }),
+    }, ['empty'])
+    expect(result.skipped).toEqual([bundle])
+    expect(result.errors.some(error => error.code === 'not-harness-owned')).toBe(true)
+    expect(result.status).toBe('partial')
+    expect(existsSync(join(bundle, 'SKILL.md'))).toBe(false)
+    expect(existsSync(join(bundle, 'scripts'))).toBe(false)
+  })
+
   it('does not delete a non-harness-owned bundle on delete/archive', () => {
     const dir = tempDir()
     mkdirSync(join(dir, 'mine'), { recursive: true })

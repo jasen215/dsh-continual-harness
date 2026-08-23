@@ -139,11 +139,12 @@ export class HarnessStore {
 
   /** fs-backed create-conflict gate: a create onto a non-harness-owned bundle is rejected (spec §7.4). */
   private createConflictError(id: string): string | undefined {
-    const file = join(this.skillsDir, id, 'SKILL.md')
-    if (!existsSync(file)) return undefined
-    return isHarnessOwnedBundle(readFileSync(file, 'utf8'))
-      ? undefined
-      : `skill directory "${id}" exists and is not harness-owned; pick another id`
+    const bundle = join(this.skillsDir, id)
+    if (!existsSync(bundle)) return undefined
+    const file = join(bundle, 'SKILL.md')
+    const markdown = existsSync(file) ? readFileSync(file, 'utf8') : ''
+    if (isHarnessOwnedBundle(markdown)) return undefined
+    return `skill directory "${id}" exists and is not harness-owned; pick another id`
   }
 
   /** Structured overview + injected keys for prompt injection. */

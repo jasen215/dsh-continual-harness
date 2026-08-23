@@ -241,18 +241,19 @@ export function reconcileSkillFiles(
       result.skipped.push(bundle)
       continue
     }
-    // stale candidates: every on-disk file absent from the entry; never auto-deleted
-    for (const rel of collectRelativeFiles(bundle, fsOps)) {
-      if (targets[rel] === undefined) result.staleCandidates.push(rel)
-    }
-    // ownership: an existing bundle must be harness-owned to write; a missing bundle is a create
-    if (fsOps.existsSync(join(bundle, 'SKILL.md'))) {
-      const markdown = fsOps.readFileSync(join(bundle, 'SKILL.md'), 'utf8')
+    // ownership: an existing bundle path must be harness-owned to write; a missing path is a create
+    if (fsOps.existsSync(bundle)) {
+      const skillFile = join(bundle, 'SKILL.md')
+      const markdown = fsOps.existsSync(skillFile) ? fsOps.readFileSync(skillFile, 'utf8') : ''
       if (!isHarnessOwnedBundle(markdown)) {
         recordError(result, bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; skipped`)
         result.skipped.push(bundle)
         continue
       }
+    }
+    // stale candidates: every on-disk file absent from the entry; never auto-deleted
+    for (const rel of collectRelativeFiles(bundle, fsOps)) {
+      if (targets[rel] === undefined) result.staleCandidates.push(rel)
     }
     for (const [rel, content] of Object.entries(targets)) {
       const file = join(bundle, rel)
