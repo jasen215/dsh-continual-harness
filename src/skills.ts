@@ -185,6 +185,45 @@ export function parseFrontmatterName(markdown: string): string | undefined {
   return undefined
 }
 
+/** Parse the provenance fields out of a rendered SKILL.md frontmatter block; undefined when unparseable. */
+export function parseFrontmatterProvenance(markdown: string): { author?: string; source?: string } | undefined {
+  if (!markdown.startsWith('---\n')) return undefined
+  const end = markdown.indexOf('\n---', 4)
+  if (end < 0) return undefined
+  let inMetadata = false
+  let author: string | undefined
+  let source: string | undefined
+  for (const line of markdown.slice(4, end).split('\n')) {
+    if (line === 'metadata:') {
+      inMetadata = true
+      continue
+    }
+    if (inMetadata && /^ +[a-z]+:/.test(line)) {
+      const match = /^ +(author|source):\s*(.+)$/.exec(line)
+      if (match) {
+        if (match[1] === 'author') author = match[2]!.trim()
+        else source = match[2]!.trim()
+      }
+      continue
+    }
+    if (inMetadata && !line.startsWith(' ')) inMetadata = false
+  }
+  return {
+    ...(author === undefined ? {} : { author }),
+    ...(source === undefined ? {} : { source }),
+  }
+}
+
+/**
+ * True only when the bundle carries the full hard-coded harness provenance
+ * (spec §7.4): both author and source must match the constants. LLMs never
+ * participate in this decision.
+ */
+export function isHarnessOwnedBundle(markdown: string): boolean {
+  const provenance = parseFrontmatterProvenance(markdown)
+  return provenance?.author === SKILL_AUTHOR && provenance?.source === SKILL_SOURCE
+}
+
 /** Every `scripts/` or `references/` path mentioned in a skill body. */
 export function referencedFilePaths(content: string): string[] {
   const paths = new Set<string>()

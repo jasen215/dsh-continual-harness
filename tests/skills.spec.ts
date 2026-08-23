@@ -219,3 +219,25 @@ describe('validateBundleFiles (L1 bundle limits)', () => {
     expect(validateBundleFiles(multi)).toContain('maxSkillBundleBytes')
   })
 })
+
+import { isHarnessOwnedBundle } from '../src/skills.ts'
+
+describe('isHarnessOwnedBundle (hard-coded provenance)', () => {
+  it('recognizes a bundle rendered by this harness', () => {
+    expect(isHarnessOwnedBundle(renderSkillMarkdown(skillEntry('repro', 'body', 'summary')))).toBe(true)
+  })
+
+  it('returns false when author or source is missing', () => {
+    expect(isHarnessOwnedBundle('---\nname: repro\n---\nbody')).toBe(false)
+  })
+
+  it('returns false when author or source differs', () => {
+    expect(isHarnessOwnedBundle('---\nname: repro\nmetadata:\n  author: someone-else\n  source: esp\n---\nbody')).toBe(false)
+    expect(isHarnessOwnedBundle('---\nname: repro\nmetadata:\n  author: dsh-continual-harness\n  source: other\n---\nbody')).toBe(false)
+  })
+
+  it('returns false for unparseable frontmatter', () => {
+    expect(isHarnessOwnedBundle('no frontmatter')).toBe(false)
+    expect(isHarnessOwnedBundle('---\nunterminated')).toBe(false)
+  })
+})
