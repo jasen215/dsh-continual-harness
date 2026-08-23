@@ -2,7 +2,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { renderSkillMarkdown, reconcileSkillFiles } from '../src/skills.ts'
+import {
+  embeddedFilePaths,
+  parseFrontmatterName,
+  reconcileSkillFiles,
+  referencedFilePaths,
+  renderSkillMarkdown,
+  validateSkillBundle,
+} from '../src/skills.ts'
 import type { HarnessEntry } from '../src/types.ts'
 
 const tempDirs: string[] = []
@@ -97,5 +104,77 @@ describe('reconcileSkillFiles', () => {
     const mtime = readFileSync(file, 'utf8')
     reconcileSkillFiles(dir, { repro: skillEntry('repro', 'body') }, ['repro'])
     expect(readFileSync(file, 'utf8')).toBe(mtime)
+  })
+})
+
+describe('parseFrontmatterName / path helpers', () => {
+  it('extracts the name field from a rendered bundle', () => {
+    expect(parseFrontmatterName(renderSkillMarkdown(skillEntry('repro', 'body', 'summary')))).toBe('repro')
+  })
+
+  it('returns undefined for text without a parseable frontmatter', () => {
+    expect(parseFrontmatterName('no frontmatter here')).toBeUndefined()
+    expect(parseFrontmatterName('---\nunterminated')).toBeUndefined()
+  })
+
+  it('collects referenced and embedded scripts/references paths separately', () => {
+    const content = [
+      '## Files',
+      '- wrapper: `scripts/oq_quantize.py`',
+      '- card: `references/model_card_template.md`',
+      '```scripts/oq_quantize.py',
+      'print("hi")',
+      '```',
+      '```references/model_card_template.md',
+      '# {{model_name}}',
+      '```',
+    ].join('\n')
+    expect(referencedFilePaths(content)).toEqual(['scripts/oq_quantize.py', 'references/model_card_template.md'])
+    expect(embeddedFilePaths(content)).toEqual(new Set(['scripts/oq_quantize.py', 'references/model_card_template.md']))
+  })
+})
+
+describe('validateSkillBundle (L2 structural quality)', () => {
+  it('passes a clean skill: short id, trigger description, embedded files, short body', () => {
+    const content = [
+      '# repro',
+      '## Files',
+      '```scripts/repro.py',
+      'print("hi")',
+      '```',
+    ].join('\n')
+    const issues = validateSkillBundle(skillEntry('repro', content, 'Use whenever a bug reproduces; run the repro script and read the failure'))
+    expect(issues).toEqual([])
+  })
+
+  it('flags long and wordy ids', () => {
+    const base = skillEntry('omlx-oq-quantization-workflow', 'body', 'Use whenever quantizing')
+    const issues = validateSkillBundle(base)
+    expect(issues.map(issue => issue.code)).toContain('id-too-wordy')
+    const long = skillEntry('x'.repeat(31), 'body', 'Use whenever quantizing')
+    expect(validateSkillBundle(long).map(issue => issue.code)).toContain('id-too-long')
+  })
+
+  it('flags a missing description as an error', () => {
+    const issues = validateSkillBundle(skillEntry('repro', 'body'))
+    expect(issues.some(issue => issue.code === 'description-missing' && issue.severity === 'error')).toBe(true)
+  })
+
+  it('warns when the description lacks trigger phrasing', () => {
+    const issues = validateSkillBundle(skillEntry('repro', 'body', 'A skill about reproduction'))
+    expect(issues.some(issue => issue.code === 'description-no-trigger' && issue.severity === 'warning')).toBe(true)
+  })
+
+  it('warns when a referenced file has no embedded fenced block', () => {
+    const content = ['## Files', '- wrapper: `scripts/oq_quantize.py`', '- card: `references/model_card_template.md`', '```scripts/oq_quantize.py', 'print("hi")', '```'].join('\n')
+    const issues = validateSkillBundle(skillEntry('repro', content, 'Use whenever quantizing'))
+    expect(issues.some(issue => issue.code === 'file-not-embedded' && issue.message.includes('references/model_card_template.md'))).toBe(true)
+    expect(issues.some(issue => issue.code === 'file-not-embedded' && issue.message.includes('scripts/oq_quantize.py'))).toBe(false)
+  })
+
+  it('warns when the body exceeds the soft line cap', () => {
+    const longBody = Array.from({ length: 501 }, (_, i) => `line ${i}`).join('\n')
+    const issues = validateSkillBundle(skillEntry('repro', longBody, 'Use whenever repro'))
+    expect(issues.some(issue => issue.code === 'body-too-long' && issue.severity === 'warning')).toBe(true)
   })
 })
