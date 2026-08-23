@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -576,6 +576,62 @@ describe('harness-state projection', () => {
     const blocks = derived.filter(message => message.source?.kind === HARNESS_STATE_SOURCE)
     expect(blocks).toHaveLength(1)
     expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
+  })
+})
+
+describe('skill bundle acceptance', () => {
+  it('restores and clears bundle files on rollback of a create', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_bundle',
+      summary: 'create a bundle skill',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'bundle-demo',
+        description: 'Use whenever bundling',
+        content: '## Steps\n1. Run `scripts/bundle.py`',
+        files: { 'scripts/bundle.py': 'print(1)' },
+      }],
+    }) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const created = resultJson(await execute(ctx, 'harness_refine', { global: true }, stubAgent('executor').agent))
+    expect(created.applied).toBe(1)
+    expect(existsSync(join(home, 'skills', 'bundle-demo', 'scripts', 'bundle.py'))).toBe(true)
+    expect(readFileSync(join(home, 'skills', 'bundle-demo', 'scripts', 'bundle.py'), 'utf8')).toBe('print(1)')
+    const skillMd = readFileSync(join(home, 'skills', 'bundle-demo', 'SKILL.md'), 'utf8')
+    expect(skillMd).toContain('dsh-continual-harness')
+    expect(skillMd).toContain('esp')
+
+    // roll back the create without an LLM
+    const rolled = resultJson(await execute(ctx, 'harness_refine', { rollback_id: 'refine_bundle' }, stubAgent('executor').agent))
+    expect(rolled.applied).toBe(1)
+    expect(existsSync(join(home, 'skills', 'bundle-demo'))).toBe(false)
+  })
+
+  it('never touches a non-harness-owned bundle during create', async () => {
+    const home = tempHome()
+    mkdirSync(join(home, 'skills', 'mine'), { recursive: true })
+    writeFileSync(join(home, 'skills', 'mine', 'SKILL.md'), '---\nname: mine\n---\nuser skill')
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_take',
+      summary: 'try to take a user name',
+      edits: [{ action: 'create', kind: 'skill', id: 'mine', content: 'body' }],
+    }) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const result = resultJson(await execute(ctx, 'harness_refine', { global: true }, stubAgent('executor').agent))
+    expect(result.failed).toBe(1)
+    const edit = (result.edits as Array<Record<string, unknown>>).find(entry => entry.id === 'mine')
+    expect(String(edit?.error)).toContain('not harness-owned')
+    expect(readFileSync(join(home, 'skills', 'mine', 'SKILL.md'), 'utf8')).toBe('---\nname: mine\n---\nuser skill')
   })
 })
 
