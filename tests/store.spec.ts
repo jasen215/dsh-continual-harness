@@ -296,6 +296,66 @@ describe('HarnessStore', () => {
     expect(existsSync(bundle)).toBe(true)
   })
 
+  it('materializes a skill bundle with files and returns a completed materialization', () => {
+    const root = tempHome()
+    const ctx = new Context()
+    const store = new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    const { agent } = stubAgent('m')
+    const result = store.applyRefinement(agent, {
+      id: 'refine_bundle',
+      summary: 'create a bundle skill',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'bundle-demo',
+        description: 'Use whenever bundling',
+        content: '## Steps\\n1. Run `scripts/bundle.py`',
+        files: { 'scripts/bundle.py': 'print(1)', 'references/t.md': '# t' },
+      }],
+    }, { global: true })
+    expect(result.materialization.status).toBe('completed')
+    expect(existsSync(join(root, 'skills', 'bundle-demo', 'SKILL.md'))).toBe(true)
+    expect(readFileSync(join(root, 'skills', 'bundle-demo', 'scripts', 'bundle.py'), 'utf8')).toBe('print(1)')
+    expect(result.materialization.written).toHaveLength(3)
+  })
+
+  it('rejects a create edit whose target directory holds a non-harness-owned SKILL.md', () => {
+    const root = tempHome()
+    const ctx = new Context()
+    const store = new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    mkdirSync(join(root, 'skills', 'taken'), { recursive: true })
+    writeFileSync(join(root, 'skills', 'taken', 'SKILL.md'), '---\\nname: taken\\n---\\nuser skill')
+    const { agent } = stubAgent('m')
+    const result = store.applyRefinement(agent, {
+      id: 'refine_conflict',
+      summary: 'take a used name',
+      edits: [{ action: 'create', kind: 'skill', id: 'taken', content: 'body' }],
+    }, { global: true })
+    const failed = result.appliedEdits.find(edit => edit.id === 'taken')
+    expect(failed?.applied).toBe(false)
+    expect(failed?.error).toContain('not harness-owned')
+    expect(readFileSync(join(root, 'skills', 'taken', 'SKILL.md'), 'utf8')).toBe('---\\nname: taken\\n---\\nuser skill')
+  })
+
+  it('reports a partial materialization when a non-harness-owned bundle is targeted by an update', () => {
+    const root = tempHome()
+    const ctx = new Context()
+    const store = new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    // seed a harness-owned bundle
+    const { agent } = stubAgent('m')
+    store.applyRefinement(agent, {
+      id: 'refine_seed', summary: 'seed',
+      edits: [{ action: 'create', kind: 'skill', id: 'ours', content: 'body', description: 'use ours' }],
+    }, { global: true })
+    // replace the seeded SKILL.md with a user-owned one, then update must skip
+    writeFileSync(join(root, 'skills', 'ours', 'SKILL.md'), '---\\nname: ours\\n---\\nuser skill')
+    const result = store.applyRefinement(agent, {
+      id: 'refine_update', summary: 'update',
+      edits: [{ action: 'update', kind: 'skill', id: 'ours', content: 'body2', reason: 'why' }],
+    }, { global: true })
+    expect(result.materialization.status).toBe('partial')
+    expect(result.materialization.skipped).toEqual([join(root, 'skills', 'ours')])
+    expect(readFileSync(join(root, 'skills', 'ours', 'SKILL.md'), 'utf8')).toBe('---\\nname: ours\\n---\\nuser skill')
+  })
+
   it('applies store-configured growth limit and protected layers', () => {
     const ctx = new Context()
     const home = tempHome()
