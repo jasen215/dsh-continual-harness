@@ -9,7 +9,7 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { KEBAB_CASE_PATTERN } from './refine.ts'
+import { KEBAB_CASE_PATTERN } from './domain.ts'
 import type { HarnessEntry, MaterializationResult } from './types.ts'
 
 /** Length cap for the single-line frontmatter description. */
@@ -88,7 +88,7 @@ export function validateBundleFiles(
 }
 
 /** Skill entries may carry the optional one-line description. */
-export type SkillEntryLike = HarnessEntry & { description?: string }
+export type SkillEntryLike = HarnessEntry & { description?: string; files?: Record<string, string> }
 
 /**
  * Render one skill entry as a `<name>/SKILL.md` bundle body: YAML frontmatter

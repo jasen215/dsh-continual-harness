@@ -5,7 +5,11 @@ import {
   rollbackProposal,
   validateEdit,
 } from '../src/refine.ts'
+import { DEFAULT_SKILL_BUNDLE_LIMITS } from '../src/skills.ts'
 import type { RefinementProposal } from '../src/types.ts'
+import type { SkillEntry } from '../src/types.ts'
+
+const tinyLimits = { maxSkillFiles: 1, maxSkillFileBytes: 16, maxSkillBundleBytes: 64 }
 
 describe('validateEdit', () => {
   it('accepts a well-formed create edit', () => {
@@ -402,6 +406,120 @@ describe('full entry snapshots and rollback', () => {
     // introduced (the edit model has no field-clearing action)
     expect(reverted.entries.skill['s']?.content).toBe('body')
     expect(reverted.entries.skill['s']?.description).toBe('added desc')
+  })
+})
+
+describe('validateEdit with bundle files', () => {
+  it('rejects a skill edit whose files fail bundle validation', () => {
+    const edit = { action: 'create', kind: 'skill' as const, id: 's', content: 'c', files: { '../evil': 'x' } }
+    expect(validateEdit(edit, { skillBundleLimits: DEFAULT_SKILL_BUNDLE_LIMITS })).toContain('invalid path segment')
+    expect(validateEdit({ ...edit, files: { 'scripts/a.py': 'x', 'scripts/b.py': 'y' } }, { skillBundleLimits: tinyLimits }))
+      .toContain('maxSkillFiles')
+  })
+
+  it('accepts a skill edit with valid files', () => {
+    expect(validateEdit(
+      { action: 'create', kind: 'skill', id: 's', content: 'c', files: { 'scripts/x.py': 'print(1)' } },
+      { skillBundleLimits: DEFAULT_SKILL_BUNDLE_LIMITS },
+    )).toBeUndefined()
+  })
+})
+
+describe('applyRefinementProposal with files', () => {
+  it('persists files on create and replaces them on update', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 'r1', summary: 's',
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+    }, { id: 'r1', scope: 'local', baselineState: state })
+    expect((created.entries.skill['oq'] as SkillEntry).files).toEqual({ 'scripts/x.py': 'v1' })
+
+    const { state: updated } = applyRefinementProposal(created, {
+      id: 'r2', summary: 's',
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body2', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
+    }, { id: 'r2', scope: 'local', baselineState: created })
+    expect((updated.entries.skill['oq'] as SkillEntry).files).toEqual({ 'scripts/x.py': 'v2' })
+  })
+
+  it('clears files on update with {} and keeps them when files is absent', () => {
+    const state = freshState()
+    const { state: created } = applyRefinementProposal(state, {
+      id: 'r1', summary: 's',
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+    }, { id: 'r1', scope: 'local', baselineState: state })
+    const { state: cleared } = applyRefinementProposal(created, {
+      id: 'r2', summary: 's',
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why', files: {} }],
+    }, { id: 'r2', scope: 'local', baselineState: created })
+    expect((cleared.entries.skill['oq'] as SkillEntry).files).toEqual({})
+    const { state: kept } = applyRefinementProposal(cleared, {
+      id: 'r3', summary: 's',
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why' }],
+    }, { id: 'r3', scope: 'local', baselineState: cleared })
+    expect((kept.entries.skill['oq'] as SkillEntry).files).toEqual({})
+  })
+
+  it('includes files in the entry fingerprint so content-identical file changes conflict', () => {
+    const state = freshState()
+    const { state: first } = applyRefinementProposal(state, {
+      id: 'r1', summary: 's',
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+    }, { id: 'r1', scope: 'local', baselineState: state })
+    const { state: second } = applyRefinementProposal(first, {
+      id: 'r2', summary: 's',
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
+    }, { id: 'r2', scope: 'local', baselineState: first })
+    // a stale plan built against `first` must now be rejected against `second`
+    const stale = applyRefinementProposal(second, {
+      id: 'r3', summary: 's',
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
+    }, { id: 'r3', scope: 'local', baselineState: first })
+    expect(stale.result.appliedEdits.find(edit => edit.id === 'oq')?.error).toBe('entry changed during refinement planning')
+  })
+
+  it('restores and clears files through rollback (full entry replacement)', () => {
+    const state = freshState()
+    const { state: created, result: createResult } = applyRefinementProposal(state, {
+      id: 'r1', summary: 's',
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+    }, { id: 'r1', scope: 'local', baselineState: state })
+    // update adds nothing to files, then rollback of the create must drop files entirely
+    const rollback = rollbackProposal(createResult)
+    expect(rollback.edits[0]?.action).toBe('delete')
+    const { state: restored } = applyRefinementProposal(created, rollback, {
+      id: rollback.id, scope: 'local', baselineState: created,
+    })
+    expect(restored.entries.skill['oq']).toBeUndefined()
+
+    // an update that introduces files must roll back to a files-less entry
+    const before = freshState()
+    before.entries.skill['oq'] = { id: 'oq', kind: 'skill', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
+    const { state: added, result: addResult } = applyRefinementProposal(before, {
+      id: 'r2', summary: 's',
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'new', reason: 'why', files: { 'scripts/x.py': 'v1' } }],
+    }, { id: 'r2', scope: 'local', baselineState: before })
+    expect((added.entries.skill['oq'] as SkillEntry).files).toEqual({ 'scripts/x.py': 'v1' })
+    const rollback2 = rollbackProposal(addResult)
+    const { state: undone } = applyRefinementProposal(added, rollback2, {
+      id: rollback2.id, scope: 'local', baselineState: added,
+    })
+    const undoneEntry = undone.entries.skill['oq'] as SkillEntry
+    expect(undoneEntry.content).toBe('old')
+    expect(undoneEntry.files).toEqual({})
+  })
+
+  it('applies the editGate veto and records it as a failed edit', () => {
+    const state = freshState()
+    const { result } = applyRefinementProposal(state, {
+      id: 'r1', summary: 's',
+      edits: [{ action: 'create', kind: 'skill', id: 'taken', content: 'body' }],
+    }, {
+      id: 'r1', scope: 'local', baselineState: state,
+      editGate: edit => edit.id === 'taken' ? 'skill directory exists and is not harness-owned; pick another id' : undefined,
+    })
+    const failed = result.appliedEdits.find(edit => edit.id === 'taken')
+    expect(failed?.applied).toBe(false)
+    expect(failed?.error).toContain('not harness-owned')
   })
 })
 

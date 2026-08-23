@@ -4,7 +4,9 @@
  * @module dsh-continual-harness
  */
 
-import { HARNESS_SCHEMA_VERSION, REFINEMENT_KINDS } from './domain.ts'
+import { HARNESS_SCHEMA_VERSION, KEBAB_CASE_PATTERN, REFINEMENT_KINDS } from './domain.ts'
+import { validateBundleFiles } from './skills.ts'
+import type { SkillBundleLimits } from './skills.ts'
 import type {
   AppliedRefinementEdit,
   BlastRadius,
@@ -26,8 +28,8 @@ export const BASE_SYSTEM_PROMPT_ID = 'base_system_prompt'
 /** Valid blast radius values for a refinement edit. */
 export const BLAST_RADIUS_VALUES: readonly BlastRadius[] = ['general', 'project', 'session']
 
-/** Kebab-case pattern dsh requires for skill names (and the safe path form). */
-export const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+/** Existing importers may continue importing this shared constant from refine.ts. */
+export { KEBAB_CASE_PATTERN }
 
 /** Canonical serialization of an entry for baseline conflict detection. */
 export function entryFingerprint(entry: HarnessEntry): string {
@@ -38,13 +40,19 @@ export function entryFingerprint(entry: HarnessEntry): string {
     description: entry.kind === 'skill' ? (entry as SkillEntry).description : undefined,
     reference: entry.kind === 'skill' ? (entry as SkillEntry).reference : undefined,
     arguments: entry.kind === 'skill' ? (entry as SkillEntry).arguments : undefined,
+    files: entry.kind === 'skill'
+      ? Object.fromEntries(Object.entries((entry as SkillEntry).files ?? {}).sort(([a], [b]) => a.localeCompare(b)))
+      : undefined,
     metadata: entry.metadata,
     protection: entry.protection,
   })
 }
 
 /** Validate one edit; returns the failure reason or undefined when valid. */
-export function validateEdit(edit: RefinementEdit): string | undefined {
+export function validateEdit(
+  edit: RefinementEdit,
+  opts: { skillBundleLimits?: SkillBundleLimits } = {},
+): string | undefined {
   if (!REFINEMENT_KINDS.includes(edit.kind)) return `unknown kind: ${edit.kind}`
   if (!REFINEMENT_ACTIONS.includes(edit.action)) return `unknown action: ${edit.action}`
   if (edit.id === BASE_SYSTEM_PROMPT_ID) return 'the base system prompt is immutable'
@@ -64,6 +72,10 @@ export function validateEdit(edit: RefinementEdit): string | undefined {
       && edit.content === undefined
       && edit.archive === undefined
       && edit.pin === undefined) return 'non-delete edits require content'
+  if (edit.kind === 'skill' && edit.files !== undefined) {
+    const failure = validateBundleFiles(edit.files, opts.skillBundleLimits)
+    if (failure) return `edit "${edit.id}" rejected: ${failure}`
+  }
   return undefined
 }
 
@@ -120,15 +132,26 @@ export function applyRefinementProposal(
     automatic?: boolean
     /** Session provenance stamped on create/content-update edits. */
     sourceSession?: string
+    /** Bundle limits passed to validateEdit for skill files (spec §7.4). */
+    skillBundleLimits?: SkillBundleLimits
+    /** Per-edit veto hook (e.g. fs-backed create-conflict checks); returns the failure reason. */
+    editGate?: (edit: RefinementEdit) => string | undefined
   },
 ): { result: RefinementResult; state: HarnessState } {
   const now = new Date().toISOString()
   const appliedEdits: AppliedRefinementEdit[] = []
   const next = structuredClone(state)
   for (const edit of proposal.edits) {
-    const invalid = validateEdit(edit)
+    const invalid = validateEdit(edit, options.skillBundleLimits === undefined
+      ? {}
+      : { skillBundleLimits: options.skillBundleLimits })
     if (invalid) {
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: invalid }))
+      continue
+    }
+    const gated = options.editGate?.(edit)
+    if (gated) {
+      appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: gated }))
       continue
     }
     // Rule 1a: kinds listed in protectedKinds are immutable on the automatic
@@ -270,6 +293,7 @@ export function applyRefinementProposal(
             ...(edit.description === undefined ? {} : { description: edit.description }),
             ...(edit.reference === undefined ? {} : { reference: edit.reference }),
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
+            ...(edit.files === undefined ? {} : { files: edit.files }),
             ...(edit.protection === undefined ? {} : { protection: edit.protection }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
@@ -306,6 +330,7 @@ export function applyRefinementProposal(
       ...(edit.kind === 'skill' && edit.description !== undefined ? { description: edit.description } : {}),
       ...(edit.kind === 'skill' && edit.reference !== undefined ? { reference: edit.reference } : {}),
       ...(edit.kind === 'skill' && edit.arguments !== undefined ? { arguments: edit.arguments } : {}),
+      ...(edit.kind === 'skill' && edit.files !== undefined ? { files: edit.files } : {}),
       ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
       updatedAt: now,
     }
@@ -380,6 +405,7 @@ export function entryToEditFields(before: HarnessEntry): Record<string, unknown>
     if (skill.description !== undefined) fields.description = skill.description
     if (skill.reference !== undefined) fields.reference = skill.reference
     if (skill.arguments !== undefined) fields.arguments = skill.arguments
+    fields.files = skill.files ?? {}
   }
   return fields
 }
