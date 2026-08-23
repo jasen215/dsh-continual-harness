@@ -31,7 +31,7 @@ function skillEntry(id: string, content: string, description?: string): HarnessE
 describe('renderSkillMarkdown', () => {
   it('renders the dsh SKILL.md bundle: name + description frontmatter and verbatim body', () => {
     const markdown = renderSkillMarkdown(skillEntry('repro', '## Steps\n1. Run `pnpm test`\n2. Read the failure', 'Reproduce a bug fast'))
-    expect(markdown).toContain('---\nname: repro\ndescription: Reproduce a bug fast\nmetadata:')
+    expect(markdown).toContain('---\nname: repro\ndescription: "Reproduce a bug fast"\nmetadata:')
     expect(markdown).toContain('## Steps\n1. Run `pnpm test`\n2. Read the failure')
   })
 
@@ -42,14 +42,22 @@ describe('renderSkillMarkdown', () => {
 
   it('falls back to the first line of the body when description is missing', () => {
     const markdown = renderSkillMarkdown(skillEntry('repro', 'Reproduce a bug fast\n\nLonger body.'))
-    expect(markdown).toContain('description: Reproduce a bug fast')
+    expect(markdown).toContain('description: "Reproduce a bug fast"')
   })
 
   it('flattens multi-line descriptions and caps their length', () => {
     const markdown = renderSkillMarkdown(skillEntry('repro', 'body', 'line one\nline two'))
-    expect(markdown).toContain('description: line one line two')
+    expect(markdown).toContain('description: "line one line two"')
     const long = renderSkillMarkdown(skillEntry('repro', 'body', 'x'.repeat(300)))
-    expect(long).toContain(`description: ${'x'.repeat(200)}…`)
+    expect(long).toContain(`description: "${'x'.repeat(200)}…"`)
+  })
+
+  it('escapes colons, hashes, and quotes as a double-quoted YAML scalar', () => {
+    const markdown = renderSkillMarkdown(skillEntry('repro', 'body', 'Note: always repro — #1 priority "now"'))
+    expect(markdown).toContain('description: "Note: always repro — #1 priority \\"now\\""')
+    // a leading special character must not change the scalar's type
+    const leading = renderSkillMarkdown(skillEntry('repro', 'body', '{not a map}'))
+    expect(leading).toContain('description: "{not a map}"')
   })
 })
 

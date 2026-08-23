@@ -17,6 +17,7 @@ import {
 } from '../src/benchmark.ts'
 import type { BenchmarkCase, BenchmarkDecision, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
+import { mergeHarnessStates } from '../src/storage.ts'
 import type { CellScore, HarnessEntry, HarnessState, RefinementResult } from '../src/types.ts'
 
 const EMPTY_ENTRIES = { prompt: {}, memory: {}, skill: {}, subagent: {} }
@@ -208,6 +209,116 @@ describe('validateCandidateDelta', () => {
     const candidate = buildSnapshot(applyKnownRefinement(baseState()), 'cand-1', 'refine-9')
     expect(validateCandidateDelta(reference, candidate, 'refine-1')).toEqual({ ok: false, reason: 'candidate-delta-mismatch' })
   })
+
+  it('accepts a layered candidate where a global refinement updates a shadowed entry', () => {
+    // global skill "foo" is shadowed by a local "foo": merged shows the local
+    // winner at "foo" and the shadowed global at "local:foo"
+    const globalState = baseState()
+    globalState.entries.skill['foo'] = { id: 'foo', kind: 'skill', version: 1, content: 'global old body', updatedAt: 't', description: 'global desc' }
+    const localState = baseState()
+    localState.entries.skill['foo'] = { id: 'foo', kind: 'skill', version: 1, content: 'local winner body', updatedAt: 't', description: 'local desc' }
+    const reference = buildSnapshot(mergeHarnessStates(globalState, localState), 'ref-1', undefined, { local: localState, global: globalState })
+
+    const before = globalState.entries.skill['foo']!
+    const after = { ...before, version: 2, content: 'global NEW body', updatedAt: 't2' }
+    const refinement: RefinementResult = {
+      id: 'refine-global-foo', summary: 'update global foo', scope: 'global', committedAt: 't2',
+      appliedEdits: [{
+        action: 'update', kind: 'skill', id: 'foo', applied: true, blastRadius: 'general',
+        before: before.content, beforeEntry: structuredClone(before),
+        after: after.content, afterEntry: structuredClone(after),
+      }],
+    }
+    // derive the candidate the way the tool does: apply to the global layer, re-merge
+    const globalLayer = structuredClone(reference.layers!.global)
+    globalLayer.entries.skill['foo'] = structuredClone(after)
+    globalLayer.refinements.push(structuredClone(refinement))
+    const candidate = buildSnapshot(
+      mergeHarnessStates(globalLayer, reference.layers!.local),
+      'cand-1', refinement.id,
+      { local: reference.layers!.local, global: globalLayer },
+    )
+    // the merged candidate keeps the local winner at "foo"; only the shadowed
+    // global ("local:foo") shows the refinement's effect
+    expect(candidate.state.entries.skill['foo']!.content).toBe('local winner body')
+    expect(candidate.state.entries.skill['local:foo']!.content).toBe('global NEW body')
+    expect(validateCandidateDelta(reference, candidate, refinement.id)).toEqual({ ok: true })
+  })
+
+  it('accepts a layered candidate for a local refinement with a non-empty global history', () => {
+    const globalState = baseState()
+    globalState.refinements.push({ id: 'g1', summary: 'prior global', scope: 'global', committedAt: 't0', appliedEdits: [] })
+    const localState = baseState()
+    const reference = buildSnapshot(mergeHarnessStates(globalState, localState), 'ref-1', undefined, { local: localState, global: globalState })
+
+    const refinement: RefinementResult = {
+      id: 'refine-local-m', summary: 'local create', scope: 'local', committedAt: 't1',
+      appliedEdits: [{
+        action: 'create', kind: 'memory', id: 'm', applied: true, blastRadius: 'general',
+        after: 'learned', afterEntry: memoryEntry('m', 'learned'),
+      }],
+    }
+    const localLayer = structuredClone(reference.layers!.local)
+    localLayer.entries.memory['m'] = structuredClone(refinement.appliedEdits[0]!.afterEntry!)
+    localLayer.refinements.push(structuredClone(refinement))
+    // the merged view lists the local refinement mid-list: [...local, ...global]
+    const candidate = buildSnapshot(
+      mergeHarnessStates(reference.layers!.global, localLayer),
+      'cand-1', refinement.id,
+      { local: localLayer, global: reference.layers!.global },
+    )
+    expect(candidate.state.refinements.map(r => r.id)).toEqual(['refine-local-m', 'g1'])
+    expect(validateCandidateDelta(reference, candidate, refinement.id)).toEqual({ ok: true })
+  })
+
+  it('rejects a layered candidate that mutates the other layer', () => {
+    const globalState = baseState()
+    const localState = baseState()
+    localState.entries.memory['m'] = memoryEntry('m', 'local only')
+    const reference = buildSnapshot(mergeHarnessStates(globalState, localState), 'ref-1', undefined, { local: localState, global: globalState })
+    const refinement: RefinementResult = {
+      id: 'refine-g', summary: 'global create', scope: 'global', committedAt: 't',
+      appliedEdits: [{
+        action: 'create', kind: 'memory', id: 'g-mem', applied: true, blastRadius: 'general',
+        after: 'g', afterEntry: memoryEntry('g-mem', 'g'),
+      }],
+    }
+    const globalLayer = structuredClone(reference.layers!.global)
+    globalLayer.entries.memory['g-mem'] = structuredClone(refinement.appliedEdits[0]!.afterEntry!)
+    globalLayer.refinements.push(structuredClone(refinement))
+    // a drift sneaks into the LOCAL layer the refinement never touched
+    const localLayer = structuredClone(reference.layers!.local)
+    localLayer.entries.memory['drift'] = memoryEntry('drift', 'unrelated')
+    const candidate = buildSnapshot(
+      mergeHarnessStates(globalLayer, localLayer),
+      'cand-1', refinement.id,
+      { local: localLayer, global: globalLayer },
+    )
+    expect(validateCandidateDelta(reference, candidate, refinement.id)).toEqual({ ok: false, reason: 'candidate-delta-mismatch' })
+  })
+
+  it('rejects a layered candidate whose merged state is not its layers\' merge', () => {
+    const globalState = baseState()
+    const localState = baseState()
+    const reference = buildSnapshot(mergeHarnessStates(globalState, localState), 'ref-1', undefined, { local: localState, global: globalState })
+    const refinement: RefinementResult = {
+      id: 'refine-g', summary: 'global create', scope: 'global', committedAt: 't',
+      appliedEdits: [{
+        action: 'create', kind: 'memory', id: 'g-mem', applied: true, blastRadius: 'general',
+        after: 'g', afterEntry: memoryEntry('g-mem', 'g'),
+      }],
+    }
+    const globalLayer = structuredClone(reference.layers!.global)
+    globalLayer.entries.memory['g-mem'] = structuredClone(refinement.appliedEdits[0]!.afterEntry!)
+    globalLayer.refinements.push(structuredClone(refinement))
+    const merged = mergeHarnessStates(globalLayer, structuredClone(reference.layers!.local))
+    // a phantom entry appears in the merged view but in no layer
+    merged.entries.memory['ghost'] = memoryEntry('ghost', 'nowhere')
+    const candidate = buildSnapshot(merged, 'cand-1', refinement.id, {
+      local: structuredClone(reference.layers!.local), global: globalLayer,
+    })
+    expect(validateCandidateDelta(reference, candidate, refinement.id)).toEqual({ ok: false, reason: 'candidate-delta-mismatch' })
+  })
 })
 
 describe('validateCellScore', () => {
@@ -380,6 +491,25 @@ describe('benchmark persistence', () => {
     }
     writeFileSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'), JSON.stringify(tampered), 'utf8')
     expect(() => loadReferenceSnapshot(home, 'ref-1')).toThrow(/hash/i)
+  })
+
+  it('fails loudly when stored snapshot layers do not merge to its state', () => {
+    const home = tempHome()
+    const localState = baseState()
+    localState.entries.memory['m'] = memoryEntry('m', 'local')
+    const globalState = baseState()
+    const snapshot = buildSnapshot(mergeHarnessStates(globalState, localState), 'ref-1', undefined, { local: localState, global: globalState })
+    captureReferenceSnapshot(home, snapshot)
+    // rewrite with a layer that no longer matches the merged state
+    const tampered: HarnessSnapshot = {
+      ...snapshot,
+      layers: {
+        local: { ...localState, entries: { ...localState.entries, memory: { m: memoryEntry('m', 'different') } } },
+        global: globalState,
+      },
+    }
+    writeFileSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'), JSON.stringify(tampered), 'utf8')
+    expect(() => loadReferenceSnapshot(home, 'ref-1')).toThrow(/layers do not merge/i)
   })
 
   it('refuses to persist a snapshot id that is not a safe file name', () => {

@@ -20,7 +20,8 @@ import {
   BENCHMARK_SNAPSHOTS_DIR_NAME,
   REFINEMENT_KINDS,
 } from './domain.ts'
-import type { HarnessState } from './types.ts'
+import { mergeHarnessStates } from './storage.ts'
+import type { AppliedRefinementEdit, HarnessEntry, HarnessState, RefinementKind, RefinementResult } from './types.ts'
 
 /** A fixed benchmark case. Only `draft` cases may change; `frozen` cases are immutable. */
 export interface BenchmarkCase {
@@ -42,6 +43,9 @@ export type BenchmarkCaseInput = Omit<BenchmarkCase, 'state' | 'createdAt' | 'fr
  * A read-only capture of the merged local/global harness state. `state` is a
  * structured-clone copy; `stateHash` is the canonical projection hash of that
  * copy; `refinementId` marks a candidate as "reference plus this refinement".
+ * When `layers` is present (captured by the store), the two source layers are
+ * retained so a candidate can be derived by applying a refinement to its own
+ * layer and re-merging — a shadowed global entry must never be overwritten.
  */
 export interface HarnessSnapshot {
   snapshotId: string
@@ -49,6 +53,8 @@ export interface HarnessSnapshot {
   stateHash: string
   refinementId?: string
   capturedAt: string
+  /** The local/global layers at capture time; `state` is their merge. */
+  layers?: { local: HarnessState; global: HarnessState }
 }
 
 /** Structured executor output for one cell; unknown fields are rejected by the evaluator. */
@@ -170,9 +176,16 @@ export function hashBenchmarkCase(benchmarkCase: BenchmarkCase): string {
 /**
  * Build a read-only snapshot from a merged state without persisting anything:
  * structured-clones the state, hashes the clone's canonical projection, and
- * stamps `snapshotId`, optional `refinementId`, and `capturedAt`.
+ * stamps `snapshotId`, optional `refinementId`, and `capturedAt`. When the
+ * source layers are passed, they are stored as structured clones and the
+ * merged `state` must be their merge (the caller builds it that way).
  */
-export function buildSnapshot(state: HarnessState, snapshotId: string, refinementId?: string): HarnessSnapshot {
+export function buildSnapshot(
+  state: HarnessState,
+  snapshotId: string,
+  refinementId?: string,
+  layers?: { local: HarnessState; global: HarnessState },
+): HarnessSnapshot {
   if (snapshotId.trim() === '') throw new Error('snapshot id must be non-empty')
   const captured = structuredClone(state)
   return {
@@ -180,18 +193,78 @@ export function buildSnapshot(state: HarnessState, snapshotId: string, refinemen
     state: captured,
     stateHash: sha256(canonicalJson(captured)),
     ...(refinementId !== undefined ? { refinementId } : {}),
+    ...(layers === undefined ? {} : { layers: structuredClone(layers) }),
     capturedAt: new Date().toISOString(),
   }
 }
 
+/** The two source layers retained by a snapshot. */
+export type SnapshotLayers = NonNullable<HarnessSnapshot['layers']>
+
+/** Resolve the scope/other layer pair for a refinement scope. */
+export function scopeLayerPair(scope: 'local' | 'global'): { scope: 'local' | 'global'; other: 'local' | 'global' } {
+  return scope === 'global' ? { scope: 'global', other: 'local' } : { scope: 'local', other: 'global' }
+}
+
+/** Whether `candIds` is `refIds` plus exactly `id` appended at the end. */
+function historyExtendsByIds(refIds: string[], candIds: string[], id: string): 'ok' | 'history-mismatch' | 'refinement-not-found' {
+  if (candIds.length !== refIds.length + 1) {
+    return candIds.includes(id) ? 'history-mismatch' : 'refinement-not-found'
+  }
+  for (let index = 0; index < refIds.length; index += 1) {
+    if (refIds[index] !== candIds[index]) return 'history-mismatch'
+  }
+  return candIds[candIds.length - 1] === id ? 'ok' : 'refinement-not-found'
+}
+
+/** Whether the merged view of the layers canonical-equals the given state. */
+function layersMergeToState(layers: SnapshotLayers, state: HarnessState): boolean {
+  return canonicalJson(mergeHarnessStates(layers.global, layers.local)) === canonicalJson(state)
+}
+
+/**
+ * Verify every applied edit against ref/cand entry accessors: presence rules
+ * per action plus before/after entry matching (with content-only fallback for
+ * legacy edits lacking full snapshots). Returns false on any mismatch.
+ */
+function verifyAppliedEdits(
+  appliedEdits: AppliedRefinementEdit[],
+  refEntryFor: (kind: RefinementKind, id: string) => HarnessEntry | undefined,
+  candEntryFor: (kind: RefinementKind, id: string) => HarnessEntry | undefined,
+): boolean {
+  for (const edit of appliedEdits) {
+    const refEntry = refEntryFor(edit.kind, edit.id)
+    const candEntry = candEntryFor(edit.kind, edit.id)
+    if (edit.action === 'create') {
+      if (refEntry !== undefined || candEntry === undefined) return false
+    } else if (edit.action === 'delete') {
+      if (refEntry === undefined || candEntry !== undefined) return false
+    } else if (refEntry === undefined || candEntry === undefined) {
+      return false
+    }
+    if (edit.beforeEntry !== undefined) {
+      if (canonicalJson(refEntry) !== canonicalJson(edit.beforeEntry)) return false
+    } else if (edit.before !== undefined && refEntry?.content !== edit.before) {
+      return false
+    }
+    if (edit.afterEntry !== undefined) {
+      if (canonicalJson(candEntry) !== canonicalJson(edit.afterEntry)) return false
+    } else if (edit.after !== undefined && candEntry?.content !== edit.after) {
+      return false
+    }
+  }
+  return true
+}
+
 /**
  * Prove that `candidate` is exactly `reference` plus the one refinement
- * `refinementId` — never a drifted state. Compares canonical state projections
- * (not object identity): the candidate's refinement history must extend the
- * reference's by exactly that refinement, and every entry-level difference
- * must be attributable to its applied edits, consistent with the recorded
- * before/after state. Returns a structured failure reason; a drifted candidate
- * is never silently accepted.
+ * `refinementId` — never a drifted state. When both snapshots carry `layers`,
+ * the proof runs per layer: the refinement's own layer (by `result.scope`)
+ * must differ by exactly its applied edits with matching before/after entries,
+ * the other layer must be canonical-identical, and the candidate's merged
+ * `state` must equal the merge of its layers. Legacy single-layer snapshots
+ * (no `layers`) fall back to the merged-state comparison. Returns a
+ * structured failure reason; a drifted candidate is never silently accepted.
  */
 export function validateCandidateDelta(reference: HarnessSnapshot, candidate: HarnessSnapshot, refinementId: string): CandidateDeltaResult {
   // A candidate that names a different refinement is drifting by definition.
@@ -199,21 +272,21 @@ export function validateCandidateDelta(reference: HarnessSnapshot, candidate: Ha
     return { ok: false, reason: 'candidate-delta-mismatch' }
   }
 
-  const refIds = reference.state.refinements.map(result => result.id)
-  const candIds = candidate.state.refinements.map(result => result.id)
+  const result = candidate.state.refinements.find(r => r.id === refinementId)
+  if (result === undefined) return { ok: false, reason: 'refinement-not-found' }
 
-  // The candidate history must extend the reference history by exactly one
-  // refinement — the claimed one — in commit order.
-  if (candIds.length !== refIds.length + 1) {
-    if (!candIds.includes(refinementId)) return { ok: false, reason: 'refinement-not-found' }
-    return { ok: false, reason: 'history-mismatch' }
+  if (reference.layers !== undefined && candidate.layers !== undefined) {
+    return validateCandidateDeltaLayered(reference.layers, candidate.layers, candidate.state, result)
   }
-  for (let index = 0; index < refIds.length; index += 1) {
-    if (refIds[index] !== candIds[index]) return { ok: false, reason: 'history-mismatch' }
-  }
-  if (candIds[candIds.length - 1] !== refinementId) return { ok: false, reason: 'refinement-not-found' }
 
-  const result = candidate.state.refinements[candIds.length - 1]!
+  // Legacy merged-only path for pre-layer snapshots.
+  const history = historyExtendsByIds(
+    reference.state.refinements.map(r => r.id),
+    candidate.state.refinements.map(r => r.id),
+    refinementId,
+  )
+  if (history !== 'ok') return { ok: false, reason: history }
+
   // Only applied edits produce a state delta; rejected edits (applied: false)
   // changed nothing and must not be required to appear in the diff.
   const appliedEdits = result.appliedEdits.filter(edit => edit.applied)
@@ -222,27 +295,66 @@ export function validateCandidateDelta(reference: HarnessSnapshot, candidate: Ha
   if (editKeys.size !== diffKeys.size || [...editKeys].some(key => !diffKeys.has(key))) {
     return { ok: false, reason: 'candidate-delta-mismatch' }
   }
+  if (!verifyAppliedEdits(
+    appliedEdits,
+    (kind, id) => reference.state.entries[kind]?.[id],
+    (kind, id) => candidate.state.entries[kind]?.[id],
+  )) {
+    return { ok: false, reason: 'candidate-delta-mismatch' }
+  }
+  return { ok: true }
+}
 
-  for (const edit of appliedEdits) {
-    const refEntry = reference.state.entries[edit.kind]?.[edit.id]
-    const candEntry = candidate.state.entries[edit.kind]?.[edit.id]
-    if (edit.action === 'create') {
-      if (refEntry !== undefined || candEntry === undefined) return { ok: false, reason: 'candidate-delta-mismatch' }
-    } else if (edit.action === 'delete') {
-      if (refEntry === undefined || candEntry !== undefined) return { ok: false, reason: 'candidate-delta-mismatch' }
-    } else if (refEntry === undefined || candEntry === undefined) {
-      return { ok: false, reason: 'candidate-delta-mismatch' }
-    }
-    if (edit.beforeEntry !== undefined) {
-      if (canonicalJson(refEntry) !== canonicalJson(edit.beforeEntry)) return { ok: false, reason: 'candidate-delta-mismatch' }
-    } else if (edit.before !== undefined && refEntry?.content !== edit.before) {
-      return { ok: false, reason: 'candidate-delta-mismatch' }
-    }
-    if (edit.afterEntry !== undefined) {
-      if (canonicalJson(candEntry) !== canonicalJson(edit.afterEntry)) return { ok: false, reason: 'candidate-delta-mismatch' }
-    } else if (edit.after !== undefined && candEntry?.content !== edit.after) {
-      return { ok: false, reason: 'candidate-delta-mismatch' }
-    }
+/**
+ * Layer-aware delta proof for snapshots that carry both source layers. The
+ * refinement's scope picks its layer; the merged history check is skipped
+ * because a local refinement lands mid-list in the merged view
+ * (`[...local, ...global]`).
+ */
+function validateCandidateDeltaLayered(
+  refLayers: SnapshotLayers,
+  candLayers: SnapshotLayers,
+  candState: HarnessState,
+  result: RefinementResult,
+): CandidateDeltaResult {
+  const { scope, other } = scopeLayerPair(result.scope)
+  const refScope = refLayers[scope]
+  const candScope = candLayers[scope]
+
+  // The scope layer's history extends by exactly the one refinement.
+  const history = historyExtendsByIds(
+    refScope.refinements.map(r => r.id),
+    candScope.refinements.map(r => r.id),
+    result.id,
+  )
+  if (history !== 'ok') return { ok: false, reason: history }
+
+  // The other layer is untouched: refinements and entries must be identical.
+  if (canonicalJson(refLayers[other].refinements) !== canonicalJson(candLayers[other].refinements)) {
+    return { ok: false, reason: 'history-mismatch' }
+  }
+  if (canonicalJson(refLayers[other].entries) !== canonicalJson(candLayers[other].entries)) {
+    return { ok: false, reason: 'candidate-delta-mismatch' }
+  }
+
+  // The candidate's merged state must equal the merge of its layers.
+  if (!layersMergeToState(candLayers, candState)) {
+    return { ok: false, reason: 'candidate-delta-mismatch' }
+  }
+
+  // The scope-layer diff must equal exactly the applied edit keys.
+  const appliedEdits = result.appliedEdits.filter(edit => edit.applied)
+  const editKeys = new Set(appliedEdits.map(edit => `${edit.kind}:${edit.id}`))
+  const layerDiffKeys = entryDiffKeys(refScope, candScope)
+  if (editKeys.size !== layerDiffKeys.size || [...editKeys].some(key => !layerDiffKeys.has(key))) {
+    return { ok: false, reason: 'candidate-delta-mismatch' }
+  }
+  if (!verifyAppliedEdits(
+    appliedEdits,
+    (kind, id) => refScope.entries[kind]?.[id],
+    (kind, id) => candScope.entries[kind]?.[id],
+  )) {
+    return { ok: false, reason: 'candidate-delta-mismatch' }
   }
   return { ok: true }
 }
@@ -360,6 +472,9 @@ export function loadReferenceSnapshot(home: string, snapshotId: string): Harness
   if (snapshot.stateHash !== sha256(canonicalJson(snapshot.state))) {
     throw new Error(`benchmark snapshot stateHash mismatch: ${snapshotId}`)
   }
+  if (snapshot.layers !== undefined && !layersMergeToState(snapshot.layers, snapshot.state)) {
+    throw new Error(`benchmark snapshot layers do not merge to its state: ${snapshotId}`)
+  }
   return snapshot
 }
 
@@ -436,6 +551,23 @@ function isHarnessSnapshot(value: unknown): value is HarnessSnapshot {
     && typeof snapshot.stateHash === 'string'
     && typeof snapshot.capturedAt === 'string'
     && (snapshot.refinementId === undefined || typeof snapshot.refinementId === 'string')
+    && (snapshot.layers === undefined || isSnapshotLayers(snapshot.layers))
+}
+
+/** Whether a value is a `{ local, global }` pair of harness states (light shape check). */
+function isSnapshotLayers(value: unknown): value is { local: HarnessState; global: HarnessState } {
+  if (!isPlainObject(value)) return false
+  const layers = value as Record<string, unknown>
+  return isHarnessStateShape(layers.local) && isHarnessStateShape(layers.global)
+}
+
+/** Light harness-state shape check for snapshot layers (entries + refinements). */
+function isHarnessStateShape(value: unknown): value is HarnessState {
+  if (!isPlainObject(value)) return false
+  const state = value as Record<string, unknown>
+  return typeof state.schemaVersion === 'number'
+    && isPlainObject(state.entries)
+    && Array.isArray(state.refinements)
 }
 
 function benchmarkCasesFile(home: string): string {

@@ -21,6 +21,7 @@ import {
   scopeInstruction,
 } from './planner.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
+import { mergeHarnessStates } from './storage.ts'
 import type { HarnessStore } from './store.ts'
 import type { AutoRefineReason } from './types.ts'
 
@@ -218,7 +219,12 @@ export function registerHarnessDriver(ctx: Context, store: HarnessStore, options
       }
     }
     try {
-      const stateOverview = overviewForPrompt(store.state(agent))
+      // Capture the target (local) store state at review/planning time; the
+      // commit rejects any edit whose entry changed while the gate ran. One
+      // read feeds both the baseline and the planner's merged overview.
+      const localState = store.localState(agent)
+      const baseline = localState
+      const stateOverview = overviewForPrompt(mergeHarnessStates(store.globalState(), localState))
       const historyText = historyForPrompt(store.history(agent))
       const trajectoryText = store.trajectory(agent, options.maxTrajectoryChars)
       const review = await reviewAutoRefine({
@@ -242,7 +248,7 @@ export function registerHarnessDriver(ctx: Context, store: HarnessStore, options
         record('assessed', { rationale: review.rationale })
         return
       }
-      const result = store.applyRefinement(agent, plan, { global: false, automatic: true })
+      const result = store.applyRefinement(agent, plan, { global: false, automatic: true, baseline })
       const applied = result.appliedEdits.filter(edit => edit.applied).length
       const rejected = result.appliedEdits.filter(edit => !edit.applied)
       record(gateOutcome(true, plan.edits.length, applied), {

@@ -112,7 +112,7 @@ export function applyRefinementProposal(
     baselineState: HarnessState
     /** Entry growth fraction cap; 0 disables the check. */
     maxEntryGrowth?: number
-    /** Kinds protected from the automatic path (plumbed; the per-edit rule keys off the entry's own protection). */
+    /** Kinds the automatic path may not edit at all (create/update/delete). */
     protectedKinds?: readonly RefinementKind[]
     /** Global entries for the local-during-global read-only rule. */
     globalEntries?: HarnessState['entries']
@@ -129,6 +129,16 @@ export function applyRefinementProposal(
     const invalid = validateEdit(edit)
     if (invalid) {
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: invalid }))
+      continue
+    }
+    // Rule 1a: kinds listed in protectedKinds are immutable on the automatic
+    // path — every edit (create/update/delete) on such a kind is rejected.
+    // The per-entry `protection` guard (Rule 2) stays as an additional check.
+    if (options.automatic === true && options.protectedKinds?.includes(edit.kind)) {
+      appliedEdits.push(stampAppliedEdit(edit, {
+        applied: false,
+        error: `kind ${edit.kind} is protected from automatic refinement`,
+      }))
       continue
     }
     // Rule 1: during a local refinement the global store is read-only. An id
@@ -260,6 +270,7 @@ export function applyRefinementProposal(
             ...(edit.description === undefined ? {} : { description: edit.description }),
             ...(edit.reference === undefined ? {} : { reference: edit.reference }),
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
+            ...(edit.protection === undefined ? {} : { protection: edit.protection }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
@@ -269,6 +280,7 @@ export function applyRefinementProposal(
             version: 1,
             content,
             ...(edit.title === undefined ? {} : { title: edit.title }),
+            ...(edit.protection === undefined ? {} : { protection: edit.protection }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
@@ -287,6 +299,13 @@ export function applyRefinementProposal(
       version: currentEntry.version + 1,
       content,
       ...(edit.title === undefined ? {} : { title: edit.title }),
+      ...(edit.protection === undefined ? {} : { protection: edit.protection }),
+      // skill-only fields: set-if-present — the edit carries the new value or
+      // the current one is kept, so an update can add a field but rollback
+      // (which only re-sets recorded fields) cannot remove one it introduced.
+      ...(edit.kind === 'skill' && edit.description !== undefined ? { description: edit.description } : {}),
+      ...(edit.kind === 'skill' && edit.reference !== undefined ? { reference: edit.reference } : {}),
+      ...(edit.kind === 'skill' && edit.arguments !== undefined ? { arguments: edit.arguments } : {}),
       ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
       updatedAt: now,
     }
@@ -326,18 +345,14 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
       if (before === undefined) continue
       edits.push({
         action: 'create', kind: edit.kind, id: edit.id,
-        ...(before.title === undefined ? {} : { title: before.title }),
-        ...(before.metadata === undefined ? {} : { metadata: before.metadata }),
-        content: before.content,
+        ...entryToEditFields(before),
         reason,
         ...(edit.beforeEntry === undefined ? { rollbackDegraded: true } : {}),
       })
     } else if (edit.beforeEntry !== undefined) {
       edits.push({
         action: 'update', kind: edit.kind, id: edit.id,
-        ...(edit.beforeEntry.title === undefined ? {} : { title: edit.beforeEntry.title }),
-        ...(edit.beforeEntry.metadata === undefined ? {} : { metadata: edit.beforeEntry.metadata }),
-        content: edit.beforeEntry.content,
+        ...entryToEditFields(edit.beforeEntry),
         reason,
       })
     } else if (edit.before !== undefined) {
@@ -349,6 +364,24 @@ export function rollbackProposal(target: RefinementResult): RefinementProposal {
     summary: `Rollback of ${target.id}`,
     edits,
   }
+}
+
+/** Map a full entry snapshot onto edit fields so a rollback (or a promote)
+ * restores every persisted field: content, title, metadata, protection, and
+ * the skill-only description/reference/arguments. Legacy records carry only
+ * content. The single source of truth for the entry→edit field mapping. */
+export function entryToEditFields(before: HarnessEntry): Record<string, unknown> {
+  const fields: Record<string, unknown> = { content: before.content }
+  if (before.title !== undefined) fields.title = before.title
+  if (before.metadata !== undefined) fields.metadata = before.metadata
+  if (before.protection !== undefined) fields.protection = before.protection
+  if (before.kind === 'skill') {
+    const skill = before as SkillEntry
+    if (skill.description !== undefined) fields.description = skill.description
+    if (skill.reference !== undefined) fields.reference = skill.reference
+    if (skill.arguments !== undefined) fields.arguments = skill.arguments
+  }
+  return fields
 }
 
 /** A fresh empty entries map at the current schema version. */
