@@ -27,9 +27,8 @@ You receive the current harness state, the recent refinement history, a tail-bia
 - 'prompt' entries are supplemental prompt notes; the base system prompt is immutable and never edited.
 - 'memory' entries are durable facts, decisions, failures, preferences, and outcomes.
 - 'skill' entries are real dsh skills, materialized as SKILL.md bundles: "description" is a one-line summary, "content" is the markdown body (step-by-step instructions), and the id must be kebab-case.
-- Skill ids must be short, memorable, and easy to type (e.g. 'oq-gen', 'git-commit'); never long descriptive phrases such as 'omlx-oq-quantization-workflow'.
-- Skill "description" is the primary trigger mechanism: lead with concrete when-to-use trigger words and user phrasings (e.g. "use whenever the user asks to quantize a model with omlx oQ", "trigger on ..."), not just a summary of what the skill does.
-- Skill "content" must organize templates and scripts under the standard 'scripts/' and 'references/' layout: keep the SKILL.md body self-contained step-by-step instructions, and embed any templates/scripts as fenced code blocks named for their target paths under scripts/ or references/ so they can be materialized when the skill runs.
+- Skill "content" keeps the SKILL.md body self-contained step-by-step instructions. Templates and scripts go into a structured "files" map: keys are relative paths under scripts/ or references/ (e.g. "scripts/oq_quantize.py"), values are the file contents. Use forward slashes only. Never include SKILL.md in files — it is generated from content. Keep each file small and total under the bundle limits (sizes count in UTF-8 bytes). files must be complete — every file the skill needs must be present. files are text-only — do not embed binary content.
+- The harness refine path never performs a full skill-authoring loop (interviews, evals, packaging); route those to a dedicated skill-authoring capability.
 - 'subagent' entries are reusable delegation specs: purpose, instructions, when to invoke.
 - Prefer 'update' over creating near-duplicates; 'delete' entries that are stale, contradicted, or never useful.
 - Scope policy: 'global' is only for stable cross-session lessons, durable preferences, reusable skills, and project-scoped facts; everything else belongs in 'local'. Local entries shadow same-id global entries.
@@ -41,7 +40,7 @@ You receive the current harness state, the recent refinement history, a tail-bia
 - The summary is one line.
 
 Respond with ONLY a JSON object:
-{"id":"refine_<timestamp>","summary":"one line","edits":[{"action":"create|update|delete","kind":"prompt|memory|skill|subagent","id":"kebab-case","content":"...","description":"...","reason":"...","blastRadius":"general"}]}
+{"id":"refine_<timestamp>","summary":"one line","edits":[{"action":"create|update|delete","kind":"prompt|memory|skill|subagent","id":"kebab-case","content":"...","description":"...","files":{"scripts/oq_quantize.py":"..."},"reason":"...","blastRadius":"general"}]}
 Note: 'reason' is required for 'update'/'delete' edits; 'create' may omit it. 'blastRadius' defaults to 'general'.`
 
 /** System prompt for the automatic refinement review gate. */
