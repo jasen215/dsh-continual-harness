@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
+import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
@@ -94,6 +95,10 @@ export interface Config {
   maxEntryGrowth: number
   /** Kinds the automatic path may not modify. */
   protectedKinds: RefinementKind[]
+  /** Skill bundle limits (spec §7.10): file count, per-file bytes, total bytes (UTF-8). */
+  maxSkillFiles: number
+  maxSkillFileBytes: number
+  maxSkillBundleBytes: number
 }
 
 /** Benchmark configuration (spec §5) with its MVP defaults. */
@@ -151,6 +156,9 @@ export const Config: z<Config> = z.object({
   logMaxBytes: z.number().step(1).min(1).default(5 * 1024 * 1024),
   maxEntryGrowth: z.number().min(0).default(0.5),
   protectedKinds: z.array(z.union(['prompt', 'memory', 'skill', 'subagent'])).default(['skill']),
+  maxSkillFiles: z.number().step(1).min(1).default(DEFAULT_SKILL_BUNDLE_LIMITS.maxSkillFiles),
+  maxSkillFileBytes: z.number().step(1).min(1).default(DEFAULT_SKILL_BUNDLE_LIMITS.maxSkillFileBytes),
+  maxSkillBundleBytes: z.number().step(1).min(1).default(DEFAULT_SKILL_BUNDLE_LIMITS.maxSkillBundleBytes),
 })
 
 /**
@@ -166,6 +174,11 @@ export function apply(ctx: Context, config: Config): void {
     ...(config.skillsDir === undefined ? {} : { skillsDir: config.skillsDir }),
     maxEntryGrowth: config.maxEntryGrowth,
     protectedKinds: config.protectedKinds,
+    skillLimits: {
+      maxSkillFiles: config.maxSkillFiles,
+      maxSkillFileBytes: config.maxSkillFileBytes,
+      maxSkillBundleBytes: config.maxSkillBundleBytes,
+    },
     maxInjectedEntriesPerKind: config.maxInjectedEntriesPerKind,
   })
   registerHarnessTool(ctx, store, {

@@ -165,6 +165,28 @@ describe('plugin registration', () => {
     ).rejects.toThrow()
   })
 
+  it('accepts custom skill bundle limits and rejects non-positive values', async () => {
+    const ok = new Context()
+    await ok.plugin(SystemPrompt)
+    await ok.plugin(AgentRegistry)
+    await ok.plugin(ToolRuntime)
+    await ok.plugin(plugin, {
+      ...pluginConfig(tempHome()),
+      maxSkillFiles: 5,
+      maxSkillFileBytes: 128 * 1024,
+      maxSkillBundleBytes: 512 * 1024,
+    })
+    expect(ok.tools.get('harness_refine')).toBeDefined()
+
+    const bad = new Context()
+    await bad.plugin(SystemPrompt)
+    await bad.plugin(AgentRegistry)
+    await bad.plugin(ToolRuntime)
+    await expect(
+      bad.plugin(plugin, { ...pluginConfig(tempHome()), maxSkillFiles: 0 }),
+    ).rejects.toThrow()
+  })
+
   it('rolls back a prior global refinement through the tool without an LLM', async () => {
     const home = tempHome()
     const ctx = new Context()
