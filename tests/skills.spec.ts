@@ -293,16 +293,11 @@ describe('parseFrontmatterName / path helpers', () => {
 })
 
 describe('validateSkillBundle (L2 structural quality)', () => {
-  it('passes a clean skill: short id, trigger description, embedded files, short body', () => {
-    const content = [
-      '# repro',
-      '## Files',
-      '```scripts/repro.py',
-      'print("hi")',
-      '```',
-    ].join('\n')
-    const issues = validateSkillBundle(skillEntry('repro', content, 'Use whenever a bug reproduces; run the repro script and read the failure'))
-    expect(issues).toEqual([])
+  it('passes a clean skill: short id, trigger description, declared files, short body', () => {
+    const content = ['# repro', '## Files', '```scripts/repro.py', 'print("hi")', '```'].join('\n')
+    const entry = skillEntry('repro', content, 'Use whenever a bug reproduces; run the repro script and read the failure')
+    ;(entry as { files?: Record<string, string> }).files = { 'scripts/repro.py': 'print("hi")' }
+    expect(validateSkillBundle(entry)).toEqual([])
   })
 
   it('flags long and wordy ids', () => {
@@ -323,11 +318,18 @@ describe('validateSkillBundle (L2 structural quality)', () => {
     expect(issues.some(issue => issue.code === 'description-no-trigger' && issue.severity === 'warning')).toBe(true)
   })
 
-  it('warns when a referenced file has no embedded fenced block', () => {
-    const content = ['## Files', '- wrapper: `scripts/oq_quantize.py`', '- card: `references/model_card_template.md`', '```scripts/oq_quantize.py', 'print("hi")', '```'].join('\n')
+  it('warns when a referenced file is missing from the files map', () => {
+    const content = ['## Files', '- wrapper: `scripts/oq_quantize.py`', '- card: `references/model_card_template.md`'].join('\n')
     const issues = validateSkillBundle(skillEntry('repro', content, 'Use whenever quantizing'))
-    expect(issues.some(issue => issue.code === 'file-not-embedded' && issue.message.includes('references/model_card_template.md'))).toBe(true)
-    expect(issues.some(issue => issue.code === 'file-not-embedded' && issue.message.includes('scripts/oq_quantize.py'))).toBe(false)
+    expect(issues.some(issue => issue.code === 'file-not-declared' && issue.message.includes('scripts/oq_quantize.py'))).toBe(true)
+    expect(issues.some(issue => issue.code === 'file-not-declared' && issue.message.includes('references/model_card_template.md'))).toBe(true)
+  })
+
+  it('passes the file check when every referenced path is declared in files', () => {
+    const content = ['## Files', '- wrapper: `scripts/oq_quantize.py`'].join('\n')
+    const entry = skillEntry('repro', content, 'Use whenever quantizing')
+    ;(entry as { files?: Record<string, string> }).files = { 'scripts/oq_quantize.py': 'print(1)' }
+    expect(validateSkillBundle(entry).some(issue => issue.code === 'file-not-declared')).toBe(false)
   })
 
   it('warns when the body exceeds the soft line cap', () => {

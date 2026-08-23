@@ -409,13 +409,13 @@ export function validateSkillBundle(entry: SkillEntryLike): SkillBundleIssue[] {
     })
   }
 
-  const embedded = embeddedFilePaths(entry.content)
+  const declared = new Set(Object.keys(entry.files ?? {}))
   for (const path of referencedFilePaths(entry.content)) {
-    if (!embedded.has(path)) {
+    if (!declared.has(path)) {
       issues.push({
         severity: 'warning',
-        code: 'file-not-embedded',
-        message: `"${path}" is referenced but has no matching fenced code block (\`\`\`${path}); it will not materialize from the bundle alone`,
+        code: 'file-not-declared',
+        message: `"${path}" is referenced but missing from files`,
       })
     }
   }
