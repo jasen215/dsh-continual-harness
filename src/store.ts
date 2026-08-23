@@ -13,7 +13,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
-import { applyRefinementProposal, rollbackProposal } from './refine.ts'
+import { applyRefinementProposal, entryToEditFields, rollbackProposal } from './refine.ts'
 import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
 import { reconcileSkillFiles } from './skills.ts'
 import {
@@ -30,7 +30,7 @@ import {
   saveHarnessState,
 } from './storage.ts'
 import { aggregateUsage } from './usage.ts'
-import type { HarnessEntry, HarnessState, RefinementKind, RefinementProposal, RefinementResult, SkillEntry } from './types.ts'
+import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
@@ -43,6 +43,12 @@ export interface CommitOptions {
   rollbackOf?: string
   /** Marks the commit as riding the automatic path (gate), enabling protected-layer checks. */
   automatic?: boolean
+  /**
+   * Target-store state captured at planning time, used for baseline conflict
+   * detection: an edit whose target entry changed between planning and commit
+   * is rejected. When absent (rollback/promote), the commit-time read is used.
+   */
+  baseline?: HarnessState
 }
 
 /** Persistent harness store owned by the plugin. */
@@ -103,11 +109,17 @@ export class HarnessStore {
    * Capture a read-only snapshot of the merged local/global state without
    * persisting anything: no files are written, no entries are mutated or
    * stamped, and no injection or usage tracking is triggered. The returned
-   * snapshot's `state` is a structured-clone copy; persist it with
+   * snapshot's `state` is a structured-clone copy of the merged view and its
+   * `layers` retain the two source stores, so a candidate can be derived by
+   * applying a refinement to its own layer; persist it with
    * `captureReferenceSnapshot`.
    */
   captureSnapshot(agent: Agent, snapshotId: string, refinementId?: string): HarnessSnapshot {
-    return buildSnapshot(this.state(agent), snapshotId, refinementId)
+    // read each layer once; the merged state is derived from them, so no
+    // interleaved writer can persist layers that do not merge to the state
+    const local = this.localState(agent)
+    const global = this.globalState()
+    return buildSnapshot(mergeHarnessStates(global, local), snapshotId, refinementId, { local, global })
   }
 
   /** Merged refinement history: session events first, then global history. */
@@ -176,11 +188,15 @@ export class HarnessStore {
    * Commit a planned refinement: apply to the target store with baseline
    * conflict detection, persist, append the durable session event, append the
    * global history when global, and emit the scoped `harness/refined` event.
+   * The baseline defaults to the commit-time read; callers that planned
+   * against an earlier snapshot pass it via `options.baseline` so edits over
+   * entries changed during planning are rejected.
    */
   applyRefinement(agent: Agent, plan: RefinementProposal, options: CommitOptions = {}): RefinementResult {
     const global = options.global === true
-    const baseline = global ? this.globalState() : this.localState(agent)
-    const { result, state } = applyRefinementProposal(baseline, plan, {
+    const target = global ? this.globalState() : this.localState(agent)
+    const baseline = options.baseline ?? target
+    const { result, state } = applyRefinementProposal(target, plan, {
       id: plan.id,
       scope: global ? 'global' : 'local',
       baselineState: baseline,
@@ -219,7 +235,7 @@ export class HarnessStore {
     this.applyRefinement(agent, {
       id: `promote_${Date.now()}`,
       summary: `Promote local ${kind}:${id} to global`,
-      edits: [{ action: 'create', kind, id, ...promoteFields(entry!), reason: 'promote from session wrap-up' }],
+      edits: [{ action: 'create', kind, id, ...entryToEditFields(entry!), reason: 'promote from session wrap-up' }],
     }, { global: true })
     return { applied: true }
   }
@@ -259,20 +275,6 @@ export class HarnessStore {
       rollbackOf: rollbackId,
     })
   }
-}
-
-/** Copy the persisted fields of a local entry into a promote create-edit. */
-function promoteFields(entry: HarnessEntry): Record<string, unknown> {
-  const fields: Record<string, unknown> = { content: entry.content }
-  if (entry.title !== undefined) fields.title = entry.title
-  if (entry.metadata !== undefined) fields.metadata = entry.metadata
-  if (entry.kind === 'skill') {
-    const skill = entry as SkillEntry
-    if (skill.description !== undefined) fields.description = skill.description
-    if (skill.reference !== undefined) fields.reference = skill.reference
-    if (skill.arguments !== undefined) fields.arguments = skill.arguments
-  }
-  return fields
 }
 
 /** Serialize a session's user/assistant text turns, tail-biased. */

@@ -95,6 +95,8 @@ export interface RefinementEdit {
   pin?: boolean
   title?: string
   metadata?: HarnessEntry['metadata']
+  /** Governance protection restored by rollback; not required in model JSON. */
+  protection?: Protection
   rollbackDegraded?: boolean
 }
 

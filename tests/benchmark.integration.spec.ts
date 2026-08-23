@@ -28,7 +28,10 @@ import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as plugin from '../src/index.ts'
 import { appendReview } from '../src/audit.ts'
 import type { ExecutorEvidence } from '../src/benchmark.ts'
+import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
+import { getGlobalHarnessStateDir, getLocalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
 import { HarnessStore } from '../src/store.ts'
+import type { HarnessState } from '../src/types.ts'
 
 const testToolSignal = new AbortController().signal
 const tempDirs: string[] = []
@@ -361,5 +364,52 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
     expect(existsSync(join(home, 'benchmark', 'runs.jsonl'))).toBe(false)
     expect(existsSync(join(home, 'reviews.jsonl'))).toBe(false)
     expect(freshState(home).refinements).toHaveLength(1)
+  })
+
+  it('runs a global refinement over a shadowed entry: the candidate keeps the local winner', async () => {
+    const home = tempHome()
+    const ctx = await mount(home)
+    const { agent } = stubAgent('int-shadow')
+    ctx.provide('llm', makeFakeLlm([VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90]) as never)
+
+    // a global skill "foo" shadowed by a same-id local "foo": the merged view
+    // keeps the local winner at "foo" and the shadowed global at "local:foo"
+    const entries = (id: string, content: string, description: string) => ({
+      prompt: {}, memory: {},
+      skill: { foo: { id, kind: 'skill', version: 1, content, updatedAt: '2026-08-21T00:00:00.000Z', description } },
+      subagent: {},
+    })
+    saveHarnessState(getGlobalHarnessStateDir(home), {
+      schemaVersion: HARNESS_SCHEMA_VERSION, entries: entries('foo', 'global old body', 'global desc'), refinements: [],
+    } satisfies HarnessState)
+    saveHarnessState(getLocalHarnessStateDir(home, String(agent.session.id)), {
+      schemaVersion: HARNESS_SCHEMA_VERSION, entries: entries('foo', 'local winner body', 'local desc'), refinements: [],
+    } satisfies HarnessState)
+
+    await seedBenchmark(ctx, agent)
+    // global refinement updating the shadowed global "foo"
+    const store = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    const applied = store.applyRefinement(agent, {
+      id: 'refine-shadow',
+      summary: 'update the global foo skill',
+      edits: [{
+        action: 'update', kind: 'skill', id: 'foo', reason: 'refresh',
+        content: 'global NEW body', description: 'global new desc',
+      }],
+    }, { global: true })
+    expect(applied.appliedEdits[0]!.applied).toBe(true)
+
+    const run = await execute(ctx, {
+      action: 'run',
+      reference_snapshot_id: 'ref-1',
+      refinement_id: 'refine-shadow',
+    }, agent)
+    const json = resultJson(run)
+    // before the layered derivation fix this run refused with
+    // benchmark:run:candidate-delta (the local winner was overwritten)
+    expect(json.ok).toBe(true)
+    expect(json.status).toBe('ACCEPTED')
+    expect(json.runs).toBe(1)
+    expect(json.cells).toBe(2)
   })
 })

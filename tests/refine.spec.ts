@@ -262,6 +262,147 @@ describe('full entry snapshots and rollback', () => {
     expect(result.appliedEdits[0]?.applied).toBe(false)
     expect(result.appliedEdits[0]?.error).toBe('entry changed during refinement planning')
   })
+
+  it('rejects every edit on a protected kind on the automatic path', () => {
+    const state = freshState()
+    state.entries.skill['existing'] = {
+      id: 'existing', kind: 'skill', version: 1, content: 'old body', updatedAt: 't',
+    }
+    const { result } = applyRefinementProposal(state, {
+      id: 'auto-protected', summary: 'auto skill edit',
+      edits: [
+        { action: 'create', kind: 'skill', id: 'new-skill', content: 'body' },
+        { action: 'update', kind: 'skill', id: 'existing', reason: 'auto', content: 'tampered' },
+        { action: 'delete', kind: 'skill', id: 'existing', reason: 'auto' },
+      ],
+    }, {
+      id: 'auto-protected', scope: 'local', baselineState: state,
+      protectedKinds: ['skill'], automatic: true,
+    })
+    expect(result.appliedEdits.every(edit => !edit.applied)).toBe(true)
+    expect(result.appliedEdits.map(edit => edit.error)).toEqual([
+      'kind skill is protected from automatic refinement',
+      'kind skill is protected from automatic refinement',
+      'kind skill is protected from automatic refinement',
+    ])
+    // the explicit (non-automatic) tool path may still edit the kind
+    const manual = applyRefinementProposal(state, {
+      id: 'manual-skill', summary: 'manual skill edit',
+      edits: [{ action: 'create', kind: 'skill', id: 'new-skill', content: 'body' }],
+    }, { id: 'manual-skill', scope: 'local', baselineState: state, protectedKinds: ['skill'] })
+    expect(manual.result.appliedEdits[0]?.applied).toBe(true)
+  })
+
+  it('rejects a protected kind even when the entry itself is unprotected', () => {
+    const state = freshState()
+    const { result } = applyRefinementProposal(state, {
+      id: 'auto-protected-2', summary: 'auto create',
+      edits: [{ action: 'create', kind: 'skill', id: 'unprotected-skill', content: 'body' }],
+    }, {
+      id: 'auto-protected-2', scope: 'local', baselineState: state,
+      protectedKinds: ['skill'], automatic: true,
+    })
+    expect(result.appliedEdits[0]).toMatchObject({ applied: false, error: 'kind skill is protected from automatic refinement' })
+  })
+
+  it('applies skill description/reference/arguments on update', () => {
+    const state = freshState()
+    state.entries.skill['s'] = {
+      id: 's', kind: 'skill', version: 1, content: 'body', updatedAt: 't',
+      description: 'stale desc', reference: 'old ref', arguments: 'old args',
+    }
+    const { state: next } = applyRefinementProposal(state, {
+      id: 'u', summary: 'refresh skill',
+      edits: [{
+        action: 'update', kind: 'skill', id: 's', reason: 'refresh',
+        content: 'new body', description: 'fresh desc', reference: 'new ref', arguments: '{"a":1}',
+      }],
+    }, { id: 'u', scope: 'local', baselineState: state })
+    expect(next.entries.skill['s']).toMatchObject({
+      content: 'new body',
+      description: 'fresh desc',
+      reference: 'new ref',
+      arguments: '{"a":1}',
+    })
+  })
+
+  it('applies protection on skill update', () => {
+    const state = freshState()
+    state.entries.skill['s'] = {
+      id: 's', kind: 'skill', version: 1, content: 'body', updatedAt: 't', protection: 'pinned',
+    }
+    const { state: next } = applyRefinementProposal(state, {
+      id: 'u-protection', summary: 'update protection',
+      edits: [{ action: 'update', kind: 'skill', id: 's', reason: 'restore', content: 'new body', protection: 'user-owned' }],
+    }, { id: 'u-protection', scope: 'local', baselineState: state })
+    expect(next.entries.skill['s']?.protection).toBe('user-owned')
+  })
+
+  it('restores full skill fields (description/reference/arguments/protection) when rolling back a delete', () => {
+    const state = freshState()
+    state.entries.skill['s'] = {
+      id: 's', kind: 'skill', version: 1, content: 'body', updatedAt: 't',
+      description: 'desc', reference: 'ref', arguments: '{"a":1}', protection: 'user-owned',
+      title: 'Skill title',
+    }
+    const { result, state: deleted } = applyRefinementProposal(state, {
+      id: 'd', summary: 'delete skill',
+      edits: [{ action: 'delete', kind: 'skill', id: 's', reason: 'remove' }],
+    }, { id: 'd', scope: 'local', baselineState: state })
+    const rollback = rollbackProposal(result)
+    expect(rollback.edits[0]).toMatchObject({
+      action: 'create', id: 's', content: 'body',
+      description: 'desc', reference: 'ref', arguments: '{"a":1}', protection: 'user-owned',
+    })
+    const { state: reverted } = applyRefinementProposal(deleted, rollback, {
+      id: rollback.id, rollbackOf: result.id, scope: 'local', baselineState: deleted,
+    })
+    expect(reverted.entries.skill['s']).toMatchObject({
+      content: 'body',
+      description: 'desc',
+      reference: 'ref',
+      arguments: '{"a":1}',
+      protection: 'user-owned',
+    })
+  })
+
+  it('restores the skill description when rolling back an update', () => {
+    const state = freshState()
+    state.entries.skill['s'] = {
+      id: 's', kind: 'skill', version: 1, content: 'body', updatedAt: 't', description: 'original desc',
+    }
+    const { result, state: updated } = applyRefinementProposal(state, {
+      id: 'u', summary: 'update skill',
+      edits: [{
+        action: 'update', kind: 'skill', id: 's', reason: 'refresh',
+        content: 'new body', description: 'changed desc',
+      }],
+    }, { id: 'u', scope: 'local', baselineState: state })
+    const rollback = rollbackProposal(result)
+    const { state: reverted } = applyRefinementProposal(updated, rollback, {
+      id: rollback.id, rollbackOf: result.id, scope: 'local', baselineState: updated,
+    })
+    expect(reverted.entries.skill['s']).toMatchObject({ content: 'body', description: 'original desc' })
+  })
+
+  it('documents set-if-present rollback: a field an update introduced survives rollback', () => {
+    const state = freshState()
+    state.entries.skill['s'] = { id: 's', kind: 'skill', version: 1, content: 'body', updatedAt: 't' }
+    const { result, state: updated } = applyRefinementProposal(state, {
+      id: 'u', summary: 'add description',
+      edits: [{ action: 'update', kind: 'skill', id: 's', reason: 'add desc', content: 'new body', description: 'added desc' }],
+    }, { id: 'u', scope: 'local', baselineState: state })
+    expect(updated.entries.skill['s']?.description).toBe('added desc')
+    const rollback = rollbackProposal(result)
+    const { state: reverted } = applyRefinementProposal(updated, rollback, {
+      id: rollback.id, rollbackOf: result.id, scope: 'local', baselineState: updated,
+    })
+    // update semantics are set-if-present, so the rollback restores
+    // content/title/metadata but cannot remove the description the update
+    // introduced (the edit model has no field-clearing action)
+    expect(reverted.entries.skill['s']?.content).toBe('body')
+    expect(reverted.entries.skill['s']?.description).toBe('added desc')
+  })
 })
 
 describe('rollbackProposal', () => {

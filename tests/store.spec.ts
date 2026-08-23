@@ -322,7 +322,8 @@ describe('HarnessStore', () => {
     expect(grown.appliedEdits[0]!.error).toBe('entry growth exceeds the maxEntryGrowth cap')
     expect(store.state(agent).entries.memory['long']!.content).toBe('x'.repeat(100))
 
-    // protected layer: an automatic-path write of a protected global skill is rejected
+    // protected layer: an automatic-path write of a protected global skill is
+    // rejected — here the configured protectedKinds gate fires first
     saveHarnessState(getGlobalHarnessStateDir(home), {
       schemaVersion: HARNESS_SCHEMA_VERSION,
       entries: {
@@ -348,8 +349,97 @@ describe('HarnessStore', () => {
       edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', reason: 'auto', content: 'tampered' }],
     }, { automatic: true, global: true })
     expect(automatic.appliedEdits[0]!.applied).toBe(false)
-    expect(automatic.appliedEdits[0]!.error).toBe('protected entries are mutable only in explicit user sessions')
+    expect(automatic.appliedEdits[0]!.error).toBe('kind skill is protected from automatic refinement')
     expect(store.state(agent).entries.skill['pinned-skill']?.content).toBe('protected body')
+
+    // with an empty protectedKinds list, the per-entry protection guard still
+    // rejects the same automatic write (the second line of defense)
+    const perEntryStore = new HarnessStore(ctx, {
+      harnessRoot: home,
+      skillsDir: join(home, 'skills'),
+      protectedKinds: [],
+    })
+    const perEntry = perEntryStore.applyRefinement(agent, {
+      id: 'refine_auto_per_entry',
+      summary: 'automatic write',
+      edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', reason: 'auto', content: 'tampered' }],
+    }, { automatic: true, global: true })
+    expect(perEntry.appliedEdits[0]!.applied).toBe(false)
+    expect(perEntry.appliedEdits[0]!.error).toBe('protected entries are mutable only in explicit user sessions')
+  })
+
+  it('rejects automatic-path writes on a configured protected kind, even for unprotected entries', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = new HarnessStore(ctx, {
+      harnessRoot: home,
+      skillsDir: join(home, 'skills'),
+      protectedKinds: ['skill'],
+    })
+    const { agent } = stubAgent('agent-protected-kind')
+    const automatic = store.applyRefinement(agent, {
+      id: 'refine_auto_kind',
+      summary: 'automatic skill create',
+      edits: [{ action: 'create', kind: 'skill', id: 'fresh-skill', content: 'body' }],
+    }, { automatic: true })
+    expect(automatic.appliedEdits[0]!.applied).toBe(false)
+    expect(automatic.appliedEdits[0]!.error).toBe('kind skill is protected from automatic refinement')
+    expect(store.state(agent).entries.skill['fresh-skill']).toBeUndefined()
+    // the explicit tool path (no `automatic`) may still write the kind
+    const manual = store.applyRefinement(agent, {
+      id: 'refine_manual_kind',
+      summary: 'explicit skill create',
+      edits: [{ action: 'create', kind: 'skill', id: 'fresh-skill', content: 'body' }],
+    }, {})
+    expect(manual.appliedEdits[0]!.applied).toBe(true)
+    expect(store.state(agent).entries.skill['fresh-skill']?.content).toBe('body')
+  })
+
+  it('rejects a commit over entries changed between planning and commit via the captured baseline', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('agent-baseline')
+    store.applyRefinement(agent, {
+      id: 'seed',
+      summary: 'seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'original' }],
+    }, {})
+    // the state the planner saw
+    const planningBaseline = store.localState(agent)
+    // a concurrent change lands between planning and commit
+    store.applyRefinement(agent, {
+      id: 'concurrent',
+      summary: 'concurrent',
+      edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'other writer', content: 'changed concurrently' }],
+    }, {})
+    const result = store.applyRefinement(agent, {
+      id: 'stale',
+      summary: 'stale plan',
+      edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'stale plan', content: 'stale write' }],
+    }, { baseline: planningBaseline })
+    expect(result.appliedEdits[0]!.applied).toBe(false)
+    expect(result.appliedEdits[0]!.error).toBe('entry changed during refinement planning')
+    expect(store.state(agent).entries.memory['fact']!.content).toBe('changed concurrently')
+  })
+
+  it('a commit without a captured baseline keeps the commit-time read (rollback semantics)', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('agent-no-baseline')
+    store.applyRefinement(agent, {
+      id: 'seed',
+      summary: 'seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'original' }],
+    }, {})
+    const result = store.applyRefinement(agent, {
+      id: 'no-baseline',
+      summary: 'commit without baseline',
+      edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'write', content: 'applied' }],
+    }, {})
+    expect(result.appliedEdits[0]!.applied).toBe(true)
+    expect(store.state(agent).entries.memory['fact']!.content).toBe('applied')
   })
 
   describe('captureSnapshot', () => {

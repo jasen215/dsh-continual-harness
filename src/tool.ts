@@ -25,6 +25,7 @@ import {
   loadBenchmark,
   loadReferenceSnapshot,
   saveBenchmarkCases,
+  scopeLayerPair,
   validateCandidateDelta,
 } from './benchmark.ts'
 import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
@@ -35,11 +36,12 @@ import type { CellEvaluation } from './evaluate.ts'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import { overviewForPrompt, historyForPrompt } from './render.ts'
 import { decideBenchmark } from './score.ts'
+import { mergeHarnessStates } from './storage.ts'
 import type { HarnessStore } from './store.ts'
-import type { BlastRadius, RefinementAction, RefinementKind, RefinementResult } from './types.ts'
+import type { BlastRadius, HarnessState, RefinementAction, RefinementKind, RefinementResult } from './types.ts'
 import { suggestWrapup } from './wrapup.ts'
 
-const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
+const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. Prefer this tool over any standalone skill-authoring skill whenever the user asks to turn what we just did into a reusable skill — e.g. "把xxx流程做成skill", "save our process as a skill", "create a skill from this workflow". The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
 
 /** Tool-facing options resolved by the plugin. */
 export interface ToolOptions {
@@ -189,8 +191,15 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
         const result = store.rollbackRefinement(agent, args.rollback_id, { global })
         return summarize(result.id, result.scope, result.summary, result.appliedEdits)
       }
+      // Capture the target store's state before planning: the commit compares
+      // the current entries against this baseline and rejects any edit whose
+      // target entry changed while the plan was being produced or approved.
+      // Reading each layer once also feeds the planner's merged overview.
+      const localState = store.localState(agent)
+      const globalState = store.globalState()
+      const baseline = global ? globalState : localState
       const plan = await planRefinement({
-        stateOverview: overviewForPrompt(store.state(agent)),
+        stateOverview: overviewForPrompt(mergeHarnessStates(globalState, localState)),
         historyText: historyForPrompt(store.history(agent)),
         trajectoryText: store.trajectory(agent, options.maxTrajectoryChars),
         scopeInstruction: scopeInstruction(global),
@@ -207,7 +216,7 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
           return { refinement_id: 'none', scope: 'global' as const, summary: `global write not approved: ${String(error)}`, applied: 0, failed: 0, edits: [] }
         }
       }
-      const result = store.applyRefinement(agent, plan, { global })
+      const result = store.applyRefinement(agent, plan, { global, baseline })
       return summarize(result.id, result.scope, result.summary, result.appliedEdits)
     },
     presentCall: () => ({ card: 'generic' as const, title: 'Refine continual harness', kind: 'other' as const }),
@@ -616,22 +625,41 @@ async function actionRun(
 }
 
 /**
- * Derive the candidate snapshot: reference state plus exactly the named
+ * Derive the candidate snapshot: reference plus exactly the named
  * refinement's applied edits, with the refinement appended to the history. The
- * caller must then prove the delta with `validateCandidateDelta`.
+ * caller must then prove the delta with `validateCandidateDelta`. When the
+ * reference carries `layers`, the edits are applied to the refinement's own
+ * layer (by `scope`) and the merged state is re-derived, so a shadowed global
+ * entry (`local:<id>` in the merged view) is never overwritten by a global
+ * refinement; snapshots without layers (persisted before the layering change)
+ * use the legacy single-layer path.
  */
 function deriveCandidateSnapshot(reference: HarnessSnapshot, refinement: RefinementResult, snapshotId: string): HarnessSnapshot {
+  if (reference.layers !== undefined) {
+    const { scope, other } = scopeLayerPair(refinement.scope)
+    const layer = structuredClone(reference.layers[scope])
+    applyEditsToEntries(layer.entries, refinement)
+    layer.refinements.push(structuredClone(refinement))
+    // the untouched other layer is passed through; buildSnapshot clones it
+    const layers = scope === 'global' ? { global: layer, local: reference.layers[other] } : { global: reference.layers[other], local: layer }
+    return buildSnapshot(mergeHarnessStates(layers.global, layers.local), snapshotId, refinement.id, layers)
+  }
   const state = structuredClone(reference.state)
+  applyEditsToEntries(state.entries, refinement)
+  state.refinements.push(structuredClone(refinement))
+  return buildSnapshot(state, snapshotId, refinement.id)
+}
+
+/** Apply a refinement's applied edits to one entries map (shared by both derivation paths). */
+function applyEditsToEntries(entries: HarnessState['entries'], refinement: RefinementResult): void {
   for (const edit of refinement.appliedEdits) {
     if (!edit.applied) continue
     if (edit.action === 'delete') {
-      delete state.entries[edit.kind][edit.id]
+      delete entries[edit.kind][edit.id]
     } else if (edit.afterEntry !== undefined) {
-      state.entries[edit.kind][edit.id] = structuredClone(edit.afterEntry)
+      entries[edit.kind][edit.id] = structuredClone(edit.afterEntry)
     }
   }
-  state.refinements.push(structuredClone(refinement))
-  return buildSnapshot(state, snapshotId, refinement.id)
 }
 
 /** Project a CellEvaluation (a `CellScore` plus evidence) onto the persisted shape. */

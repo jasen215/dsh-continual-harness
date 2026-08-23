@@ -27,7 +27,9 @@ export type SkillEntryLike = HarnessEntry & { description?: string }
  * Render one skill entry as a `<name>/SKILL.md` bundle body: YAML frontmatter
  * with the dsh-required `name` and `description` keys, a `metadata` provenance
  * block marking the author and source, plus the markdown body verbatim. The
- * description falls back to the first line of the body.
+ * description falls back to the first line of the body and is emitted as a
+ * double-quoted YAML scalar so `: `, `#`, quotes, or leading special
+ * characters can never invalidate the frontmatter.
  */
 export function renderSkillMarkdown(entry: SkillEntryLike): string {
   const description = entry.description !== undefined
@@ -38,7 +40,7 @@ export function renderSkillMarkdown(entry: SkillEntryLike): string {
     : description
   return `---
 name: ${entry.id}
-description: ${safe}
+description: ${JSON.stringify(safe)}
 metadata:
   author: ${SKILL_AUTHOR}
   source: ${SKILL_SOURCE}
