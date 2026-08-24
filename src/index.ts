@@ -225,7 +225,7 @@ export function apply(ctx: Context, config: Config): void {
   }
   registerHarnessProjection(ctx, store)
   const autoRefine = config.autoRefine ?? { enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }
-  registerHarnessDriver(ctx, store, {
+  registerHarnessDriver(ctx, coordinator, store, {
     enabled: autoRefine.enabled,
     turnInterval: autoRefine.turnInterval,
     cooldownMs: autoRefine.cooldownMs,
