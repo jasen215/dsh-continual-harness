@@ -440,6 +440,41 @@ describe('governance config defaults', () => {
   })
 })
 
+describe('optional refine command capability', () => {
+  it('mounts without a commands capability, keeps the normal tools, and warns once', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    const warns: string[] = []
+    ctx.logger.exporter({
+      levels: { default: 3 },
+      export(message) {
+        if (message.type === 'warn') warns.push(message.name)
+      },
+    })
+    await ctx.plugin(plugin, pluginConfig(tempHome()))
+    expect(ctx.tools.get('harness_refine')?.name).toBe('harness_refine')
+    expect(ctx.tools.get('harness_wrapup')?.name).toBe('harness_wrapup')
+    expect(ctx.tools.get('harness_benchmark')?.name).toBe('harness_benchmark')
+    expect(warns.filter(name => name === 'harness')).toHaveLength(1)
+  })
+
+  it('registers the refine command through a commands capability and unregisters it on unload', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    const dispose = vi.fn()
+    const register = vi.fn(() => ({ dispose }))
+    ctx.provide('commands', { register })
+    const fiber = await ctx.plugin(plugin, pluginConfig(tempHome()))
+    expect(register).toHaveBeenCalledWith('refine', expect.any(Function))
+    await fiber.dispose()
+    expect(dispose).toHaveBeenCalled()
+  })
+})
+
 describe('benchmark tool registration', () => {
   it('registers the harness_benchmark tool by default and skips it when disabled', async () => {
     const on = new Context()

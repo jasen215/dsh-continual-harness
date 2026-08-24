@@ -16,6 +16,8 @@ import z from '@deepseek-ai/schemastery'
 import { requireGlobalApproval } from './approval.ts'
 import { completeViaAgent, DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import { createRefineCoordinator } from './coordinator.ts'
+import { registerRefineCommand } from './command.ts'
+import type { CommandsCapability } from './command.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
@@ -210,6 +212,19 @@ export function apply(ctx: Context, config: Config): void {
   registerHarnessTool(ctx, coordinator, {
     defaultGlobal: config.defaultGlobal,
   })
+  // The /refine command adapter is an optional host capability: it registers
+  // only when the Cordis context provides a `commands` service, and the
+  // registration disposes with the plugin context. A missing capability logs
+  // exactly one warning and never prevents the rest of the plugin from loading.
+  const commands = ctx.get('commands') as CommandsCapability | undefined
+  if (commands) {
+    ctx.effect(() => {
+      const registration = registerRefineCommand(commands, coordinator, { defaultGlobal: config.defaultGlobal })
+      return () => registration.dispose()
+    })
+  } else {
+    ctx.logger('harness').warn('commands capability not available; the /refine command is not registered')
+  }
   if (config.wrapupEnabled) {
     registerHarnessWrapup(ctx, store)
   }
