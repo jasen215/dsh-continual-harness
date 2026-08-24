@@ -90,16 +90,22 @@ describe('createRefineCommandAdapter', () => {
   it('maps domain three-state status into command text two-state status', async () => {
     const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('status: committed')
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('scope: local')
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('applied: 2')
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('rejected: 1')
   })
 
   it('keeps the refinement id and summary for a committed result', async () => {
     const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('refinement: r-cmd')
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('summary: saved two lessons; one update rejected')
   })
 
@@ -107,7 +113,9 @@ describe('createRefineCommandAdapter', () => {
     const coordinator = fakeCoordinator(notCommitted())
     const handler = createRefineCommandAdapter(coordinator, { defaultGlobal: true })
     const result = await handler({ rawInput: '/refine', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('status: not-committed')
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('refinement: none')
   })
 
@@ -117,6 +125,7 @@ describe('createRefineCommandAdapter', () => {
       diagnostics: { status: 'completed', structural: [], security: [], errors: [] },
     }), { defaultGlobal: false })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('diagnostics: completed')
   })
 
@@ -126,6 +135,7 @@ describe('createRefineCommandAdapter', () => {
       diagnostics: { status: 'disabled', structural: [], security: [], errors: [] },
     }), { defaultGlobal: false })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('diagnostics: disabled')
   })
 
@@ -140,13 +150,16 @@ describe('createRefineCommandAdapter', () => {
       },
     }), { defaultGlobal: false })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('diagnostics: partial')
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('diagnostics-error: security provider-failed scanner failed')
   })
 
   it('omits the diagnostics line when the coordinator result has no report', async () => {
     const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).not.toContain('diagnostics:')
   })
 
@@ -158,6 +171,7 @@ describe('createRefineCommandAdapter', () => {
     })
     const handler = createRefineCommandAdapter(coordinator, { defaultGlobal: true })
     const result = await handler({ rawInput: '/refine rollback missing --local', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('error: rollback-target-not-found no refinement found with id missing')
   })
 
@@ -184,6 +198,7 @@ describe('createRefineCommandAdapter', () => {
     const execute = vi.fn()
     const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: true })
     const result = await handler({ rawInput: '/refine --global focus' })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('error:')
     expect(execute).not.toHaveBeenCalled()
   })
@@ -192,6 +207,7 @@ describe('createRefineCommandAdapter', () => {
     const execute = vi.fn()
     const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: true })
     const result = await handler({ rawInput: '/refine --global --local focus', agent: agent() })
+    expect(result.kind).toBe('success')
     expect(result.text).toContain('error:')
     expect(execute).not.toHaveBeenCalled()
   })
@@ -204,7 +220,7 @@ describe('registerRefineCommand', () => {
     const commands: CommandsCapability = { register }
     const coordinator = fakeCoordinator(notCommitted())
     const registration = registerRefineCommand(commands, coordinator, { defaultGlobal: false })
-    expect(register).toHaveBeenCalledWith('refine', expect.any(Function))
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ name: 'refine', handler: expect.any(Function) }))
     registration.dispose()
     expect(dispose).toHaveBeenCalled()
   })

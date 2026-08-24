@@ -469,7 +469,7 @@ describe('optional refine command capability', () => {
     const register = vi.fn(() => ({ dispose }))
     ctx.provide('commands', { register })
     const fiber = await ctx.plugin(plugin, pluginConfig(tempHome()))
-    expect(register).toHaveBeenCalledWith('refine', expect.any(Function))
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ name: 'refine', handler: expect.any(Function) }))
     await fiber.dispose()
     expect(dispose).toHaveBeenCalled()
   })

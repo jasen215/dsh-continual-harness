@@ -1,7 +1,10 @@
 /**
  * Optional `/refine` slash-command adapter: parses raw input into a coordinator
  * request, executes once, and renders the result as plain text. Registered only
- * when the host provides a `commands` capability.
+ * when the host provides a `commands` capability (`@deepseek-ai/dsh-commands`).
+ * The host contract is a single-definition `register()` and a result carrying
+ * a `kind` discriminator; this adapter speaks that contract so the command
+ * works against the real dsh host without a shim.
  * @module dsh-continual-harness
  */
 
@@ -10,9 +13,9 @@ import { executionSummary } from './coordinator.ts'
 import type { RefineCoordinator, RefineExecutionResult, RefineRequest } from './coordinator.ts'
 
 /**
- * One command invocation from a host `commands` capability. The host usually
- * passes the raw input without the command name and `/` prefix; the adapter
- * also accepts the full `/refine ...` form.
+ * One command invocation from a host `commands` capability. The host passes
+ * the raw input without the command name and `/` prefix; the adapter also
+ * accepts the full `/refine ...` form.
  */
 export interface CommandInvocation {
   rawInput: string
@@ -20,9 +23,17 @@ export interface CommandInvocation {
   signal?: AbortSignal
 }
 
-/** The only outward shape a command handler must produce. */
-export interface CommandResult {
-  text: string
+/** A command handler result in the host's discriminated shape. */
+export type CommandResult =
+  | { kind: 'success'; text: string }
+  | { kind: 'error'; text: string }
+
+/** A command definition accepted by the host `commands.register()`. */
+export interface CommandDefinition {
+  name: string
+  description: string
+  input?: { hint: string; images?: boolean }
+  handler: (invocation: CommandInvocation) => Promise<CommandResult>
 }
 
 /**
@@ -31,7 +42,7 @@ export interface CommandResult {
  * `/refine` command registers through the returned disposable handle.
  */
 export interface CommandsCapability {
-  register(name: string, handler: (invocation: CommandInvocation) => Promise<CommandResult>): { dispose(): void }
+  register(definition: CommandDefinition): { dispose(): void }
 }
 
 /** Parser output for one validated `/refine` invocation. */
@@ -149,11 +160,11 @@ export function createRefineCommandAdapter(
 ): (invocation: CommandInvocation) => Promise<CommandResult> {
   return async (invocation: CommandInvocation): Promise<CommandResult> => {
     if (!invocation.agent) {
-      return { text: usageError('no live agent available for the /refine command') }
+      return { kind: 'success', text: usageError('no live agent available for the /refine command') }
     }
     const parsed = parseRefineCommand(invocation.rawInput, options.defaultGlobal)
     if ('error' in parsed) {
-      return { text: usageError(parsed.error) }
+      return { kind: 'success', text: usageError(parsed.error) }
     }
     const request: RefineRequest = parsed.mode === 'plan'
       ? {
@@ -173,7 +184,7 @@ export function createRefineCommandAdapter(
           ...(invocation.signal === undefined ? {} : { signal: invocation.signal }),
         }
     const result = await coordinator.execute(request)
-    return { text: renderExecution(result, parsed.scope) }
+    return { kind: 'success', text: renderExecution(result, parsed.scope) }
   }
 }
 
@@ -187,5 +198,10 @@ export function registerRefineCommand(
   coordinator: RefineCoordinator,
   options: { defaultGlobal: boolean },
 ): { dispose(): void } {
-  return commands.register('refine', createRefineCommandAdapter(coordinator, options))
+  return commands.register({
+    name: 'refine',
+    description: 'Run a harness refinement plan or rollback through the shared coordinator',
+    input: { hint: 'plan instructions, or "rollback <id> [--global|--local]"' },
+    handler: createRefineCommandAdapter(coordinator, options),
+  })
 }
