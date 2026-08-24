@@ -267,17 +267,22 @@ export function registerHarnessDriver(
  * result audits `approved` with rejected edit details taken from the
  * refinement record, never recomputed from `appliedCount`/`rejectedCount`. A
  * materialization or diagnostics failure stays visible in the rationale but
- * never demotes an already-committed refinement.
+ * never demotes an already-committed refinement, and never adds a second
+ * audit record.
  */
 function auditForExecution(
   execution: RefineExecutionResult,
   reviewRationale: string,
 ): { outcome: ReviewRecord['outcome']; extra: Pick<ReviewRecord, 'rationale' | 'refinementId' | 'rejectedEdits'> } {
+  const notes = [
+    ...(execution.error ? [`${execution.error.code}: ${execution.error.message}`] : []),
+    ...diagnosticsNotes(execution.diagnostics),
+  ]
   if (execution.commitStatus === 'not-committed') {
-    if (execution.error) {
+    if (notes.length > 0) {
       return {
         outcome: 'failed',
-        extra: { rationale: `${reviewRationale} — ${execution.error.code}: ${execution.error.message}` },
+        extra: { rationale: [reviewRationale, ...notes].join(' — ') },
       }
     }
     return { outcome: 'assessed', extra: { rationale: reviewRationale } }
@@ -286,9 +291,7 @@ function auditForExecution(
   return {
     outcome: 'approved',
     extra: {
-      rationale: execution.error
-        ? `${reviewRationale} — ${execution.error.code}: ${execution.error.message}`
-        : reviewRationale,
+      rationale: notes.length > 0 ? [reviewRationale, ...notes].join(' — ') : reviewRationale,
       ...(execution.refinement?.id ? { refinementId: execution.refinement.id } : {}),
       ...(rejected.length > 0
         ? {
@@ -302,6 +305,16 @@ function auditForExecution(
         : {}),
     },
   }
+}
+
+/**
+ * One rationale note per diagnostics provider error: `diagnostics: <provider>
+ * <code>: <message>`. A partial report's provider failures must stay visible
+ * in the audit even when the commit itself carries no domain error.
+ */
+function diagnosticsNotes(diagnostics: RefineExecutionResult['diagnostics']): string[] {
+  if (diagnostics === undefined) return []
+  return diagnostics.errors.map(error => `diagnostics: ${error.provider} ${error.code}: ${error.message}`)
 }
 
 /** Await `work` but bound the wait to `ms`; a timeout resolves as `undefined`. */

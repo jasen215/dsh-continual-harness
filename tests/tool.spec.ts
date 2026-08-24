@@ -655,6 +655,60 @@ describe('harness_refine coordinator adapter', () => {
     })
   })
 
+  it('includes coordinator diagnostics in the tool output without changing committed counts', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('r'),
+      materialization: emptyMaterialization(),
+      diagnostics: {
+        status: 'partial' as const,
+        structural: [],
+        security: [],
+        materialization: {
+          status: 'completed',
+          written: ['w'],
+          unchanged: [],
+          skipped: [],
+          staleCandidates: ['s'],
+          errors: [],
+        },
+        errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+      },
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const result = await executeTool(ctx, 'harness_refine', { global: true }, agent())
+    const json = resultJson(result)
+    // counts come only from the coordinator output and are unchanged by diagnostics
+    expect(json).toMatchObject({ applied: 1, failed: 0, refinement_id: 'r' })
+    expect(json.diagnostics).toMatchObject({
+      status: 'partial',
+      structural: [],
+      security: [],
+      errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+    })
+    // camelCase materialization fields map to the existing snake_case output
+    const diagnostics = json.diagnostics as { materialization: Record<string, unknown> }
+    expect(diagnostics.materialization.stale_candidates).toEqual(['s'])
+  })
+
+  it('omits the diagnostics key when the coordinator result has none', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('r'),
+      materialization: emptyMaterialization(),
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const json = resultJson(await executeTool(ctx, 'harness_refine', { global: true }, agent()))
+    expect(json.applied).toBe(1)
+    expect(json.diagnostics).toBeUndefined()
+  })
+
   it('uses coordinator-provided counts without recounting adapter-local edit arrays', async () => {
     const execute = vi.fn(async () => ({
       commitStatus: 'committed' as const,

@@ -111,6 +111,14 @@ function renderExecution(result: RefineExecutionResult, scope: 'local' | 'global
     `summary: ${result.refinement?.summary ?? result.error?.message ?? 'no refinement produced'}`,
   ]
   if (result.error) lines.push(`error: ${result.error.code} ${result.error.message}`)
+  // Concise post-apply diagnostics: one status line, then one line per
+  // provider error (provider/code/message) — never the full skill content.
+  if (result.diagnostics) {
+    lines.push(`diagnostics: ${result.diagnostics.status}`)
+    for (const error of result.diagnostics.errors) {
+      lines.push(`diagnostics-error: ${error.provider} ${error.code} ${error.message}`)
+    }
+  }
   return lines.join('\n')
 }
 

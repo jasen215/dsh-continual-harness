@@ -35,7 +35,7 @@ import type { CellEvaluation } from './evaluate.ts'
 import { decideBenchmark } from './score.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { HarnessStore } from './store.ts'
-import type { HarnessState, MaterializationResult, RefinementResult } from './types.ts'
+import type { HarnessState, DiagnosticReport, MaterializationResult, RefinementResult } from './types.ts'
 import { suggestWrapup } from './wrapup.ts'
 
 const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. Prefer this tool over any standalone skill-authoring skill whenever the user asks to turn what we just did into a reusable skill — e.g. "把xxx流程做成skill", "save our process as a skill", "create a skill from this workflow". The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
@@ -45,6 +45,79 @@ export interface ToolOptions {
   /** Store the tool targets when the call omits `global`. */
   defaultGlobal: boolean
 }
+
+/** The materialization sub-object shared by the top-level and diagnostics output shapes (snake_case keys). */
+const MATERIALIZATION_OUTPUT_PROPERTIES = {
+  status: { type: 'string', enum: ['completed', 'partial', 'failed'] },
+  written: { type: 'array', items: { type: 'string' } },
+  unchanged: { type: 'array', items: { type: 'string' } },
+  skipped: { type: 'array', items: { type: 'string' } },
+  stale_candidates: { type: 'array', items: { type: 'string' } },
+  errors: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        path: { type: 'string' },
+        code: { type: 'string' },
+        retryable: { type: 'boolean' },
+        message: { type: 'string' },
+      },
+    },
+  },
+} as const
+
+/** The post-apply diagnostics summary (spec §5): status, findings, optional materialization, provider errors. */
+const DIAGNOSTICS_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    status: { type: 'string', enum: ['completed', 'partial', 'disabled'] },
+    structural: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          skill_id: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+    security: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          skill_id: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+          severity: { type: 'string', enum: ['low', 'medium', 'high'] },
+        },
+      },
+    },
+    materialization: {
+      type: 'object',
+      additionalProperties: false,
+      properties: MATERIALIZATION_OUTPUT_PROPERTIES,
+    },
+    errors: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider: { type: 'string' },
+          code: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+  },
+} as const
 
 const OUTPUT_SCHEMA = {
   type: 'object',
@@ -76,27 +149,9 @@ const OUTPUT_SCHEMA = {
     materialization: {
       type: 'object',
       additionalProperties: false,
-      properties: {
-        status: { type: 'string', enum: ['completed', 'partial', 'failed'] },
-        written: { type: 'array', items: { type: 'string' } },
-        unchanged: { type: 'array', items: { type: 'string' } },
-        skipped: { type: 'array', items: { type: 'string' } },
-        stale_candidates: { type: 'array', items: { type: 'string' } },
-        errors: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              path: { type: 'string' },
-              code: { type: 'string' },
-              retryable: { type: 'boolean' },
-              message: { type: 'string' },
-            },
-          },
-        },
-      },
+      properties: MATERIALIZATION_OUTPUT_PROPERTIES,
     },
+    diagnostics: DIAGNOSTICS_OUTPUT_SCHEMA,
   },
 } as const
 
@@ -226,6 +281,31 @@ function toToolMaterialization(materialization: MaterializationResult) {
 }
 
 /**
+ * Project a DiagnosticReport into the tool-output shape: snake_case issue
+ * keys, optional severity kept only when present, and the report's own
+ * materialization mapped through the same snake_case projection. Provider
+ * errors pass through unchanged so a failed scan is never hidden.
+ */
+function toToolDiagnostics(diagnostics: DiagnosticReport) {
+  return {
+    status: diagnostics.status,
+    structural: diagnostics.structural.map(issue => ({
+      skill_id: issue.skillId,
+      code: issue.code,
+      message: issue.message,
+    })),
+    security: diagnostics.security.map(issue => ({
+      skill_id: issue.skillId,
+      code: issue.code,
+      message: issue.message,
+      ...(issue.severity === undefined ? {} : { severity: issue.severity }),
+    })),
+    ...(diagnostics.materialization === undefined ? {} : { materialization: toToolMaterialization(diagnostics.materialization) }),
+    errors: diagnostics.errors,
+  }
+}
+
+/**
  * Project a coordinator execution onto the tool's snake_case output schema.
  * Counts come only from the coordinator result; edits are projected without
  * recounting; `refinement_id` is `'none'` when nothing committed.
@@ -247,6 +327,7 @@ function summarizeExecution(execution: RefineExecutionResult, scope: 'local' | '
       ...(edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }),
     })),
     ...(execution.materialization === undefined ? {} : { materialization: toToolMaterialization(execution.materialization) }),
+    ...(execution.diagnostics === undefined ? {} : { diagnostics: toToolDiagnostics(execution.diagnostics) }),
   }
 }
 

@@ -18,6 +18,7 @@ import { completeViaAgent, DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import { createRefineCoordinator } from './coordinator.ts'
 import { registerRefineCommand } from './command.ts'
 import type { CommandsCapability } from './command.ts'
+import { createDiagnosticRunner, structuralProvider } from './diagnostics.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
@@ -26,7 +27,7 @@ import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { HarnessStore } from './store.ts'
 import { registerBenchmarkTool, registerHarnessTool, registerHarnessWrapup } from './tool.ts'
-import type { RefinementKind } from './types.ts'
+import type { DiagnosticProvider, RefinementKind, SecurityIssue } from './types.ts'
 
 export const name = 'continual-harness'
 export const inject = ['agents', 'tools']
@@ -103,6 +104,10 @@ export interface Config {
   maxSkillFiles: number
   maxSkillFileBytes: number
   maxSkillBundleBytes: number
+  /** Run post-apply diagnostics after each committed refinement. */
+  diagnosticsEnabled: boolean
+  /** Enable the local L3 security provider inside the diagnostics runner. */
+  securityEnabled: boolean
 }
 
 /** Benchmark configuration (spec §5) with its MVP defaults. */
@@ -163,7 +168,46 @@ export const Config: z<Config> = z.object({
   maxSkillFiles: z.number().step(1).min(1).default(DEFAULT_SKILL_BUNDLE_LIMITS.maxSkillFiles),
   maxSkillFileBytes: z.number().step(1).min(1).default(DEFAULT_SKILL_BUNDLE_LIMITS.maxSkillFileBytes),
   maxSkillBundleBytes: z.number().step(1).min(1).default(DEFAULT_SKILL_BUNDLE_LIMITS.maxSkillBundleBytes),
+  diagnosticsEnabled: z.boolean().default(true),
+  securityEnabled: z.boolean().default(false),
 })
+
+/** Credential-like patterns the local security provider flags (minimal L3). */
+const SECRET_PATTERNS: ReadonlyArray<{ code: string; pattern: RegExp }> = [
+  { code: 'secret-exposure', pattern: /(sk-[A-Za-z0-9]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16})/ },
+]
+
+/**
+ * Local optional L3 security provider (spec §2): a minimal pure scanner over
+ * touched skill entries — no external scanner dependency. It flags obvious
+ * credential-like content in a touched skill's body or bundle files and never
+ * scans beyond `request.touchedSkillIds`.
+ */
+const localSecurityProvider: DiagnosticProvider<SecurityIssue> = {
+  name: 'security',
+  async run(request) {
+    const issues: SecurityIssue[] = []
+    for (const skillId of request.touchedSkillIds) {
+      const entry = request.entries[skillId]
+      if (entry === undefined) continue
+      const texts = [entry.content, ...Object.values(entry.files ?? {})]
+      for (const text of texts) {
+        for (const { code, pattern } of SECRET_PATTERNS) {
+          if (pattern.test(text)) {
+            issues.push({
+              skillId,
+              code,
+              message: 'touched skill content looks like a credential; rotate and remove it before sharing',
+              severity: 'high',
+            })
+            break
+          }
+        }
+      }
+    }
+    return issues
+  },
+}
 
 /**
  * Mount the continual harness: store, tool, projection, and driver. All
@@ -188,10 +232,21 @@ export function apply(ctx: Context, config: Config): void {
   // One protocol-independent coordinator owns request validation, planner
   // context capture, approval gating, commit serialization, and result
   // projection for both the tool and (from Task 5) the automatic driver.
+  // The same coordinator carries the post-apply diagnostics runner (Task 8),
+  // so tool, command, and automatic gate all see one report per commit.
   const coordinator = createRefineCoordinator({
     store,
     completeFor: agent => completeViaAgent(ctx, agent, config.plannerMaxTokens),
     maxTrajectoryChars: config.maxTrajectoryChars,
+    ...(config.diagnosticsEnabled
+      ? {
+        diagnostics: createDiagnosticRunner({
+          structural: structuralProvider,
+          ...(config.securityEnabled ? { security: localSecurityProvider } : {}),
+          enableSecurity: config.securityEnabled,
+        }),
+      }
+      : {}),
     // The conservative approval gate rides the tool plan path only: the user
     // sees the planner's own summary before any global write commits. The
     // thrown message keeps the historical "global write not approved" wording

@@ -670,6 +670,62 @@ describe('skill bundle acceptance', () => {
   })
 })
 
+describe('post-apply diagnostics wiring', () => {
+  it('attaches a completed diagnostics report to tool output by default', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm(PLAN) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const json = resultJson(await execute(ctx, 'harness_refine', { global: true }, stubAgent('diag-on').agent))
+    expect(json).toMatchObject({ applied: 1, failed: 0, refinement_id: 'refine_appr' })
+    expect(json.diagnostics).toMatchObject({ status: 'completed', structural: [], security: [], errors: [] })
+  })
+
+  it('omits diagnostics entirely when diagnosticsEnabled is false', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm(PLAN) as never)
+    await ctx.plugin(plugin, { ...pluginConfig(home), diagnosticsEnabled: false })
+
+    const json = resultJson(await execute(ctx, 'harness_refine', { global: true }, stubAgent('diag-off').agent))
+    expect(json.applied).toBe(1)
+    expect(json.diagnostics).toBeUndefined()
+  })
+
+  it('reports security issues from the local provider when securityEnabled is true', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_secret',
+      summary: 'create a skill with a secret',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'secret-demo',
+        description: 'Use whenever handling tokens',
+        content: '## Steps\n1. Call the API with sk-abcdef1234567890abcdef1234567890',
+      }],
+    }) as never)
+    await ctx.plugin(plugin, { ...pluginConfig(home), securityEnabled: true })
+
+    const json = resultJson(await execute(ctx, 'harness_refine', { global: true }, stubAgent('diag-sec').agent))
+    expect(json.applied).toBe(1)
+    const diagnostics = json.diagnostics as { status: string; security: Array<Record<string, unknown>> }
+    expect(diagnostics.status).toBe('completed')
+    const issue = diagnostics.security.find(finding => finding.skill_id === 'secret-demo')
+    expect(issue?.code).toBe('secret-exposure')
+    expect(issue?.severity).toBe('high')
+  })
+})
+
 describe('harness_refine bundle materialization result', () => {
   it('reports materialization status and writes the bundle files', async () => {
     const home = tempHome()

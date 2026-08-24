@@ -111,6 +111,45 @@ describe('createRefineCommandAdapter', () => {
     expect(result.text).toContain('refinement: none')
   })
 
+  it('appends a completed diagnostics line when the coordinator result has a report', async () => {
+    const handler = createRefineCommandAdapter(fakeCoordinator({
+      ...committedWithRejected(),
+      diagnostics: { status: 'completed', structural: [], security: [], errors: [] },
+    }), { defaultGlobal: false })
+    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.text).toContain('diagnostics: completed')
+  })
+
+  it('appends a disabled diagnostics line when no provider is enabled', async () => {
+    const handler = createRefineCommandAdapter(fakeCoordinator({
+      ...committedWithRejected(),
+      diagnostics: { status: 'disabled', structural: [], security: [], errors: [] },
+    }), { defaultGlobal: false })
+    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.text).toContain('diagnostics: disabled')
+  })
+
+  it('renders one diagnostics error line per provider error', async () => {
+    const handler = createRefineCommandAdapter(fakeCoordinator({
+      ...committedWithRejected(),
+      diagnostics: {
+        status: 'partial',
+        structural: [],
+        security: [],
+        errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+      },
+    }), { defaultGlobal: false })
+    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.text).toContain('diagnostics: partial')
+    expect(result.text).toContain('diagnostics-error: security provider-failed scanner failed')
+  })
+
+  it('omits the diagnostics line when the coordinator result has no report', async () => {
+    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
+    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result.text).not.toContain('diagnostics:')
+  })
+
   it('renders a stable error line from the domain result', async () => {
     const coordinator = fakeCoordinator({
       ...notCommitted(),

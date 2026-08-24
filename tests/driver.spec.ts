@@ -10,6 +10,7 @@ import { loadReviews, REVIEWS_FILE_NAME } from '../src/audit.ts'
 import { completeViaAgent } from '../src/complete.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
 import type { RefineCoordinator } from '../src/coordinator.ts'
+import { createDiagnosticRunner } from '../src/diagnostics.ts'
 import { registerHarnessDriver } from '../src/driver.ts'
 import type { DriverOptions } from '../src/driver.ts'
 import { HarnessStore } from '../src/store.ts'
@@ -974,6 +975,46 @@ describe('registerHarnessDriver', () => {
     expect(reviews).toHaveLength(1)
     expect(reviews[0]?.outcome).toBe('assessed')
     expect(reviews[0]?.rationale).toBe('interval reached')
+  })
+
+  it('keeps a committed refinement approved when diagnostics fail and surfaces the failure in the audit', async () => {
+    ctx = new Context()
+    const llm = makeLlm([
+      { approved: true, rationale: 'interval reached' },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+    ])
+    const agents = makeAgents()
+    ctx.provide('llm', llm as never)
+    ctx.provide('agents', agents as never)
+    const home = tempHome()
+    const store = testStore(home)
+    // The structural provider throws after the commit: the runner returns a
+    // partial report with a provider error instead of dropping the commit.
+    const diagnostics = createDiagnosticRunner({
+      structural: { name: 'structural', run: async () => { throw new Error('scanner failed') } },
+      enableSecurity: false,
+    })
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: agent => completeViaAgent(ctx, agent, 1000),
+      diagnostics,
+    })
+    registerHarnessDriver(ctx, coordinator, store, driverOptions({ auditReviews: true }))
+    const agent = stubAgent('driver-diag-fail')
+    agents.register(agent)
+
+    turnEnd(agent.session, 1)
+    await settle()
+
+    // the commit stands even though diagnostics failed
+    expect(store.state(agent).entries.memory['m1']?.content).toBe('learned')
+    // one approved audit record; the diagnostics failure stays visible in the rationale
+    const reviews = loadReviews(home)
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0]?.outcome).toBe('approved')
+    expect(reviews[0]?.refinementId).toBe('auto_1')
+    expect(reviews[0]?.rationale).toContain('provider-failed')
+    expect(reviews[0]?.rationale).toContain('scanner failed')
   })
 
   it('keeps a committed refinement approved when materialization failed', async () => {
