@@ -11,7 +11,7 @@ English | [中文](docs/readme/README.zh.md)
   <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/dm/dsh-continual-harness?cacheSeconds=86400" alt="npm downloads"></a>
 </p>
 
-A **continual self-refinement plugin** for DeepSeek Harness: one plugin gives the agent a closed loop of *persistent memory + periodic review-and-refine + cross-session shared knowledge + automatic rollback on failure* (plan → validate → apply → rollback).
+A **DeepSeek Harness (DSH) plugin for self-improving AI agents**, providing continual learning through persistent memory, periodic review and refinement, cross-session knowledge sharing, and automatic rollback on failure. It forms a closed loop of plan → validate → apply → rollback.
 
 The design is inspired by the open-source [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) from Prime Intellect, a self-improving coding harness.
 

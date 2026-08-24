@@ -11,7 +11,7 @@
   <a href="https://www.npmjs.com/package/dsh-continual-harness"><img src="https://img.shields.io/npm/dm/dsh-continual-harness?cacheSeconds=86400" alt="npm downloads"></a>
 </p>
 
-DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个插件为 agent 提供「持久记忆 + 定期复盘精修 + 全局共享知识 + 失败自动回滚」闭环（plan → validate → apply → rollback）。
+面向 DeepSeek Harness（DSH）的**智能体自我改进与持续学习插件**：通过持久化记忆、定期复盘与精修、跨会话经验共享，以及失败自动回滚，为 AI Agent 构建完整的自进化闭环（plan → validate → apply → rollback）。
 
 设计灵感来自 Prime Intellect 开源的 [prime-agent](https://github.com/PrimeIntellect-ai/prime-agent)，一个自改进的编码 harness。
 
