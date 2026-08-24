@@ -21,6 +21,7 @@ import type { CommandsCapability } from './command.ts'
 import { createDiagnosticRunner, structuralProvider } from './diagnostics.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
+import { HARNESS_REFINEMENT_EVENT, registerSessionEventType } from './domain.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
@@ -217,6 +218,11 @@ const localSecurityProvider: DiagnosticProvider<SecurityIssue> = {
  * @param config - validated plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
+  // Legacy compatibility: older plugin builds wrote the `harness/refinement`
+  // session event without an `ignorable` envelope marker; register the type
+  // so those historical logs stay readable (removable once they age out).
+  registerSessionEventType(HARNESS_REFINEMENT_EVENT)
+
   const store = new HarnessStore(ctx, {
     ...(config.harnessRoot === undefined ? {} : { harnessRoot: config.harnessRoot }),
     ...(config.skillsDir === undefined ? {} : { skillsDir: config.skillsDir }),

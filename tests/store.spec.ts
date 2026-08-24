@@ -110,7 +110,7 @@ describe('HarnessStore', () => {
     expect(store.usageStatsFor('global:memory:fact')?.injectionCount).toBe(1)
   })
 
-  it('applies a refinement locally: state file, session event, and merged view', () => {
+  it('applies a refinement locally: state file, merged view, and history from the store', () => {
     const ctx = new Context()
     const store = testStore(ctx, tempHome())
     const { agent, session } = stubAgent('agent-1')
@@ -121,7 +121,11 @@ describe('HarnessStore', () => {
     }
     const result = store.applyRefinement(agent, plan, {})
     expect(result.scope).toBe('local')
-    expect(session.events.some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(true)
+    // The harness core's generated vocabulary does not include the out-of-repo
+    // harness/refinement type, so the informational session event is omitted
+    // (a reader would otherwise refuse the whole log); history() reads the
+    // on-disk store instead.
+    expect(session.events.some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(false)
     expect(store.state(agent).entries.memory['fact']?.content).toBe('durable')
     expect(store.history(agent).map(entry => entry.id)).toEqual(['refine_1'])
   })

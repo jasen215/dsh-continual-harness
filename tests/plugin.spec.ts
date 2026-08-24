@@ -6,13 +6,13 @@ import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as plugin from '../src/index.ts'
 import { loadReviews } from '../src/audit.ts'
-import { HARNESS_STATE_SOURCE } from '../src/domain.ts'
+import { HARNESS_REFINEMENT_EVENT, HARNESS_STATE_SOURCE } from '../src/domain.ts'
 import { PLUGIN_LOG_FILE_NAME } from '../src/logfile.ts'
 import { HarnessStore } from '../src/store.ts'
 
@@ -130,6 +130,19 @@ describe('plugin registration', () => {
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(plugin, pluginConfig(tempHome()))
     expect(ctx.tools.get('harness_refine')?.name).toBe('harness_refine')
+  })
+
+  it('registers harness/refinement in the known session event types for legacy log reads', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, pluginConfig(tempHome()))
+    // The persistence read path refuses a log whose event type is outside the
+    // known set unless the event is marked ignorable. Older plugin builds
+    // wrote harness/refinement without the marker, so mounting the plugin
+    // must register the type to keep those historical logs readable.
+    expect((KNOWN_SESSION_EVENT_TYPES as Set<string>).has(HARNESS_REFINEMENT_EVENT)).toBe(true)
   })
 
   it('registers harness_wrapup by default and skips it when wrapupEnabled is false', async () => {

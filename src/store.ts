@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import type { Session } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
@@ -35,6 +35,51 @@ import type { HarnessState, MaterializationResult, RefinementKind, RefinementPro
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
+
+/**
+ * Runtime shape of `Session.append` once upstream AppendOptions lands: a
+ * non-surface event append that may carry the `ignorable` envelope marker.
+ * `Session.append` currently types non-surface events with no third
+ * argument, so the capability is reached through an explicit escape hatch.
+ */
+type IgnorableAppend = (type: string, data: unknown, opts?: { ignorable?: true }) => { ignorable?: true }
+
+/**
+ * Whether the running dsh-session's `Session.append` can emit the
+ * `ignorable` envelope marker on a non-surface event. The harness core
+ * currently rejects unknown out-of-repo event types at read time unless the
+ * event carries `ignorable: true`, but `append` has no such writer option
+ * yet (upstream AppendOptions is pending); probing the returned envelope
+ * detects the capability exactly, so the plugin writes the informational
+ * session event only when a reader can actually skip it.
+ */
+let appendSupportsIgnorable: boolean | undefined
+
+function probeAppendIgnorable(): boolean {
+  if (appendSupportsIgnorable === undefined) {
+    try {
+      const probe = Session.create(SessionId('__harness-ignorable-probe__'))
+      const append = probe.append as unknown as IgnorableAppend
+      const event = append('todo/write', { todos: [] }, { ignorable: true })
+      appendSupportsIgnorable = event.ignorable === true
+    } catch {
+      appendSupportsIgnorable = false
+    }
+  }
+  return appendSupportsIgnorable
+}
+
+/**
+ * Append a non-surface session event carrying the `ignorable` envelope
+ * marker, but only when the running dsh-session supports it; no-op
+ * otherwise. Use for out-of-repo informational events so every reader may
+ * safely skip them.
+ */
+function appendIgnorableSessionEvent(session: Session, type: string, data: unknown): void {
+  if (!probeAppendIgnorable()) return
+  const append = session.append as unknown as IgnorableAppend
+  append(type, data, { ignorable: true })
+}
 
 /** Options for a store commit. */
 export interface CommitOptions {
@@ -127,11 +172,9 @@ export class HarnessStore {
     return buildSnapshot(mergeHarnessStates(global, local), snapshotId, refinementId, { local, global })
   }
 
-  /** Merged refinement history: session events first, then global history. */
+  /** Merged refinement history: session store refinements first, then global history. */
   history(agent: Agent): RefinementResult[] {
-    const local = agent.session.events
-      .filter(event => event.type === HARNESS_REFINEMENT_EVENT)
-      .map(event => event.data)
+    const local = this.localState(agent).refinements
     return mergeRefinementHistory(local, loadGlobalRefinementHistory(this.home))
   }
 
@@ -232,7 +275,18 @@ export class HarnessStore {
     } else {
       saveHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)), state)
     }
-    agent.session.append(HARNESS_REFINEMENT_EVENT, result)
+    // The `harness/refinement` session event is out-of-repo vocabulary: the
+    // harness core's generated KNOWN_SESSION_EVENT_TYPES does not include it,
+    // and a reader meeting an unrecognized non-ignorable type refuses the
+    // whole log (SessionFormatUnsupportedError). The event is purely
+    // informational — history() reads the on-disk store, which already
+    // persists every result — so write it only when the running harness can
+    // emit `ignorable: true` (then every reader may safely skip it); otherwise
+    // omit it to keep every session readable, including after this plugin is
+    // unmounted. The scoped `harness/refined` emit below still fires
+    // regardless, so live observers and the invariant companion are
+    // unaffected.
+    appendIgnorableSessionEvent(agent.session, HARNESS_REFINEMENT_EVENT, result)
     const materialization = this.materializeSkills(agent, result)
     agentEvents(this.ctx, agent).emit('harness/refined', { result })
     return Object.assign(result, { materialization })
