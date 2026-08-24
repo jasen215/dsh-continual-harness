@@ -9,14 +9,17 @@ import type { Complete } from '../src/planner.ts'
 import { freshState } from '../src/refine.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
+import type { PlanRequest } from '../src/coordinator.ts'
+import type { DiagnosticRunner } from '../src/diagnostics.ts'
 import type {
+  DiagnosticReport,
   HarnessScope,
   HarnessState,
   MaterializationResult,
   RefinementProposal,
   RefinementResult,
+  SkillEntry,
 } from '../src/types.ts'
-import type { PlanRequest } from '../src/coordinator.ts'
 
 const tempDirs: string[] = []
 
@@ -84,6 +87,7 @@ function fakeStore(onApply?: () => void): HarnessStore {
   return {
     localState: vi.fn(() => emptyState()),
     globalState: vi.fn(() => emptyState()),
+    state: vi.fn(() => emptyState()),
     history: vi.fn(() => []),
     trajectory: vi.fn(() => ''),
     applyRefinement: vi.fn(() => {
@@ -91,6 +95,14 @@ function fakeStore(onApply?: () => void): HarnessStore {
       return refinementResult('fake')
     }),
   } as unknown as HarnessStore
+}
+
+function fakeRunner(report: DiagnosticReport = { status: 'completed', structural: [], security: [], errors: [] }): {
+  runner: DiagnosticRunner
+  run: ReturnType<typeof vi.fn>
+} {
+  const run = vi.fn(async () => report)
+  return { runner: { run }, run }
 }
 
 function realStoreWithHistory(): { store: HarnessStore; agent: Agent } {
@@ -368,5 +380,149 @@ describe('createRefineCoordinator', () => {
     }))
     const result = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
     expect(result).toMatchObject({ commitStatus: 'committed', appliedCount: 1, rejectedCount: 0, failedAt: 'materialization', error: { code: 'materialization-failed' } })
+  })
+
+  describe('post-apply diagnostics hook', () => {
+    it('runs the injected runner once after a committed plan with touched skills', async () => {
+      const store = fakeStore()
+      store.applyRefinement = vi.fn(async () => ({
+        ...refinementResult('r'),
+        appliedEdits: [
+          { action: 'create', kind: 'skill', id: 'one', applied: true, blastRadius: 'general' },
+          { action: 'create', kind: 'memory', id: 'm1', applied: true, blastRadius: 'general' },
+        ],
+      }))
+      store.state = vi.fn(() => ({
+        ...emptyState(),
+        entries: {
+          ...emptyState().entries,
+          skill: { one: { id: 'one', kind: 'skill', version: 1, content: 'body', description: 'use x', updatedAt: '' } as SkillEntry },
+        },
+      }))
+      const { runner, run } = fakeRunner()
+      const coordinator = createRefineCoordinator({
+        store,
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'skill', id: 'one', content: 'x' }] }),
+        diagnostics: runner,
+      })
+      const result = await coordinator.execute(planRequest('local', 'tool'))
+      expect(result.commitStatus).toBe('committed')
+      expect(run).toHaveBeenCalledTimes(1)
+      expect(run).toHaveBeenCalledWith(expect.objectContaining({
+        refinementId: 'r',
+        touchedSkillIds: ['one'],
+        entries: expect.objectContaining({ one: expect.any(Object) }),
+        materialization: emptyMaterialization(),
+        enableSecurity: false,
+      }))
+      expect(result.diagnostics).toMatchObject({ status: 'completed', errors: [] })
+    })
+
+    it('does not run diagnostics for an empty proposal, rejected approval, failed commit, or rollback validation failure', async () => {
+      const { runner, run } = fakeRunner()
+      // empty proposal
+      await createRefineCoordinator({
+        store: fakeStore(),
+        completeFor: () => cannedComplete({ id: 'p', summary: 'none', edits: [] }),
+        diagnostics: runner,
+      }).execute(planRequest('local', 'tool'))
+      // rejected approval
+      await createRefineCoordinator({
+        store: fakeStore(),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        requireGlobalApprovalForTool: true,
+        requireGlobalApproval: async () => { throw new Error('no') },
+        diagnostics: runner,
+      }).execute(planRequest('global', 'tool'))
+      // failed commit
+      const failing = fakeStore()
+      failing.applyRefinement = vi.fn(async () => { throw new Error('commit boom') })
+      await createRefineCoordinator({
+        store: failing,
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        diagnostics: runner,
+      }).execute(planRequest('local', 'tool'))
+      // rollback target validation failure
+      await createRefineCoordinator({
+        store: fakeStore(),
+        completeFor: () => cannedComplete('{}'),
+        diagnostics: runner,
+      }).execute({ mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'missing', agent: agent() })
+      expect(run).not.toHaveBeenCalled()
+    })
+
+    it('retains the committed result when the runner throws', async () => {
+      const store = fakeStore()
+      store.applyRefinement = vi.fn(async () => ({
+        ...refinementResult('r'),
+        appliedEdits: [{ action: 'create', kind: 'memory', id: 'x', applied: true, blastRadius: 'general' }],
+      }))
+      const { runner, run } = fakeRunner()
+      run.mockRejectedValue(new Error('runner exploded'))
+      const result = await createRefineCoordinator({
+        store,
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        diagnostics: runner,
+      }).execute(planRequest('local', 'tool'))
+      expect(result).toMatchObject({
+        commitStatus: 'committed',
+        appliedCount: 1,
+        rejectedCount: 0,
+        failedAt: 'diagnostics',
+        error: { code: 'diagnostics-failed', message: 'runner exploded' },
+      })
+      expect(result.refinement?.id).toBe('r')
+      expect(result.materialization?.status).toBe('completed')
+    })
+
+    it('aborts before diagnostics starts with the commit retained', async () => {
+      const controller = new AbortController()
+      const store = fakeStore()
+      store.applyRefinement = vi.fn(async () => {
+        controller.abort()
+        return {
+          ...refinementResult('r'),
+          appliedEdits: [{ action: 'create', kind: 'memory', id: 'x', applied: true, blastRadius: 'general' }],
+        }
+      })
+      const { runner, run } = fakeRunner()
+      const result = await createRefineCoordinator({
+        store,
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        diagnostics: runner,
+      }).execute({ ...planRequest('local', 'tool'), signal: controller.signal })
+      expect(result).toMatchObject({
+        commitStatus: 'committed',
+        appliedCount: 1,
+        rejectedCount: 0,
+        failedAt: 'diagnostics',
+        error: { code: 'aborted' },
+      })
+      expect(run).not.toHaveBeenCalled()
+    })
+
+    it('runs diagnostics for a memory-only refinement with empty touched ids', async () => {
+      const { runner, run } = fakeRunner()
+      const result = await createRefineCoordinator({
+        store: fakeStore(),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'x' }] }),
+        diagnostics: runner,
+      }).execute(planRequest('local', 'tool'))
+      expect(result.commitStatus).toBe('committed')
+      expect(run).toHaveBeenCalledTimes(1)
+      expect(run).toHaveBeenCalledWith(expect.objectContaining({ touchedSkillIds: [] }))
+    })
+
+    it('runs diagnostics after a committed rollback', async () => {
+      const { store, agent: liveAgent } = realStoreWithHistory()
+      const { runner, run } = fakeRunner()
+      const result = await createRefineCoordinator({
+        store,
+        completeFor: () => cannedComplete('{}'),
+        diagnostics: runner,
+      }).execute({ mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'seed', agent: liveAgent })
+      expect(result.commitStatus).toBe('committed')
+      expect(run).toHaveBeenCalledTimes(1)
+    })
   })
 })

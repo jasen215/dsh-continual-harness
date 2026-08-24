@@ -6,16 +6,16 @@ import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
+import type { DiagnosticRunner } from './diagnostics.ts'
 import type {
   AutoRefineReason,
+  DiagnosticReport,
   HarnessScope,
   HarnessState,
   MaterializationResult,
   RefinementResult,
+  SkillEntry,
 } from './types.ts'
-
-type DiagnosticReport = Record<string, unknown>
-type PostApplyDiagnostics = { run(...args: never[]): Promise<DiagnosticReport> }
 
 export type PlanRequest = {
   mode: 'plan'
@@ -91,7 +91,7 @@ export interface RefineCoordinatorOptions {
     historyText: string
     trajectoryText: string
   }
-  diagnostics?: PostApplyDiagnostics
+  diagnostics?: DiagnosticRunner
 }
 
 function validateRequest(request: RefineRequest): string | undefined {
@@ -178,6 +178,51 @@ function executionFromCommit(
   }
 }
 
+/**
+ * Post-apply diagnostics hook (spec §4): runs at most once after a committed
+ * refinement. Derives touched skill ids from the applied skill edits, reads
+ * the effective post-apply skill entries once, and hands the runner a request
+ * with those entries plus the commit's materialization report. A runner throw
+ * becomes `failedAt: 'diagnostics'` with `diagnostics-failed` without touching
+ * the already-produced commit status, counts, refinement, or materialization.
+ * An abort immediately before diagnostics begins returns `aborted` with the
+ * existing commit retained; an abort during the runner surfaces as the
+ * runner's partial report instead.
+ */
+async function attachDiagnostics(
+  options: RefineCoordinatorOptions,
+  request: RefineRequest,
+  committed: RefineExecutionResult,
+): Promise<RefineExecutionResult> {
+  if (options.diagnostics === undefined || committed.refinement === undefined) return committed
+  if (request.signal?.aborted) {
+    return { ...committed, failedAt: 'diagnostics', error: { code: 'aborted', message: 'refinement request aborted' } }
+  }
+  const touchedSkillIds = committed.refinement.appliedEdits
+    .filter(edit => edit.applied && edit.kind === 'skill')
+    .map(edit => edit.id)
+  const entries = options.store.state(request.agent).entries.skill as Record<string, SkillEntry>
+  try {
+    const diagnostics = await options.diagnostics.run({
+      refinementId: committed.refinement.id,
+      touchedSkillIds,
+      entries,
+      ...(committed.materialization === undefined ? {} : { materialization: committed.materialization }),
+      // The coordinator itself never requests security; the runner's
+      // construction decides whether its security provider is enabled.
+      enableSecurity: false,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    })
+    return { ...committed, diagnostics }
+  } catch (error) {
+    return {
+      ...committed,
+      failedAt: 'diagnostics',
+      error: { code: 'diagnostics-failed', message: error instanceof Error ? error.message : String(error) },
+    }
+  }
+}
+
 export function createRefineCoordinator(options: RefineCoordinatorOptions): RefineCoordinator {
   const maxTrajectoryChars = options.maxTrajectoryChars ?? 12_000
   const mutex = new KeyedMutex()
@@ -212,7 +257,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
              const result = await options.store.applyRefinement(request.agent, proposal, {
                global: request.scope === 'global', rollbackOf: commitTarget.id, baseline: commitState,
              })
-             return executionFromCommit(result, 'not-required')
+             return attachDiagnostics(options, request, executionFromCommit(result, 'not-required'))
            } catch (error) {
              return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error))
            }
@@ -300,7 +345,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           error: { code: 'materialization-failed' as const, message: 'skill materialization failed' },
         } : {}),
       }
-      return committed
+      return attachDiagnostics(options, request, committed)
        })
      },
   }

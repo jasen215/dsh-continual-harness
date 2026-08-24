@@ -214,3 +214,52 @@ export interface MaterializationResult {
   /** Per-path failure or skip details; non-retryable entries are warnings. */
   errors: Array<{ path?: string; code: MaterializationErrorCode; retryable: boolean; message: string }>
 }
+
+/** One post-apply diagnostics request (spec §3). */
+export interface DiagnosticRequest {
+  /** Id of the committed refinement being diagnosed. */
+  refinementId: string
+  /** Skill ids touched by applied skill edits; providers never scan beyond these. */
+  touchedSkillIds: string[]
+  /** Effective post-apply skill entries keyed by id, read once from the merged store view. */
+  entries: Record<string, SkillEntry>
+  /** Materialization outcome for the same commit, carried through unchanged. */
+  materialization?: MaterializationResult
+  /** Whether the security provider may run for this request. */
+  enableSecurity: boolean
+  /** Abort signal; an abort during the run yields a partial report. */
+  signal?: AbortSignal
+}
+
+/** One structural finding about a touched skill bundle (L2). */
+export interface SkillBundleIssue {
+  skillId: string
+  code: string
+  message: string
+}
+
+/** One security finding about a touched skill bundle (L3). */
+export interface SecurityIssue {
+  skillId: string
+  code: string
+  message: string
+  severity?: 'low' | 'medium' | 'high'
+}
+
+/** Aggregated post-apply diagnostics report (spec §5). */
+export interface DiagnosticReport {
+  /** completed: all enabled providers finished; partial: one failed or was aborted; disabled: no provider is enabled. */
+  status: 'completed' | 'partial' | 'disabled'
+  structural: SkillBundleIssue[]
+  security: SecurityIssue[]
+  /** Materialization outcome for the same commit, embedded unchanged. */
+  materialization?: MaterializationResult
+  /** Provider failures; never faked as empty findings. */
+  errors: Array<{ provider: string; code: string; message: string }>
+}
+
+/** One independent post-apply diagnostics provider. */
+export interface DiagnosticProvider<TIssue> {
+  name: string
+  run(request: DiagnosticRequest): Promise<TIssue[]>
+}
