@@ -303,7 +303,7 @@ export function reconcileSkillFiles(
 }
 
 /** One L2 structural-quality finding for a skill entry. Advisory: never blocks a write (L0/L1 are the hard gates). */
-export interface SkillBundleIssue {
+export interface SkillValidationIssue {
   severity: 'error' | 'warning'
   code: string
   message: string
@@ -380,8 +380,8 @@ export function referencedFilePaths(content: string): string[] {
  * advisory — callers surface them as a post-creation self-check report;
  * they never reject a write.
  */
-export function validateSkillBundle(entry: SkillEntryLike): SkillBundleIssue[] {
-  const issues: SkillBundleIssue[] = []
+export function validateSkillBundle(entry: SkillEntryLike): SkillValidationIssue[] {
+  const issues: SkillValidationIssue[] = []
 
   if (entry.id.length > MAX_SKILL_ID_CHARS) {
     issues.push({

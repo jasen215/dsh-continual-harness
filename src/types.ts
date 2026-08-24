@@ -223,10 +223,6 @@ export interface DiagnosticRequest {
   touchedSkillIds: string[]
   /** Effective post-apply skill entries keyed by id, read once from the merged store view. */
   entries: Record<string, SkillEntry>
-  /** Materialization outcome for the same commit, carried through unchanged. */
-  materialization?: MaterializationResult
-  /** Whether the security provider may run for this request. */
-  enableSecurity: boolean
   /** Abort signal; an abort during the run yields a partial report. */
   signal?: AbortSignal
 }
@@ -252,8 +248,6 @@ export interface DiagnosticReport {
   status: 'completed' | 'partial' | 'disabled'
   structural: SkillBundleIssue[]
   security: SecurityIssue[]
-  /** Materialization outcome for the same commit, embedded unchanged. */
-  materialization?: MaterializationResult
   /** Provider failures; never faked as empty findings. */
   errors: Array<{ provider: string; code: string; message: string }>
 }
