@@ -256,24 +256,37 @@ describe('createRefineCoordinator', () => {
     expect(result.refinement?.appliedEdits).toHaveLength(1)
   })
 
-  it('passes the planner snapshot so a target mutation is rejected as a conflict', async () => {
-    const store = fakeStore()
-    const baseline = emptyState()
-    const changed = { ...emptyState(), entries: { ...emptyState().entries, memory: { changed: { kind: 'memory', id: 'changed', content: 'new', version: 1 } } } }
-    vi.mocked(store.localState).mockReturnValueOnce(baseline).mockReturnValueOnce(changed)
-    store.applyRefinement = vi.fn(async (_agent, _proposal, options) => {
-      expect(options.baseline).toBe(baseline)
-      return {
-        ...refinementResult('conflict'),
-        appliedEdits: [{ action: 'update', kind: 'memory', id: 'changed', applied: false, blastRadius: 'general', error: 'entry changed during refinement planning' }],
-        materialization: emptyMaterialization(),
-      }
+  it('uses the planner snapshot for real Store baseline conflict detection', async () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    const liveAgent = agent('baseline-conflict-agent')
+    store.applyRefinement(liveAgent, {
+      id: 'seed-target', summary: 'seed target',
+      edits: [{ action: 'create', kind: 'memory', id: 'target', content: 'before' }],
     })
-    const result = await createRefineCoordinator({
-      store,
-      completeFor: () => cannedComplete({ id: 'conflict', summary: 'conflict', edits: [{ action: 'update', kind: 'memory', id: 'changed', content: 'planned', reason: 'test' }] }),
-    }).execute(planRequest('local', 'tool'))
-    expect(result).toMatchObject({ commitStatus: 'committed-with-rejected-edits', appliedCount: 0, rejectedCount: 1 })
+
+    let mutation: RefinementResult & { materialization: MaterializationResult } | undefined
+    const complete: Complete = async () => {
+      mutation = store.applyRefinement(liveAgent, {
+        id: 'mutate-target', summary: 'mutate target',
+        edits: [{ action: 'update', kind: 'memory', id: 'target', content: 'changed', reason: 'change during planning' }],
+      })
+      return JSON.stringify({
+        id: 'planned-target-update', summary: 'planned update',
+        edits: [{ action: 'update', kind: 'memory', id: 'target', content: 'planned', reason: 'planned change' }],
+      })
+    }
+    const result = await createRefineCoordinator({ store, completeFor: () => complete })
+      .execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+
+    expect(mutation?.appliedEdits[0]?.applied).toBe(true)
+    expect(result.commitStatus).toBe('committed-with-rejected-edits')
+    expect(result.appliedCount).toBe(0)
+    expect(result.rejectedCount).toBe(1)
+    expect(result.refinement?.appliedEdits[0]).toMatchObject({
+      id: 'target', applied: false, error: 'entry changed during refinement planning',
+    })
   })
 
   it('maps partial Store application to committed-with-rejected-edits', async () => {

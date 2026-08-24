@@ -15,3 +15,16 @@ Verification commands:
 - `pnpm typecheck`
   - PASS, exit code 0.
   - stderr contained the documented harmless pnpm sandbox initialization warning.
+
+## Follow-up Fix Round 2
+
+Rewrote the baseline-conflict regression in `tests/coordinator.spec.ts` to use a hermetic real `HarnessStore` and the real persistence/refine conflict path. The test seeds a memory entry, mutates that entry through a real Store update during the planner seam, then commits the original planned update and asserts the actual returned `appliedEdits` reports `entry changed during refinement planning`, with zero applied and one rejected edit. No fabricated Store result or preconstructed changed state remains.
+
+Verification commands:
+
+- `pnpm test -- tests/coordinator.spec.ts`
+  - PASS: 24 test files, 370 tests; coordinator file passed 17 tests; exit code 0.
+  - stderr contained the documented harmless pnpm sandbox initialization warning.
+- `pnpm typecheck`
+  - PASS, exit code 0.
+  - stderr contained the documented harmless pnpm sandbox initialization warning.
