@@ -5,8 +5,6 @@
  * @module dsh-continual-harness
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -17,7 +15,7 @@ import type { HarnessSnapshot } from './benchmark.ts'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, entryToEditFields, rollbackProposal } from './refine.ts'
 import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
-import { DEFAULT_SKILL_BUNDLE_LIMITS, isHarnessOwnedBundle, reconcileSkillFiles } from './skills.ts'
+import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills.ts'
 import type { SkillBundleLimits } from './skills.ts'
 import {
   appendGlobalRefinement,
@@ -65,7 +63,7 @@ export class HarnessStore {
   /** Kinds protected from the automatic path; plumbed for Config wiring. */
   private readonly protectedKinds: readonly RefinementKind[] | undefined
   /** Skill bundle limits used by L1 files validation (spec §7.10). */
-  private readonly skillLimits: SkillBundleLimits
+  private readonly skillBundleLimits: SkillBundleLimits
   /** Per-kind cap for ranked prompt injection. */
   private readonly maxInjectedEntriesPerKind: number
   /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
@@ -78,7 +76,7 @@ export class HarnessStore {
       skillsDir?: string
       maxEntryGrowth?: number
       protectedKinds?: readonly RefinementKind[]
-      skillLimits?: SkillBundleLimits
+      skillBundleLimits?: SkillBundleLimits
       maxInjectedEntriesPerKind?: number
     } = {},
   ) {
@@ -86,7 +84,7 @@ export class HarnessStore {
     this.skillsDir = options.skillsDir ?? dshHomePath('skills')
     this.maxEntryGrowth = options.maxEntryGrowth
     this.protectedKinds = options.protectedKinds
-    this.skillLimits = options.skillLimits ?? DEFAULT_SKILL_BUNDLE_LIMITS
+    this.skillBundleLimits = options.skillBundleLimits ?? DEFAULT_SKILL_BUNDLE_LIMITS
     this.maxInjectedEntriesPerKind = options.maxInjectedEntriesPerKind ?? DEFAULT_ENTRIES_PER_KIND
   }
 
@@ -139,11 +137,8 @@ export class HarnessStore {
 
   /** fs-backed create-conflict gate: a create onto a non-harness-owned bundle is rejected (spec §7.4). */
   private createConflictError(id: string): string | undefined {
-    const bundle = join(this.skillsDir, id)
-    if (!existsSync(bundle)) return undefined
-    const file = join(bundle, 'SKILL.md')
-    const markdown = existsSync(file) ? readFileSync(file, 'utf8') : ''
-    if (isHarnessOwnedBundle(markdown)) return undefined
+    const inspected = inspectSkillBundle(defaultSkillFsOps, this.skillsDir, id)
+    if (inspected.state === 'missing' || (inspected.state === 'present' && inspected.harnessOwned)) return undefined
     return `skill directory "${id}" exists and is not harness-owned; pick another id`
   }
 
@@ -223,7 +218,7 @@ export class HarnessStore {
       baselineState: baseline,
       ...(this.maxEntryGrowth === undefined ? {} : { maxEntryGrowth: this.maxEntryGrowth }),
       ...(this.protectedKinds === undefined ? {} : { protectedKinds: this.protectedKinds }),
-      skillBundleLimits: this.skillLimits,
+      skillBundleLimits: this.skillBundleLimits,
       editGate: edit => edit.action === 'create' && edit.kind === 'skill' ? this.createConflictError(edit.id) : undefined,
       // local commits see the global store read-only through the rule layer
       ...(global ? {} : { globalEntries: this.globalState().entries }),
@@ -279,8 +274,9 @@ export class HarnessStore {
     }
     const effective = this.state(agent).entries.skill
     const activeSkills: typeof effective = {}
-    for (const [id, entry] of Object.entries(effective)) {
-      if (entry.metadata?.lifecycleState !== 'archived') activeSkills[id] = entry
+    for (const id of touched) {
+      const entry = effective[id]
+      if (entry !== undefined && entry.metadata?.lifecycleState !== 'archived') activeSkills[id] = entry
     }
     try {
       return reconcileSkillFiles(this.skillsDir, activeSkills, touched)

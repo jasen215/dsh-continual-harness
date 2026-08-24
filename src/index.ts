@@ -174,7 +174,7 @@ export function apply(ctx: Context, config: Config): void {
     ...(config.skillsDir === undefined ? {} : { skillsDir: config.skillsDir }),
     maxEntryGrowth: config.maxEntryGrowth,
     protectedKinds: config.protectedKinds,
-    skillLimits: {
+    skillBundleLimits: {
       maxSkillFiles: config.maxSkillFiles,
       maxSkillFileBytes: config.maxSkillFileBytes,
       maxSkillBundleBytes: config.maxSkillBundleBytes,

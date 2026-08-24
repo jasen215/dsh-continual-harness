@@ -39,9 +39,10 @@ function formatEntry(
   const legacy = entry.reference !== undefined && entry.arguments !== undefined
     ? ` | reference: ${entry.reference} | arguments: ${entry.arguments}`
     : ''
-  const filesNote = entry.files === undefined || Object.keys(entry.files).length === 0
+  const fileKeys = entry.files === undefined ? [] : Object.keys(entry.files)
+  const filesNote = fileKeys.length === 0
     ? ''
-    : ` | files: ${Object.keys(entry.files).join(', ')}`
+    : ` | files: ${fileKeys.join(', ')}`
   return `- ${entry.id} v${entry.version}: ${truncate(summary, max)}${legacy}${filesNote}`
 }
 

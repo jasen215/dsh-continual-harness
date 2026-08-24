@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { KEBAB_CASE_PATTERN } from './domain.ts'
-import type { HarnessEntry, MaterializationResult } from './types.ts'
+import type { HarnessEntry, MaterializationErrorCode, MaterializationResult } from './types.ts'
 
 /** Length cap for the single-line frontmatter description. */
 export const MAX_DESCRIPTION_CHARS = 200
@@ -155,13 +155,13 @@ export const defaultSkillFsOps: SkillFsOps = {
   rmSync,
 }
 
-function collectRelativeFiles(dir: string, fsOps: SkillFsOps, prefix = ''): string[] {
-  if (!fsOps.existsSync(dir)) return []
+function collectRelativeFiles(dir: string, fsOps: SkillFsOps, prefix = '', knownExists = false): string[] {
+  if (!knownExists && !fsOps.existsSync(dir)) return []
   const files: string[] = []
   for (const name of fsOps.readdirSync(dir)) {
     const rel = prefix ? `${prefix}/${name}` : name
     const full = join(dir, name)
-    if (fsOps.statSync(full).isDirectory()) files.push(...collectRelativeFiles(full, fsOps, rel))
+    if (fsOps.statSync(full).isDirectory()) files.push(...collectRelativeFiles(full, fsOps, rel, true))
     else files.push(rel)
   }
   return files
@@ -170,11 +170,32 @@ function collectRelativeFiles(dir: string, fsOps: SkillFsOps, prefix = ''): stri
 function recordError(
   result: MaterializationResult,
   path: string | undefined,
-  code: string,
+  code: MaterializationErrorCode,
   retryable: boolean,
   message: string,
 ): void {
   result.errors.push({ ...(path === undefined ? {} : { path }), code, retryable, message })
+}
+
+/** On-disk state of one skill bundle path (spec §7.4 ownership decision). */
+export type SkillBundleInspection =
+  | { state: 'missing' }
+  | { state: 'non-directory'; bundle: string }
+  | { state: 'present'; bundle: string; harnessOwned: boolean }
+
+/**
+ * Inspect a skill bundle path without mutating anything: missing, an existing
+ * non-directory, or a directory whose SKILL.md provenance decides ownership.
+ * Both `reconcileSkillFiles` and the store's create-conflict gate share this
+ * single ownership decision so policy cannot drift between call sites.
+ */
+export function inspectSkillBundle(fsOps: SkillFsOps, dir: string, id: string): SkillBundleInspection {
+  const bundle = skillBundleDir(dir, id)
+  if (!fsOps.existsSync(bundle)) return { state: 'missing' }
+  if (!fsOps.statSync(bundle).isDirectory()) return { state: 'non-directory', bundle }
+  const skillFile = join(bundle, 'SKILL.md')
+  const markdown = fsOps.existsSync(skillFile) ? fsOps.readFileSync(skillFile, 'utf8') : ''
+  return { state: 'present', bundle, harnessOwned: isHarnessOwnedBundle(markdown) }
 }
 
 /**
@@ -208,25 +229,23 @@ export function reconcileSkillFiles(
     const entry = effectiveSkills[id]
     if (entry === undefined) {
       // delete/archive: only a harness-owned bundle may be removed
-      if (fsOps.existsSync(bundle)) {
-        if (!fsOps.statSync(bundle).isDirectory()) {
-          recordError(result, bundle, 'not-a-directory', true, `"${id}" bundle path is not a directory; skipped`)
-          result.skipped.push(bundle)
-          continue
-        }
-        const markdown = fsOps.existsSync(join(bundle, 'SKILL.md'))
-          ? fsOps.readFileSync(join(bundle, 'SKILL.md'), 'utf8')
-          : ''
-        if (isHarnessOwnedBundle(markdown)) {
+      const inspected = inspectSkillBundle(fsOps, dir, id)
+      if (inspected.state === 'non-directory') {
+        recordError(result, inspected.bundle, 'not-a-directory', true, `"${id}" bundle path is not a directory; skipped`)
+        result.skipped.push(inspected.bundle)
+        continue
+      }
+      if (inspected.state === 'present') {
+        if (inspected.harnessOwned) {
           try {
-            fsOps.rmSync(bundle, { recursive: true, force: true })
+            fsOps.rmSync(inspected.bundle, { recursive: true, force: true })
             removedCount += 1
           } catch (error) {
-            recordError(result, bundle, 'remove-failed', true, String(error))
+            recordError(result, inspected.bundle, 'remove-failed', true, String(error))
           }
         } else {
-          recordError(result, bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; left untouched`)
-          result.skipped.push(bundle)
+          recordError(result, inspected.bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; left untouched`)
+          result.skipped.push(inspected.bundle)
         }
       }
       continue
@@ -235,24 +254,20 @@ export function reconcileSkillFiles(
       'SKILL.md': renderSkillMarkdown(entry),
       ...(entry.files === undefined ? {} : entry.files),
     }
-    // a bundle path that is a regular file (or other non-directory) cannot be reconciled
-    if (fsOps.existsSync(bundle) && !fsOps.statSync(bundle).isDirectory()) {
-      recordError(result, bundle, 'not-a-directory', true, `"${id}" bundle path is not a directory; skipped`)
-      result.skipped.push(bundle)
+    // ownership: an existing bundle path must be harness-owned to write; a missing path is a create
+    const inspected = inspectSkillBundle(fsOps, dir, id)
+    if (inspected.state === 'non-directory') {
+      recordError(result, inspected.bundle, 'not-a-directory', true, `"${id}" bundle path is not a directory; skipped`)
+      result.skipped.push(inspected.bundle)
       continue
     }
-    // ownership: an existing bundle path must be harness-owned to write; a missing path is a create
-    if (fsOps.existsSync(bundle)) {
-      const skillFile = join(bundle, 'SKILL.md')
-      const markdown = fsOps.existsSync(skillFile) ? fsOps.readFileSync(skillFile, 'utf8') : ''
-      if (!isHarnessOwnedBundle(markdown)) {
-        recordError(result, bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; skipped`)
-        result.skipped.push(bundle)
-        continue
-      }
+    if (inspected.state === 'present' && !inspected.harnessOwned) {
+      recordError(result, inspected.bundle, 'not-harness-owned', false, `"${id}" bundle is not harness-owned; skipped`)
+      result.skipped.push(inspected.bundle)
+      continue
     }
     // stale candidates: every on-disk file absent from the entry; never auto-deleted
-    for (const rel of collectRelativeFiles(bundle, fsOps)) {
+    for (const rel of collectRelativeFiles(bundle, fsOps, '', inspected.state === 'present')) {
       if (targets[rel] === undefined) result.staleCandidates.push(rel)
     }
     for (const [rel, content] of Object.entries(targets)) {
@@ -294,12 +309,19 @@ export interface SkillBundleIssue {
   message: string
 }
 
-/** Parse the `name:` field out of a rendered SKILL.md frontmatter block; undefined when unparseable. */
-export function parseFrontmatterName(markdown: string): string | undefined {
+/** Extract the raw lines of a rendered SKILL.md frontmatter block; undefined when unparseable. */
+function frontmatterLines(markdown: string): string[] | undefined {
   if (!markdown.startsWith('---\n')) return undefined
   const end = markdown.indexOf('\n---', 4)
   if (end < 0) return undefined
-  for (const line of markdown.slice(4, end).split('\n')) {
+  return markdown.slice(4, end).split('\n')
+}
+
+/** Parse the `name:` field out of a rendered SKILL.md frontmatter block; undefined when unparseable. */
+export function parseFrontmatterName(markdown: string): string | undefined {
+  const lines = frontmatterLines(markdown)
+  if (lines === undefined) return undefined
+  for (const line of lines) {
     const match = /^name:\s*(.+)$/.exec(line)
     if (match) return match[1]!.trim()
   }
@@ -308,13 +330,12 @@ export function parseFrontmatterName(markdown: string): string | undefined {
 
 /** Parse the provenance fields out of a rendered SKILL.md frontmatter block; undefined when unparseable. */
 export function parseFrontmatterProvenance(markdown: string): { author?: string; source?: string } | undefined {
-  if (!markdown.startsWith('---\n')) return undefined
-  const end = markdown.indexOf('\n---', 4)
-  if (end < 0) return undefined
+  const lines = frontmatterLines(markdown)
+  if (lines === undefined) return undefined
   let inMetadata = false
   let author: string | undefined
   let source: string | undefined
-  for (const line of markdown.slice(4, end).split('\n')) {
+  for (const line of lines) {
     if (line === 'metadata:') {
       inMetadata = true
       continue
@@ -352,20 +373,12 @@ export function referencedFilePaths(content: string): string[] {
   return [...paths]
 }
 
-/** Every `scripts/` or `references/` path declared as a fenced-block target (```` ```scripts/x ````). */
-export function embeddedFilePaths(content: string): Set<string> {
-  const paths = new Set<string>()
-  for (const match of content.matchAll(/^```(?:scripts|references)\/[a-z0-9._-]+\s*$/gm)) {
-    paths.add(match[0].slice(3).trim())
-  }
-  return paths
-}
-
 /**
  * L2 structural-quality validation (design §7): id brevity, trigger-word
- * description, frontmatter name consistency, scripts/+references/ fenced-block
- * coverage, and body length. All findings are advisory — callers surface them
- * as a post-creation self-check report; they never reject a write.
+ * description, frontmatter name consistency, referenced-path coverage
+ * against the entry's `files` map, and body length. All findings are
+ * advisory — callers surface them as a post-creation self-check report;
+ * they never reject a write.
  */
 export function validateSkillBundle(entry: SkillEntryLike): SkillBundleIssue[] {
   const issues: SkillBundleIssue[] = []

@@ -263,6 +263,18 @@ function validatePlannerFiles(plan: { edits: ReadonlyArray<{ kind?: unknown; fil
   }
 }
 
+/** Project a MaterializationResult into the tool-output shape (snake_case keys). */
+function toToolMaterialization(materialization: MaterializationResult) {
+  return {
+    status: materialization.status,
+    written: materialization.written,
+    unchanged: materialization.unchanged,
+    skipped: materialization.skipped,
+    stale_candidates: materialization.staleCandidates,
+    errors: materialization.errors,
+  }
+}
+
 function summarize(
   id: string,
   scope: 'local' | 'global',
@@ -293,16 +305,7 @@ function summarize(
       ...(edit.reason === undefined ? {} : { reason: edit.reason }),
       ...(edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }),
     })),
-    ...(materialization === undefined ? {} : {
-      materialization: {
-        status: materialization.status,
-        written: materialization.written,
-        unchanged: materialization.unchanged,
-        skipped: materialization.skipped,
-        stale_candidates: materialization.staleCandidates,
-        errors: materialization.errors,
-      },
-    }),
+    ...(materialization === undefined ? {} : { materialization: toToolMaterialization(materialization) }),
   }
 }
 

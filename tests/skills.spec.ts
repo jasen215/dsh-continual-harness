@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  embeddedFilePaths,
   parseFrontmatterName,
   reconcileSkillFiles,
   defaultSkillFsOps,
@@ -304,7 +303,7 @@ describe('parseFrontmatterName / path helpers', () => {
     expect(parseFrontmatterName('---\nunterminated')).toBeUndefined()
   })
 
-  it('collects referenced and embedded scripts/references paths separately', () => {
+  it('collects referenced scripts/references paths', () => {
     const content = [
       '## Files',
       '- wrapper: `scripts/oq_quantize.py`',
@@ -317,7 +316,6 @@ describe('parseFrontmatterName / path helpers', () => {
       '```',
     ].join('\n')
     expect(referencedFilePaths(content)).toEqual(['scripts/oq_quantize.py', 'references/model_card_template.md'])
-    expect(embeddedFilePaths(content)).toEqual(new Set(['scripts/oq_quantize.py', 'references/model_card_template.md']))
   })
 })
 
