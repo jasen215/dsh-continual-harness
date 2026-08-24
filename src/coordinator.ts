@@ -205,12 +205,12 @@ function executionFromCommit(
  * Post-apply diagnostics hook (spec §4): runs at most once after a committed
  * refinement. Derives touched skill ids from the applied skill edits, reads
  * the effective post-apply skill entries once, and hands the runner a request
- * with those entries plus the commit's materialization report. A runner throw
- * becomes `failedAt: 'diagnostics'` with `diagnostics-failed` without touching
- * the already-produced commit status, counts, refinement, or materialization.
- * An abort immediately before diagnostics begins returns `aborted` with the
- * existing commit retained; an abort during the runner surfaces as the
- * runner's partial report instead.
+ * carrying those entries plus the refinement id, touched ids, and signal. A
+ * runner throw becomes `failedAt: 'diagnostics'` with `diagnostics-failed`
+ * without touching the already-produced commit status, counts, refinement, or
+ * materialization. An abort immediately before diagnostics begins returns
+ * `aborted` with the existing commit retained; an abort during the runner
+ * surfaces as the runner's partial report instead.
  */
 async function attachDiagnostics(
   options: RefineCoordinatorOptions,
@@ -231,10 +231,6 @@ async function attachDiagnostics(
       refinementId: committed.refinement.id,
       touchedSkillIds: touched,
       entries,
-      ...(committed.materialization === undefined ? {} : { materialization: committed.materialization }),
-      // The coordinator itself never requests security; the runner's
-      // construction decides whether its security provider is enabled.
-      enableSecurity: false,
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     })
     return { ...committed, diagnostics }
