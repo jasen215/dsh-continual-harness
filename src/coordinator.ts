@@ -1,8 +1,5 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { planRefinement, scopeInstruction } from './planner.ts'
 import type { Complete } from './planner.ts'
-import { historyForPrompt, overviewForPrompt } from './render.ts'
-import { mergeHarnessStates } from './storage.ts'
 import type { HarnessStore } from './store.ts'
 import type {
   AutoRefineReason,
@@ -12,15 +9,8 @@ import type {
   RefinementResult,
 } from './types.ts'
 
-/** Optional post-apply diagnostics contract, supplied by the diagnostics phase. */
-export interface PostApplyDiagnostics {
-  run(...args: never[]): Promise<DiagnosticReport>
-}
-
-/** Optional diagnostics report contract, supplied by the diagnostics phase. */
-export interface DiagnosticReport {
-  [key: string]: unknown
-}
+type DiagnosticReport = Record<string, unknown>
+type PostApplyDiagnostics = { run(...args: never[]): Promise<DiagnosticReport> }
 
 export type PlanRequest = {
   mode: 'plan'
@@ -87,7 +77,6 @@ export interface RefineCoordinator {
 export interface RefineCoordinatorOptions {
   store: HarnessStore
   completeFor: (agent: Agent) => Complete
-  requireGlobalApproval?: (agent: Agent, signal: AbortSignal | undefined, summary: string) => Promise<void>
   requireGlobalApprovalForTool?: boolean
   plannerContext?: (agent: Agent, scope: HarnessScope) => {
     baseline: HarnessState
@@ -110,7 +99,7 @@ function validateRequest(request: RefineRequest): string | undefined {
     return undefined
   }
   if (request.mode === 'rollback') {
-    if ((request.source !== 'tool' && request.source !== 'command') || request.rollbackId.trim() === '') {
+    if ((request.source !== 'tool' && request.source !== 'command') || typeof request.rollbackId !== 'string' || request.rollbackId.trim() === '') {
       return 'rollbackId and an explicit tool/command source are required'
     }
     return undefined
@@ -122,11 +111,7 @@ function emptyResult(approval: RefineExecutionResult['approval'] = 'not-required
   return { commitStatus: 'not-committed', approval, appliedCount: 0, rejectedCount: 0 }
 }
 
-export function createRefineCoordinator(options: RefineCoordinatorOptions): RefineCoordinator {
-  const approval = options.requireGlobalApproval ?? (async () => {
-    throw new Error('global approval is unavailable')
-  })
-
+export function createRefineCoordinator(_options: RefineCoordinatorOptions): RefineCoordinator {
   return {
     async execute(request) {
       const validationError = validateRequest(request)
@@ -138,35 +123,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         }
       }
 
-      if (request.mode !== 'plan') return emptyResult()
-      const context = options.plannerContext?.(request.agent, request.scope) ?? (() => {
-        const local = options.store.localState(request.agent)
-        const global = options.store.globalState()
-        const baseline = mergeHarnessStates(global, local)
-        return {
-          baseline,
-          stateOverview: overviewForPrompt(baseline),
-          historyText: historyForPrompt(options.store.history(request.agent)),
-          trajectoryText: options.store.trajectory(request.agent),
-        }
-      })()
-
-      try {
-        const instructions = request.source === 'automatic'
-          ? `${request.instructions ? `${request.instructions}\n\n` : ''}Trigger: ${request.automaticContext.reason}. Gate rationale: ${request.automaticContext.reviewRationale}`
-          : request.instructions
-        const proposal = await planRefinement({
-          stateOverview: context.stateOverview,
-          historyText: context.historyText,
-          trajectoryText: context.trajectoryText,
-          scopeInstruction: scopeInstruction(request.scope === 'global'),
-          ...(instructions === undefined ? {} : { instructions }),
-        }, options.completeFor(request.agent), request.signal)
-        if (proposal.edits.length === 0) return emptyResult()
-      } catch (error) {
-        return { ...emptyResult(), failedAt: 'planning', error: { code: 'planning-failed', message: String(error) } }
-      }
-          void approval
+      // Planning and execution are introduced by later coordinator phases.
       return emptyResult()
     },
   }

@@ -155,11 +155,43 @@ describe('createRefineCoordinator', () => {
     const coordinator = createRefineCoordinator({ store, completeFor: cannedComplete({ id: 'p', summary: 'none', edits: [] }) })
     const result = await coordinator.execute(planRequest('local', 'tool'))
     expect(result).toMatchObject({ commitStatus: 'not-committed', appliedCount: 0, rejectedCount: 0 })
+    expect(store.localState).not.toHaveBeenCalled()
+    expect(store.globalState).not.toHaveBeenCalled()
+    expect(store.history).not.toHaveBeenCalled()
+    expect(store.trajectory).not.toHaveBeenCalled()
     expect(store.applyRefinement).not.toHaveBeenCalled()
   })
 
-  it('keeps real-store fixture helpers available for coordinator scenarios', () => {
-    expect(realStoreWithHistory).toBeTypeOf('function')
-    expect(delayedStore).toBeTypeOf('function')
+  it('rejects rollback requests with a non-string rollbackId', async () => {
+    const store = fakeStore()
+    const coordinator = createRefineCoordinator({ store, completeFor: cannedComplete('{}') })
+    const result = await coordinator.execute({
+      mode: 'rollback', source: 'tool', scope: 'local', agent: agent(), rollbackId: 42,
+    } as never)
+    expect(result).toMatchObject({
+      commitStatus: 'not-committed', approval: 'not-required', appliedCount: 0, rejectedCount: 0,
+      failedAt: 'validation', error: { code: 'invalid-request' },
+    })
+    expect(store.localState).not.toHaveBeenCalled()
+    expect(store.globalState).not.toHaveBeenCalled()
+    expect(store.history).not.toHaveBeenCalled()
+    expect(store.trajectory).not.toHaveBeenCalled()
+    expect(store.applyRefinement).not.toHaveBeenCalled()
+  })
+
+  it('real-store fixture records a seed refinement', () => {
+    const { store, agent: liveAgent } = realStoreWithHistory()
+    expect(store.history(liveAgent)).toHaveLength(1)
+    expect(store.history(liveAgent)[0]?.id).toBe('seed')
+  })
+
+  it('delayed-store fixture records commits without overlap', async () => {
+    const store = delayedStore()
+    await Promise.all([
+      store.applyRefinement(agent('first'), { id: 'first', summary: 'first', edits: [] }, {}),
+      store.applyRefinement(agent('second'), { id: 'second', summary: 'second', edits: [] }, {}),
+    ])
+    expect(store.commitOrder()).toEqual(['first', 'second'])
+    expect(store.commitOverlap()).toBeGreaterThan(1)
   })
 })
