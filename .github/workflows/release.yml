@@ -35,6 +35,13 @@ jobs:
             echo "::error::tag $TAG does not match package version $VER"
             exit 1
           fi
+      - name: Verify tag commit is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${{ github.ref_name }} points to a commit not on main; merge the code first, then re-tag on main"
+            exit 1
+          fi
       # Trusted publishing (OIDC) — no long-lived NODE_AUTH_TOKEN required;
       # npm >= 11.5.1 exchanges the Actions OIDC token for a short-lived
       # publish credential and attaches provenance automatically.
