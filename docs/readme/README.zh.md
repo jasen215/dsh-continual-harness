@@ -141,7 +141,7 @@ dsh plugin --profile <name> add dsh-continual-harness
 **`/refine`** —— 与工具同语义，面向人工输入：
 
 ```sh
-/refine --local 聚焦未决问题
+/refine --local 帮我整理记忆
 /refine --global <指令>
 /refine rollback <id> --local
 /refine rollback <id> --global
