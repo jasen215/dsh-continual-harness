@@ -415,6 +415,7 @@ describe('createRefineCoordinator', () => {
         ...refinementResult('r'),
         appliedEdits: [
           { action: 'create', kind: 'skill', id: 'one', applied: true, blastRadius: 'general' },
+          { action: 'update', kind: 'skill', id: 'one', applied: true, blastRadius: 'general' },
           { action: 'create', kind: 'memory', id: 'm1', applied: true, blastRadius: 'general' },
         ],
       }))

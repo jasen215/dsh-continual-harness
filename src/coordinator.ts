@@ -205,12 +205,12 @@ function executionFromCommit(
  * Post-apply diagnostics hook (spec §4): runs at most once after a committed
  * refinement. Derives touched skill ids from the applied skill edits, reads
  * the effective post-apply skill entries once, and hands the runner a request
- * carrying those entries plus the refinement id, touched ids, and signal. A
- * runner throw becomes `failedAt: 'diagnostics'` with `diagnostics-failed`
- * without touching the already-produced commit status, counts, refinement, or
- * materialization. An abort immediately before diagnostics begins returns
- * `aborted` with the existing commit retained; an abort during the runner
- * surfaces as the runner's partial report instead.
+ * carrying those entries plus the refinement id, touched ids, and signal. An
+ * effective-state read or runner throw becomes `failedAt: 'diagnostics'` with
+ * `diagnostics-failed` without touching the already-produced commit status,
+ * counts, refinement, or materialization. An abort immediately before
+ * diagnostics begins returns `aborted` with the existing commit retained; an
+ * abort during the runner surfaces as the runner's partial report instead.
  */
 async function attachDiagnostics(
   options: RefineCoordinatorOptions,
@@ -221,12 +221,12 @@ async function attachDiagnostics(
   if (request.signal?.aborted) {
     return { ...committed, failedAt: 'diagnostics', error: { code: 'aborted', message: 'refinement request aborted' } }
   }
-  const touched = touchedSkillIds(committed.refinement.appliedEdits)
-  // Providers iterate only touched ids; skip the merged-state read when nothing was touched.
-  const entries = touched.length === 0
-    ? {} as Record<string, SkillEntry>
-    : options.store.state(request.agent).entries.skill as Record<string, SkillEntry>
+  const touched = touchedSkillIds(committed.refinement.appliedEdits ?? [])
   try {
+    // Providers iterate only touched ids; skip the merged-state read when nothing was touched.
+    const entries = touched.length === 0
+      ? {} as Record<string, SkillEntry>
+      : options.store.state(request.agent).entries.skill as Record<string, SkillEntry>
     const diagnostics = await options.diagnostics.run({
       refinementId: committed.refinement.id,
       touchedSkillIds: touched,

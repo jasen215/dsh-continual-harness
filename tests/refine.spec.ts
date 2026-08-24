@@ -3,6 +3,7 @@ import {
   applyRefinementProposal,
   freshState,
   rollbackProposal,
+  touchedSkillIds,
   validateEdit,
 } from '../src/refine.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from '../src/skills.ts'
@@ -564,5 +565,17 @@ describe('rollbackProposal', () => {
     })
     expect(reverted.entries.memory['a']).toBeUndefined()
     expect(reverted.entries.memory['b']).toBeUndefined()
+  })
+})
+
+describe('touchedSkillIds', () => {
+  it('returns applied skill edit ids in order, deduplicated', () => {
+    expect(touchedSkillIds([
+      { applied: true, kind: 'skill', id: 's1' },
+      { applied: false, kind: 'skill', id: 'rejected' },
+      { applied: true, kind: 'skill', id: 's1' },
+      { applied: true, kind: 'memory', id: 'm1' },
+      { applied: true, kind: 'skill', id: 's2' },
+    ])).toEqual(['s1', 's2'])
   })
 })

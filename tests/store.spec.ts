@@ -296,6 +296,31 @@ describe('HarnessStore', () => {
     expect(existsSync(bundle)).toBe(true)
   })
 
+  it('materializes a repeated skill touch once', () => {
+    const root = tempHome()
+    const ctx = new Context()
+    const store = new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    const { agent } = stubAgent('repeated-skill-touch')
+
+    store.applyRefinement(agent, {
+      id: 'seed_repeated_skill',
+      summary: 'seed skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'repeat-demo', content: 'before', description: 'Use repeat demo' }],
+    }, { global: true })
+    const result = store.applyRefinement(agent, {
+      id: 'update_repeated_skill',
+      summary: 'update skill twice',
+      edits: [
+        { action: 'update', kind: 'skill', id: 'repeat-demo', content: 'after', reason: 'first update' },
+        { action: 'update', kind: 'skill', id: 'repeat-demo', content: 'after', reason: 'second update' },
+      ],
+    }, { global: true })
+
+    expect(result.appliedEdits.filter(edit => edit.applied)).toHaveLength(2)
+    expect(result.materialization.written).toHaveLength(1)
+    expect(result.materialization.unchanged).toHaveLength(0)
+  })
+
   it('materializes a skill bundle with files and returns a completed materialization', () => {
     const root = tempHome()
     const ctx = new Context()

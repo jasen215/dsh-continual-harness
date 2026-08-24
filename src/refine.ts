@@ -357,7 +357,10 @@ export function applyRefinementProposal(
 
 /** Skill entries touched by applied edits; shared by materialization and post-apply diagnostics. */
 export function touchedSkillIds(appliedEdits: Array<Pick<AppliedRefinementEdit, 'applied' | 'kind' | 'id'>>): string[] {
-  return appliedEdits.filter(edit => edit.applied && edit.kind === 'skill').map(edit => edit.id)
+  const ids = appliedEdits.filter(edit => edit.applied && edit.kind === 'skill').map(edit => edit.id)
+  // Preserve first occurrence order while ensuring each touched skill is
+  // diagnosed and materialized at most once.
+  return [...new Set(ids)]
 }
 
 /** Revert a committed result: reverse edit order, restoring full entries from
