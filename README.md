@@ -151,7 +151,7 @@ Two entry points: the `harness_refine` tool (LLM-callable) and the `/refine` sla
 **`/refine`** — same semantics, human-typed:
 
 ```sh
-/refine --local 帮我整理记忆
+/refine --local organize my memories
 /refine --global <instructions>
 /refine rollback <id> --local
 /refine rollback <id> --global
