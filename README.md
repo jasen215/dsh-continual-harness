@@ -144,20 +144,11 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 
 ## Refining
 
-Two entry points run the same `RefineCoordinator`: the `harness_refine` tool (callable by the LLM) and the optional `/refine` slash command (registered only when the host provides a `commands` capability — DSH Desktop gets one via `@deepseek-ai/dsh-base` → `@deepseek-ai/dsh-commands`).
+Two entry points: the `harness_refine` tool (LLM-callable) and the `/refine` slash command (when the host provides a `commands` capability).
 
-### Tool: `harness_refine`
+**`harness_refine`** — `mode: 'plan'` (default) plans from instructions and commits atomically; `mode: 'rollback'` takes a `rollbackId` plus an explicit `--local` / `--global` scope to revert a committed refinement. Global writes require human approval when `requireGlobalApproval` is `true`.
 
-Call with `mode: 'plan'` (default) or `mode: 'rollback'`:
-
-- **plan** — the LLM planner builds a proposal from your instructions; validated edits commit atomically
-- **rollback** — pass `rollbackId` plus an explicit `--local` / `--global` scope to revert a committed refinement
-
-Global writes may require explicit human approval when `requireGlobalApproval` is `true`. The result reports `status` (`committed` / `rejected` / `validation` / `commit-failed`), applied/rejected counts, the refinement id, and a diagnostics report when enabled.
-
-### Command: `/refine`
-
-Same semantics as the tool, in a human-typed form. Examples:
+**`/refine`** — same semantics, human-typed:
 
 ```sh
 /refine --local focus on the open questions
@@ -166,11 +157,7 @@ Same semantics as the tool, in a human-typed form. Examples:
 /refine rollback <id> --global
 ```
 
-Bare `/refine` plans with no instructions in the configured default scope. Output mirrors the tool result: `status`, `scope`, `refinement`, `applied`, `rejected`, `summary`, plus a `diagnostics:` line when enabled.
-
-### Post-apply diagnostics
-
-After every commit, structural (L2) and optional security providers run in isolation (`Promise.allSettled`), and their report never changes the committed status. `diagnosticsEnabled` (default `true`) toggles the runner; `securityEnabled` (default `false`) enables the local credential-pattern scanner.
+Bare `/refine` plans with no instructions in the default scope. Output: `status`, `scope`, `refinement`, `applied`, `rejected`, `summary`, plus a `diagnostics:` line when enabled.
 
 ## Governance
 

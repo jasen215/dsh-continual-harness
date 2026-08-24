@@ -134,20 +134,11 @@ dsh plugin --profile <name> add dsh-continual-harness
 
 ## 精修（Refining）
 
-两个入口共用同一个 `RefineCoordinator`：`harness_refine` 工具（LLM 可调用）与可选的 `/refine` 斜杠命令（仅当宿主提供 `commands` 能力时注册——DSH Desktop 通过 `@deepseek-ai/dsh-base` → `@deepseek-ai/dsh-commands` 获得）。
+两个入口：`harness_refine` 工具（LLM 调用）与 `/refine` 斜杠命令（宿主提供 `commands` 能力时可用）。
 
-### 工具：`harness_refine`
+**`harness_refine`** —— `mode: 'plan'`（默认）按指令规划并原子提交；`mode: 'rollback'` 传入 `rollbackId` 并显式指定 `--local` / `--global` 作用域，回滚已提交的精修。`requireGlobalApproval: true` 时全局写入需人工审批。
 
-以 `mode: 'plan'`（默认）或 `mode: 'rollback'` 调用：
-
-- **plan** —— LLM 规划器根据你的指令生成提案；通过校验的 edits 原子提交
-- **rollback** —— 传入 `rollbackId` 并显式指定 `--local` / `--global` 作用域，回滚已提交的精修
-
-当 `requireGlobalApproval` 为 `true` 时，全局写入需要显式人工审批。结果包含 `status`（`committed` / `rejected` / `validation` / `commit-failed`）、applied/rejected 计数、精修 id，以及启用时的诊断报告。
-
-### 命令：`/refine`
-
-与工具语义相同，面向人工输入。示例：
+**`/refine`** —— 与工具同语义，面向人工输入：
 
 ```sh
 /refine --local 聚焦未决问题
@@ -156,11 +147,7 @@ dsh plugin --profile <name> add dsh-continual-harness
 /refine rollback <id> --global
 ```
 
-裸 `/refine` 以默认作用域规划、无指令。输出与工具一致：`status`、`scope`、`refinement`、`applied`、`rejected`、`summary`，启用时附 `diagnostics:` 行。
-
-### 提交后诊断
-
-每次提交后，结构化（L2）与可选的 security 提供方在隔离中运行（`Promise.allSettled`），其报告不会改变已提交状态。`diagnosticsEnabled`（默认 `true`）开关诊断运行器；`securityEnabled`（默认 `false`）启用本地凭据模式扫描。
+裸 `/refine` 以默认作用域规划。输出：`status`、`scope`、`refinement`、`applied`、`rejected`、`summary`，启用时附 `diagnostics:` 行。
 
 ## 治理（Governance）
 
