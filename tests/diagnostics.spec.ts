@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { createDiagnosticRunner, structuralProvider } from '../src/diagnostics.ts'
 import type {
   DiagnosticRequest,
-  MaterializationResult,
   SkillBundleIssue,
   SkillEntry,
 } from '../src/types.ts'
@@ -18,33 +17,32 @@ function skillEntry(id: string, content = 'body', description?: string): SkillEn
   }
 }
 
-function emptyMaterialization(): MaterializationResult {
-  return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
-}
-
 function request(overrides: Partial<DiagnosticRequest> = {}): DiagnosticRequest {
   return {
     refinementId: 'r',
     touchedSkillIds: ['one'],
     entries: { one: skillEntry('one') },
-    materialization: emptyMaterialization(),
-    enableSecurity: true,
     ...overrides,
   }
 }
 
 describe('createDiagnosticRunner', () => {
-  it('diagnoses only touched skills and embeds materialization', async () => {
-    const structural = vi.fn(async (req: DiagnosticRequest) => req.touchedSkillIds.map(skillId => ({ skillId, code: 'ok', message: 'valid' })))
-    const report = await createDiagnosticRunner({ structural: { name: 'structural', run: structural }, enableSecurity: false }).run({
+  it('returns only diagnostics fields and preserves touched filtering', async () => {
+    const structural = vi.fn(async (req: DiagnosticRequest) =>
+      req.touchedSkillIds.map(skillId => ({ skillId, code: 'ok', message: 'valid' })),
+    )
+    const report = await createDiagnosticRunner({
+      structural: { name: 'structural', run: structural },
+      enableSecurity: false,
+    }).run({
       refinementId: 'r',
       touchedSkillIds: ['one'],
       entries: { one: skillEntry('one'), untouched: skillEntry('untouched') },
-      materialization: emptyMaterialization(),
-      enableSecurity: false,
     })
+
+    expect(report).toEqual({ status: 'completed', structural: [{ skillId: 'one', code: 'ok', message: 'valid' }], security: [], errors: [] })
+    expect(report).not.toHaveProperty('materialization')
     expect(structural).toHaveBeenCalledWith(expect.objectContaining({ touchedSkillIds: ['one'] }))
-    expect(report).toMatchObject({ status: 'completed', materialization: emptyMaterialization(), security: [], errors: [] })
   })
 
   it('keeps one provider result when the other provider fails', async () => {
@@ -96,30 +94,16 @@ describe('createDiagnosticRunner', () => {
     expect(structural).toHaveBeenCalledWith(expect.objectContaining({ touchedSkillIds: [] }))
   })
 
-  it('carries a failed materialization through unchanged without failing the report', async () => {
-    const failed: MaterializationResult = {
-      ...emptyMaterialization(),
-      status: 'failed',
-      errors: [{ code: 'write-failed', retryable: true, message: 'boom' }],
-    }
-    const report = await createDiagnosticRunner({
-      structural: { name: 'structural', run: async () => [] },
-      enableSecurity: false,
-    }).run(request({ materialization: failed }))
-    expect(report.status).toBe('completed')
-    expect(report.materialization).toBe(failed)
-  })
-
-  it('records a tagged budget error with its own code', async () => {
-    const budgetError = Object.assign(new Error('provider exceeded input budget'), { code: 'budget-exceeded' })
+  it('preserves provider error codes', async () => {
+    const scannerError = Object.assign(new Error('provider exceeded input budget'), { code: 'scanner-limit' })
     const report = await createDiagnosticRunner({
       structural: { name: 'structural', run: async () => [{ skillId: 's', code: 'ok', message: 'ok' }] },
-      security: { name: 'security', run: async () => { throw budgetError } },
+      security: { name: 'security', run: async () => { throw scannerError } },
       enableSecurity: true,
     }).run(request())
     expect(report.status).toBe('partial')
     expect(report.structural).toHaveLength(1)
-    expect(report.errors).toEqual([{ provider: 'security', code: 'budget-exceeded', message: 'provider exceeded input budget' }])
+    expect(report.errors).toEqual([{ provider: 'security', code: 'scanner-limit', message: 'provider exceeded input budget' }])
   })
 })
 
@@ -134,7 +118,6 @@ describe('structuralProvider', () => {
         'bad-content': skillEntry('bad-content', 'body without description'),
         untouched: { ...skillEntry('untouched'), files: { '../evil': 'x' } },
       },
-      enableSecurity: false,
     })
     const codes = report.structural.map(issue => issue.code)
     expect(codes).toContain('entry-missing')

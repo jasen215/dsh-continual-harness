@@ -5,6 +5,7 @@
  * @module dsh-continual-harness
  */
 
+import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { RefinementResult } from './types.ts'
 
 /** Directory name of a harness store. */
@@ -35,6 +36,21 @@ export const BENCHMARK_RUNS_FILE_NAME = 'runs.jsonl'
 export const BENCHMARK_SNAPSHOTS_DIR_NAME = 'snapshots'
 /** Monotonic schema version of the benchmark cases file. */
 export const BENCHMARK_CASES_SCHEMA_VERSION = 1
+
+/**
+ * Register a plugin-owned session event type with the persistence read path.
+ * The harness core's generated KNOWN_SESSION_EVENT_TYPES only contains
+ * in-repo vocabulary, and a reader meeting an unrecognized non-ignorable
+ * type refuses the whole log (SessionFormatUnsupportedError). The runtime
+ * Set is shared with dsh-session-persistence, so registering the type keeps
+ * logs containing it readable — needed for legacy logs written without the
+ * `ignorable` marker. Current builds only write out-of-repo events with
+ * `ignorable: true`, so this registration can be dropped once legacy logs
+ * age out.
+ */
+export function registerSessionEventType(type: string): void {
+  (KNOWN_SESSION_EVENT_TYPES as Set<string>).add(type)
+}
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {

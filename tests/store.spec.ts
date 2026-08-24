@@ -110,7 +110,7 @@ describe('HarnessStore', () => {
     expect(store.usageStatsFor('global:memory:fact')?.injectionCount).toBe(1)
   })
 
-  it('applies a refinement locally: state file, session event, and merged view', () => {
+  it('applies a refinement locally: state file, merged view, and history from the store', () => {
     const ctx = new Context()
     const store = testStore(ctx, tempHome())
     const { agent, session } = stubAgent('agent-1')
@@ -121,7 +121,11 @@ describe('HarnessStore', () => {
     }
     const result = store.applyRefinement(agent, plan, {})
     expect(result.scope).toBe('local')
-    expect(session.events.some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(true)
+    // The harness core's generated vocabulary does not include the out-of-repo
+    // harness/refinement type, so the informational session event is omitted
+    // (a reader would otherwise refuse the whole log); history() reads the
+    // on-disk store instead.
+    expect(session.events.some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(false)
     expect(store.state(agent).entries.memory['fact']?.content).toBe('durable')
     expect(store.history(agent).map(entry => entry.id)).toEqual(['refine_1'])
   })
@@ -294,6 +298,31 @@ describe('HarnessStore', () => {
       edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: false, reason: 'restore' }],
     }, {})
     expect(existsSync(bundle)).toBe(true)
+  })
+
+  it('materializes a repeated skill touch once', () => {
+    const root = tempHome()
+    const ctx = new Context()
+    const store = new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    const { agent } = stubAgent('repeated-skill-touch')
+
+    store.applyRefinement(agent, {
+      id: 'seed_repeated_skill',
+      summary: 'seed skill',
+      edits: [{ action: 'create', kind: 'skill', id: 'repeat-demo', content: 'before', description: 'Use repeat demo' }],
+    }, { global: true })
+    const result = store.applyRefinement(agent, {
+      id: 'update_repeated_skill',
+      summary: 'update skill twice',
+      edits: [
+        { action: 'update', kind: 'skill', id: 'repeat-demo', content: 'after', reason: 'first update' },
+        { action: 'update', kind: 'skill', id: 'repeat-demo', content: 'after', reason: 'second update' },
+      ],
+    }, { global: true })
+
+    expect(result.appliedEdits.filter(edit => edit.applied)).toHaveLength(2)
+    expect(result.materialization.written).toHaveLength(1)
+    expect(result.materialization.unchanged).toHaveLength(0)
   })
 
   it('materializes a skill bundle with files and returns a completed materialization', () => {

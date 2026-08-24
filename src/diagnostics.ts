@@ -47,8 +47,7 @@ function providerError(reason: unknown): { code: string; message: string } {
  * findings. Successful findings are preserved, failures become
  * `{ provider, code, message }` errors, and the report is `partial` when at
  * least one enabled provider failed or the signal was aborted. With no enabled
- * provider the report is `disabled` rather than an empty success. The
- * `materialization` field is carried through unchanged.
+ * provider the report is `disabled` rather than an empty success.
  */
 export function createDiagnosticRunner(options: DiagnosticRunnerOptions): DiagnosticRunner {
   return {
@@ -69,7 +68,6 @@ export function createDiagnosticRunner(options: DiagnosticRunnerOptions): Diagno
           status: 'disabled',
           structural: [],
           security: [],
-          ...(request.materialization === undefined ? {} : { materialization: request.materialization }),
           errors: [],
         }
       }
@@ -78,7 +76,6 @@ export function createDiagnosticRunner(options: DiagnosticRunnerOptions): Diagno
         status: 'completed',
         structural: [],
         security: [],
-        ...(request.materialization === undefined ? {} : { materialization: request.materialization }),
         errors: [],
       }
       let failed = false

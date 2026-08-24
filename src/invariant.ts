@@ -1,13 +1,15 @@
 /**
- * Invariant companion of the plugin: audits the durable harness/refinement
- * event stream and the on-disk store after every commit, so a corrupt record
- * cannot silently poison the refinement history.
+ * Invariant companion of the plugin: audits every committed refinement
+ * result, so a corrupt record cannot silently poison the refinement history.
+ * The audit rides the plugin's own scoped `harness/refined` emit (which fires
+ * on every commit regardless of whether the optional `harness/refinement`
+ * session event was written), so it works whether or not the running harness
+ * recognizes the plugin's out-of-repo event type.
  * @module dsh-continual-harness
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 
 const PACKAGE_NAME = 'dsh-continual-harness'
 
@@ -41,27 +43,29 @@ function validateRefinement(value: unknown): string | undefined {
 }
 
 /**
- * Install the companion: defer a validation check until the session's commit
- * feed settles, then fail the invariant when any committed refinement record
- * is malformed. On-disk state is self-healing (storage.ts degrades corrupt
- * files to empty), so only the durable event stream needs the audit.
+ * Install the companion: defer a validation check until the commit feed
+ * settles, then fail the invariant when any committed refinement result is
+ * malformed. The scoped `harness/refined` event is emitted by the store on
+ * every commit (session event write or not), so `global: true` listens across
+ * all agents; on-disk state is self-healing (storage.ts degrades corrupt
+ * files to empty), so the live result is the audit target.
  */
 export const install: InvariantInstaller = Object.assign((_ctx: Context, fail: InvariantFailure) => {
-  const pending: Array<{ sessionId: string; event: { type: string; data: unknown } }> = []
+  const pending: Array<{ sessionId: string; result: unknown }> = []
 
-  _ctx.on('session/event', (session, event) => {
-    if (event.type !== HARNESS_REFINEMENT_EVENT) return
-    pending.push({ sessionId: String(session.id), event })
+  _ctx.on('harness/refined', (payload) => {
+    const { agent, result } = payload
+    pending.push({ sessionId: String(agent.session.id), result })
     queueMicrotask(() => {
       const staged = pending.splice(0)
       for (const record of staged) {
-        const problem = validateRefinement(record.event.data)
+        const problem = validateRefinement(record.result)
         if (problem) {
-          fail(`session ${record.sessionId} committed a malformed ${HARNESS_REFINEMENT_EVENT} event: ${problem}`)
+          fail(`session ${record.sessionId} committed a malformed refinement result: ${problem}`)
         }
       }
     })
-  })
+  }, { global: true })
 }, { inject: [] })
 
 /**
