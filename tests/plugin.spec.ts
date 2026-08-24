@@ -724,6 +724,33 @@ describe('post-apply diagnostics wiring', () => {
     expect(issue?.code).toBe('secret-exposure')
     expect(issue?.severity).toBe('high')
   })
+
+  it('does not invoke the security provider when securityEnabled is false', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    // The same credential-like body the securityEnabled: true test flags must
+    // produce no finding here: securityEnabled gates the provider at runner
+    // construction, so the local provider is never wired in to run.
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_secret_off',
+      summary: 'create a skill with a secret',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'secret-demo-off',
+        description: 'Use whenever handling tokens',
+        content: '## Steps\n1. Call the API with sk-abcdef1234567890abcdef1234567890',
+      }],
+    }) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const json = resultJson(await execute(ctx, 'harness_refine', { global: true }, stubAgent('diag-sec-off').agent))
+    expect(json.applied).toBe(1)
+    const diagnostics = json.diagnostics as { status: string; security: Array<Record<string, unknown>> }
+    expect(diagnostics.status).toBe('completed')
+    expect(diagnostics.security).toEqual([])
+  })
 })
 
 describe('harness_refine bundle materialization result', () => {
