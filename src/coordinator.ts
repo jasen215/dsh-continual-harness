@@ -1,6 +1,8 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import type { Complete } from './planner.ts'
+import { validateEdit } from './refine.ts'
+import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
@@ -81,7 +83,6 @@ export interface RefineCoordinatorOptions {
   store: HarnessStore
   completeFor: (agent: Agent) => Complete
   maxTrajectoryChars?: number
-  plannerMaxTokens?: number
   requireGlobalApproval?: (agent: Agent, signal: AbortSignal | undefined, summary: string) => Promise<void>
   requireGlobalApprovalForTool?: boolean
   plannerContext?: (agent: Agent, scope: HarnessScope) => {
@@ -178,6 +179,15 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         return errorResult('planning', code, message)
       }
       if (!isProposal(proposal)) return errorResult('planning', 'invalid-proposal', 'malformed refinement proposal')
+      const invalidEdit = proposal.edits.find(edit => {
+        if (typeof edit !== 'object' || edit === null) return true
+        try {
+          return validateEdit(edit as RefinementEdit) !== undefined
+        } catch {
+          return true
+        }
+      })
+      if (invalidEdit !== undefined) return errorResult('planning', 'invalid-proposal', 'malformed refinement edit')
       if (request.signal?.aborted) return errorResult('planning', 'aborted', 'refinement request aborted')
       if (proposal.edits.length === 0) return emptyResult()
 
