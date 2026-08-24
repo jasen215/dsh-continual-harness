@@ -13,7 +13,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
-import { applyRefinementProposal, entryToEditFields, rollbackProposal } from './refine.ts'
+import { applyRefinementProposal, entryToEditFields, rollbackProposal, touchedSkillIds } from './refine.ts'
 import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills.ts'
 import type { SkillBundleLimits } from './skills.ts'
@@ -266,9 +266,7 @@ export class HarnessStore {
    * never failed (spec §7.5/§7.7).
    */
   private materializeSkills(agent: Agent, result: RefinementResult): MaterializationResult {
-    const touched = result.appliedEdits
-      .filter(edit => edit.applied && edit.kind === 'skill')
-      .map(edit => edit.id)
+    const touched = touchedSkillIds(result.appliedEdits)
     if (touched.length === 0) {
       return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
     }

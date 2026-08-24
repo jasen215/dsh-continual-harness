@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
@@ -12,9 +12,11 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { captureReferenceSnapshot, loadBenchmark, loadReferenceSnapshot } from '../src/benchmark.ts'
 import type { BenchmarkDecision, ExecutorEvidence } from '../src/benchmark.ts'
+import type { RefineCoordinator } from '../src/coordinator.ts'
 import { HarnessStore } from '../src/store.ts'
-import { registerBenchmarkTool } from '../src/tool.ts'
-import type { BenchmarkToolOptions } from '../src/tool.ts'
+import { registerBenchmarkTool, registerHarnessTool } from '../src/tool.ts'
+import type { BenchmarkToolOptions, ToolOptions } from '../src/tool.ts'
+import type { MaterializationResult, RefinementResult } from '../src/types.ts'
 
 const testToolSignal = new AbortController().signal
 const tempDirs: string[] = []
@@ -56,6 +58,62 @@ function stubAgent(rawId: string): StubAgent {
     whenIdle() { return Promise.resolve() },
   }
   return { agent, session }
+}
+
+/** A bare live agent for coordinator-adapter tests (no registry involved). */
+function agent(id = 'tool-coordinator-agent'): Agent {
+  const session = Session.create(SessionId(id))
+  return {
+    id: session.id,
+    options: { provider: 'test-provider', model: 'test-model' },
+    session,
+    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    get status() { return 'running' as const },
+    ctx: new Context(),
+    send: () => {},
+    followup: () => {},
+    steer: () => ({ outcome: Promise.resolve({ status: 'rejected' as const }) }),
+    inject: () => {},
+    cancel() {},
+    runMaintenance: task => task(new AbortController().signal),
+    whenIdle() { return Promise.resolve() },
+  }
+}
+
+function emptyMaterialization(): MaterializationResult {
+  return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
+}
+
+function refinementResult(id: string, edits: RefinementResult['appliedEdits'] = []): RefinementResult & { materialization: MaterializationResult } {
+  return {
+    id,
+    summary: id,
+    appliedEdits: edits,
+    committedAt: new Date().toISOString(),
+    scope: 'global',
+    materialization: emptyMaterialization(),
+  }
+}
+
+/** Mount the tools service and register harness_refine over one fake coordinator. */
+async function mountRefineTool(coordinator: RefineCoordinator, options: ToolOptions): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(ToolRuntime)
+  registerHarnessTool(ctx, coordinator, options)
+  return ctx
+}
+
+/** Execute the harness_refine tool through the live agent. */
+async function executeTool(ctx: Context, name: string, args: unknown, liveAgent: Agent): Promise<ToolExecutionResult> {
+  return ctx.tools.execute({
+    signal: testToolSignal,
+    callId: CallId(`call-${Math.random()}`),
+    name,
+    arguments: args,
+    agent: liveAgent,
+  })
 }
 
 /** Default benchmark tool options mirroring the spec §5 defaults. */
@@ -540,5 +598,150 @@ describe('harness_benchmark status', () => {
     expect(json.snapshots).toEqual([])
     expect(json.recent_runs).toEqual([])
     expect(existsSync(join(home, 'benchmark'))).toBe(false)
+  })
+})
+
+describe('harness_refine coordinator adapter', () => {
+  it('maps tool arguments to one coordinator request and preserves domain counts', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed-with-rejected-edits' as const,
+      approval: 'approved' as const,
+      appliedCount: 2,
+      rejectedCount: 1,
+      refinement: refinementResult('r-tool'),
+      materialization: emptyMaterialization(),
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const result = await executeTool(ctx, 'harness_refine', { instructions: 'focus', global: true }, agent())
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ mode: 'plan', source: 'tool', scope: 'global', instructions: 'focus' }))
+    expect(execute.mock.calls[0]?.[0]?.signal).toBe(testToolSignal)
+    expect(resultJson(result)).toMatchObject({ refinement_id: 'r-tool', scope: 'global', applied: 2, failed: 1 })
+  })
+
+  it('maps a rollback_id to one rollback request and preserves the refinement id', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('rollback_refine_x'),
+      materialization: emptyMaterialization(),
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const result = await executeTool(ctx, 'harness_refine', { rollback_id: 'refine_x', global: true }, agent())
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ mode: 'rollback', source: 'tool', scope: 'global', rollbackId: 'refine_x' }))
+    expect(resultJson(result)).toMatchObject({ refinement_id: 'rollback_refine_x', scope: 'global', applied: 1, failed: 0 })
+  })
+
+  it('reports refinement_id none for a not-committed result and resolves the default scope', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'not-committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 0,
+      rejectedCount: 0,
+      error: { code: 'approval-rejected' as const, message: 'global write not approved' },
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const result = await executeTool(ctx, 'harness_refine', {}, agent())
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ mode: 'plan', source: 'tool', scope: 'global' }))
+    expect(execute.mock.calls[0]?.[0]).not.toHaveProperty('instructions')
+    expect(resultJson(result)).toMatchObject({
+      refinement_id: 'none',
+      scope: 'global',
+      summary: 'global write not approved',
+      applied: 0,
+      failed: 0,
+      edits: [],
+    })
+  })
+
+  it('includes coordinator diagnostics in the tool output without changing committed counts', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('r'),
+      materialization: emptyMaterialization(),
+      diagnostics: {
+        status: 'partial' as const,
+        structural: [],
+        security: [],
+        materialization: {
+          status: 'completed',
+          written: ['w'],
+          unchanged: [],
+          skipped: [],
+          staleCandidates: ['s'],
+          errors: [],
+        },
+        errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+      },
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const result = await executeTool(ctx, 'harness_refine', { global: true }, agent())
+    const json = resultJson(result)
+    // counts come only from the coordinator output and are unchanged by diagnostics
+    expect(json).toMatchObject({ applied: 1, failed: 0, refinement_id: 'r' })
+    expect(json.diagnostics).toMatchObject({
+      status: 'partial',
+      structural: [],
+      security: [],
+      errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+    })
+    // camelCase materialization fields map to the existing snake_case output
+    const diagnostics = json.diagnostics as { materialization: Record<string, unknown> }
+    expect(diagnostics.materialization.stale_candidates).toEqual(['s'])
+  })
+
+  it('omits the diagnostics key when the coordinator result has none', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('r'),
+      materialization: emptyMaterialization(),
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const json = resultJson(await executeTool(ctx, 'harness_refine', { global: true }, agent()))
+    expect(json.applied).toBe(1)
+    expect(json.diagnostics).toBeUndefined()
+  })
+
+  it('uses coordinator-provided counts without recounting adapter-local edit arrays', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 2,
+      rejectedCount: 1,
+      refinement: refinementResult('r-counts', [
+        { action: 'create', kind: 'memory', id: 'a', applied: true, blastRadius: 'general' },
+        { action: 'create', kind: 'memory', id: 'b', applied: true, blastRadius: 'general' },
+        { action: 'create', kind: 'memory', id: 'c', applied: true, blastRadius: 'general' },
+        { action: 'create', kind: 'memory', id: 'd', applied: true, blastRadius: 'general' },
+        { action: 'create', kind: 'memory', id: 'e', applied: false, error: 'rejected', blastRadius: 'general' },
+      ]),
+      materialization: {
+        status: 'partial',
+        written: ['w1'],
+        unchanged: [],
+        skipped: [],
+        staleCandidates: ['s1'],
+        errors: [{ path: 'p', code: 'c', retryable: true, message: 'm' }],
+      },
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: false })
+    const result = await executeTool(ctx, 'harness_refine', { global: false }, agent())
+    const json = resultJson(result)
+    // counts come only from the coordinator output, never from the edit array length
+    expect(json.applied).toBe(2)
+    expect(json.failed).toBe(1)
+    expect((json.edits as unknown[])).toHaveLength(5)
+    const edits = json.edits as Array<Record<string, unknown>>
+    expect(edits[4]).toMatchObject({ id: 'e', applied: false, error: 'rejected' })
+    const materialization = json.materialization as Record<string, unknown>
+    expect(materialization.stale_candidates).toEqual(['s1'])
+    expect(materialization.errors).toEqual([{ path: 'p', code: 'c', retryable: true, message: 'm' }])
   })
 })

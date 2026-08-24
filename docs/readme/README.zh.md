@@ -24,6 +24,7 @@ DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个�
 | 状态投影（每步注入 harness 上下文） | `agent/pre-step` 瀑布监听，按内容摘要变化增量注入 |
 | 复盘与自动精修 | `session/event` 监听 turn 间隔 / 压缩结束，自动跑 LLM 评审 → 规划 → 应用 |
 | 手动精修工具 | 注册 `harness_refine` 工具（LLM 可直接调用，支持回滚） |
+| 手动精修命令 | 可选的 `/refine` 斜杠命令，宿主提供 `commands` 能力（`@deepseek-ai/dsh-commands`）时注册 |
 | 记忆生命周期 | 通过精修元数据手动 archive/unarchive/pin；已归档条目不会注入，也不会物化为 skill |
 | 排序注入 | 从最近一条有效 direct-user 消息取查询（最多 400 字符），标题命中优先于内容命中，再按更新时间和 id 稳定排序，并按 kind 限额 |
 | 会话收尾 | 可选 `harness_wrapup` 工具机械给出 keep/promote/archive 建议；promote 只复制，冲突返回确定性错误 |
@@ -122,12 +123,31 @@ dsh plugin --profile <name> add dsh-continual-harness
 | `requireGlobalApproval` | `false` | 全局写入提交前是否要求显式人工审批（保守模式） |
 | `maxInjectedEntriesPerKind` | `6` | 每个 kind 排序注入的正整数上限（步长 1，最小值 1） |
 | `wrapupEnabled` | `true` | 是否注册可选的 `harness_wrapup` 会话收尾工具 |
+| `diagnosticsEnabled` | `true` | 每次精修提交后是否运行结构化（L2）诊断 |
+| `securityEnabled` | `false` | 是否启用本地安全（凭据模式）诊断提供方 |
 | `auditReviews` | `true` | 每个 gate 裁决追加到 harness 根目录 `reviews.jsonl` |
 | `logToFile` | `true` | 把 harness 日志持久化到 `continual-harness.log`（JSONL、`0600`、轮转） |
 | `logMaxBytes` | `5242880`（5 MB） | harness 日志文件轮转上限 |
 | `maxEntryGrowth` | `0.5` | 单次提交条目增长率上限；`0` 关闭检查 |
 | `protectedKinds` | `['skill']` | 自动路径不可修改的 kind（预留；实际生效的是条目级 `protection`） |
 | `benchmark` | `{enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0}` | 显式 `harness_benchmark` 工具：每例每侧迭代次数、运行上限、仅报告的通过线、非回归容差、候选失败 cell 上限 |
+
+## 精修（Refining）
+
+两个入口：`harness_refine` 工具（LLM 调用）与 `/refine` 斜杠命令（宿主提供 `commands` 能力时可用）。
+
+**`harness_refine`** —— `mode: 'plan'`（默认）按指令规划并原子提交；`mode: 'rollback'` 传入 `rollbackId` 并显式指定 `--local` / `--global` 作用域，回滚已提交的精修。`requireGlobalApproval: true` 时全局写入需人工审批。
+
+**`/refine`** —— 与工具同语义，面向人工输入：
+
+```sh
+/refine --local 帮我整理记忆
+/refine --global <指令>
+/refine rollback <id> --local
+/refine rollback <id> --global
+```
+
+裸 `/refine` 以默认作用域规划。输出：`status`、`scope`、`refinement`、`applied`、`rejected`、`summary`，启用时附 `diagnostics:` 行。
 
 ## 治理（Governance）
 

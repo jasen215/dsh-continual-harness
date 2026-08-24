@@ -24,6 +24,7 @@ A single npm package (`dsh-continual-harness`) takes effect through the followin
 | State projection (inject harness context each step) | `agent/pre-step` waterfall listener; incremental injection when the content digest changes |
 | Review and automatic refinement | `session/event` listener on turn interval / compaction end; runs LLM review → plan → apply automatically |
 | Manual refinement tool | Registers the `harness_refine` tool (directly callable by the LLM, supports rollback) |
+| Manual refinement command | Optional `/refine` slash command, registered through the host `commands` capability (`@deepseek-ai/dsh-commands`) when present |
 | Memory lifecycle | Manual archive/unarchive/pin through refinement metadata; archived entries are hidden from injection and skill materialization |
 | Ranked injection | Queries the latest effective direct-user message (up to 400 chars), ranks title matches above content matches, then applies freshness/id tie-breaks and a per-kind cap |
 | Session wrap-up | Optional `harness_wrapup` tool gives mechanical keep/promote/archive advice; promotion is copy-only and conflicts return a deterministic error |
@@ -132,12 +133,31 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `requireGlobalApproval` | `false` | Require explicit human approval before a global write commits (conservative mode) |
 | `maxInjectedEntriesPerKind` | `6` | Positive-integer cap (step 1, minimum 1) for ranked injected entries per kind |
 | `wrapupEnabled` | `true` | Register the optional `harness_wrapup` session wrap-up tool |
+| `diagnosticsEnabled` | `true` | Run post-apply structural diagnostics after each committed refinement |
+| `securityEnabled` | `false` | Enable the local security (credential-pattern) diagnostic provider |
 | `auditReviews` | `true` | Append every gate verdict to `reviews.jsonl` under the harness root |
 | `logToFile` | `true` | Persist harness logs to `continual-harness.log` (JSONL, `0600`, rotated) |
 | `logMaxBytes` | `5242880` (5 MB) | Rotation cap for the harness log file |
 | `maxEntryGrowth` | `0.5` | Per-commit entry growth fraction cap; `0` disables the check |
 | `protectedKinds` | `['skill']` | Kinds the automatic path may not modify (reserved; per-entry `protection` is the enforced guard) |
 | `benchmark` | `{enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0}` | Explicit `harness_benchmark` tool: iterations per case per side, run cap, report-only pass line, non-regression tolerance, max failed candidate cells |
+
+## Refining
+
+Two entry points: the `harness_refine` tool (LLM-callable) and the `/refine` slash command (when the host provides a `commands` capability).
+
+**`harness_refine`** — `mode: 'plan'` (default) plans from instructions and commits atomically; `mode: 'rollback'` takes a `rollbackId` plus an explicit `--local` / `--global` scope to revert a committed refinement. Global writes require human approval when `requireGlobalApproval` is `true`.
+
+**`/refine`** — same semantics, human-typed:
+
+```sh
+/refine --local organize my memories
+/refine --global <instructions>
+/refine rollback <id> --local
+/refine rollback <id> --global
+```
+
+Bare `/refine` plans with no instructions in the default scope. Output: `status`, `scope`, `refinement`, `applied`, `rejected`, `summary`, plus a `diagnostics:` line when enabled.
 
 ## Governance
 
