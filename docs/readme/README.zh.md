@@ -24,6 +24,7 @@ DeepSeek Harness 的**自进化（continual self-refinement）插件**：单个�
 | 状态投影（每步注入 harness 上下文） | `agent/pre-step` 瀑布监听，按内容摘要变化增量注入 |
 | 复盘与自动精修 | `session/event` 监听 turn 间隔 / 压缩结束，自动跑 LLM 评审 → 规划 → 应用 |
 | 手动精修工具 | 注册 `harness_refine` 工具（LLM 可直接调用，支持回滚） |
+| 手动精修命令 | 可选的 `/refine` 斜杠命令，宿主提供 `commands` 能力（`@deepseek-ai/dsh-commands`）时注册 |
 | 记忆生命周期 | 通过精修元数据手动 archive/unarchive/pin；已归档条目不会注入，也不会物化为 skill |
 | 排序注入 | 从最近一条有效 direct-user 消息取查询（最多 400 字符），标题命中优先于内容命中，再按更新时间和 id 稳定排序，并按 kind 限额 |
 | 会话收尾 | 可选 `harness_wrapup` 工具机械给出 keep/promote/archive 建议；promote 只复制，冲突返回确定性错误 |
@@ -122,12 +123,44 @@ dsh plugin --profile <name> add dsh-continual-harness
 | `requireGlobalApproval` | `false` | 全局写入提交前是否要求显式人工审批（保守模式） |
 | `maxInjectedEntriesPerKind` | `6` | 每个 kind 排序注入的正整数上限（步长 1，最小值 1） |
 | `wrapupEnabled` | `true` | 是否注册可选的 `harness_wrapup` 会话收尾工具 |
+| `diagnosticsEnabled` | `true` | 每次精修提交后是否运行结构化（L2）诊断 |
+| `securityEnabled` | `false` | 是否启用本地安全（凭据模式）诊断提供方 |
 | `auditReviews` | `true` | 每个 gate 裁决追加到 harness 根目录 `reviews.jsonl` |
 | `logToFile` | `true` | 把 harness 日志持久化到 `continual-harness.log`（JSONL、`0600`、轮转） |
 | `logMaxBytes` | `5242880`（5 MB） | harness 日志文件轮转上限 |
 | `maxEntryGrowth` | `0.5` | 单次提交条目增长率上限；`0` 关闭检查 |
 | `protectedKinds` | `['skill']` | 自动路径不可修改的 kind（预留；实际生效的是条目级 `protection`） |
 | `benchmark` | `{enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0}` | 显式 `harness_benchmark` 工具：每例每侧迭代次数、运行上限、仅报告的通过线、非回归容差、候选失败 cell 上限 |
+
+## 精修（Refining）
+
+两个入口共用同一个 `RefineCoordinator`：`harness_refine` 工具（LLM 可调用）与可选的 `/refine` 斜杠命令（仅当宿主提供 `commands` 能力时注册——DSH Desktop 通过 `@deepseek-ai/dsh-base` → `@deepseek-ai/dsh-commands` 获得）。
+
+### 工具：`harness_refine`
+
+以 `mode: 'plan'`（默认）或 `mode: 'rollback'` 调用：
+
+- **plan** —— LLM 规划器根据你的指令生成提案；通过校验的 edits 原子提交
+- **rollback** —— 传入 `rollbackId` 并显式指定 `--local` / `--global` 作用域，回滚已提交的精修
+
+当 `requireGlobalApproval` 为 `true` 时，全局写入需要显式人工审批。结果包含 `status`（`committed` / `rejected` / `validation` / `commit-failed`）、applied/rejected 计数、精修 id，以及启用时的诊断报告。
+
+### 命令：`/refine`
+
+与工具语义相同，面向人工输入。示例：
+
+```sh
+/refine --local 聚焦未决问题
+/refine --global <指令>
+/refine rollback <id> --local
+/refine rollback <id> --global
+```
+
+裸 `/refine` 以默认作用域规划、无指令。输出与工具一致：`status`、`scope`、`refinement`、`applied`、`rejected`、`summary`，启用时附 `diagnostics:` 行。
+
+### 提交后诊断
+
+每次提交后，结构化（L2）与可选的 security 提供方在隔离中运行（`Promise.allSettled`），其报告不会改变已提交状态。`diagnosticsEnabled`（默认 `true`）开关诊断运行器；`securityEnabled`（默认 `false`）启用本地凭据模式扫描。
 
 ## 治理（Governance）
 

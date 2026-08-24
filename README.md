@@ -24,6 +24,7 @@ A single npm package (`dsh-continual-harness`) takes effect through the followin
 | State projection (inject harness context each step) | `agent/pre-step` waterfall listener; incremental injection when the content digest changes |
 | Review and automatic refinement | `session/event` listener on turn interval / compaction end; runs LLM review → plan → apply automatically |
 | Manual refinement tool | Registers the `harness_refine` tool (directly callable by the LLM, supports rollback) |
+| Manual refinement command | Optional `/refine` slash command, registered through the host `commands` capability (`@deepseek-ai/dsh-commands`) when present |
 | Memory lifecycle | Manual archive/unarchive/pin through refinement metadata; archived entries are hidden from injection and skill materialization |
 | Ranked injection | Queries the latest effective direct-user message (up to 400 chars), ranks title matches above content matches, then applies freshness/id tie-breaks and a per-kind cap |
 | Session wrap-up | Optional `harness_wrapup` tool gives mechanical keep/promote/archive advice; promotion is copy-only and conflicts return a deterministic error |
@@ -132,12 +133,44 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `requireGlobalApproval` | `false` | Require explicit human approval before a global write commits (conservative mode) |
 | `maxInjectedEntriesPerKind` | `6` | Positive-integer cap (step 1, minimum 1) for ranked injected entries per kind |
 | `wrapupEnabled` | `true` | Register the optional `harness_wrapup` session wrap-up tool |
+| `diagnosticsEnabled` | `true` | Run post-apply structural diagnostics after each committed refinement |
+| `securityEnabled` | `false` | Enable the local security (credential-pattern) diagnostic provider |
 | `auditReviews` | `true` | Append every gate verdict to `reviews.jsonl` under the harness root |
 | `logToFile` | `true` | Persist harness logs to `continual-harness.log` (JSONL, `0600`, rotated) |
 | `logMaxBytes` | `5242880` (5 MB) | Rotation cap for the harness log file |
 | `maxEntryGrowth` | `0.5` | Per-commit entry growth fraction cap; `0` disables the check |
 | `protectedKinds` | `['skill']` | Kinds the automatic path may not modify (reserved; per-entry `protection` is the enforced guard) |
 | `benchmark` | `{enabled: true, defaultRuns: 1, maxRuns: 3, passThreshold: 60, regressionTolerance: 0, maxFailedCells: 0}` | Explicit `harness_benchmark` tool: iterations per case per side, run cap, report-only pass line, non-regression tolerance, max failed candidate cells |
+
+## Refining
+
+Two entry points run the same `RefineCoordinator`: the `harness_refine` tool (callable by the LLM) and the optional `/refine` slash command (registered only when the host provides a `commands` capability — DSH Desktop gets one via `@deepseek-ai/dsh-base` → `@deepseek-ai/dsh-commands`).
+
+### Tool: `harness_refine`
+
+Call with `mode: 'plan'` (default) or `mode: 'rollback'`:
+
+- **plan** — the LLM planner builds a proposal from your instructions; validated edits commit atomically
+- **rollback** — pass `rollbackId` plus an explicit `--local` / `--global` scope to revert a committed refinement
+
+Global writes may require explicit human approval when `requireGlobalApproval` is `true`. The result reports `status` (`committed` / `rejected` / `validation` / `commit-failed`), applied/rejected counts, the refinement id, and a diagnostics report when enabled.
+
+### Command: `/refine`
+
+Same semantics as the tool, in a human-typed form. Examples:
+
+```sh
+/refine --local focus on the open questions
+/refine --global <instructions>
+/refine rollback <id> --local
+/refine rollback <id> --global
+```
+
+Bare `/refine` plans with no instructions in the configured default scope. Output mirrors the tool result: `status`, `scope`, `refinement`, `applied`, `rejected`, `summary`, plus a `diagnostics:` line when enabled.
+
+### Post-apply diagnostics
+
+After every commit, structural (L2) and optional security providers run in isolation (`Promise.allSettled`), and their report never changes the committed status. `diagnosticsEnabled` (default `true`) toggles the runner; `securityEnabled` (default `false`) enables the local credential-pattern scanner.
 
 ## Governance
 
