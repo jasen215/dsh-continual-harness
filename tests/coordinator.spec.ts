@@ -185,6 +185,50 @@ describe('createRefineCoordinator', () => {
     expect(store.history(liveAgent)[0]?.id).toBe('seed')
   })
 
+  it('rejects a missing rollback target without planner, approval, or Store calls', async () => {
+    const store = fakeStore(() => {})
+    const complete = vi.fn(cannedComplete('{}'))
+    const result = await createRefineCoordinator({ store, completeFor: () => complete }).execute({
+      mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'missing', agent: agent(),
+    })
+    expect(result.error).toMatchObject({ code: 'rollback-target-not-found' })
+    expect(complete).not.toHaveBeenCalled()
+    expect(store.applyRefinement).not.toHaveBeenCalled()
+  })
+
+  it('rejects scope mismatch and a second rollback', async () => {
+    const { store, agent: liveAgent } = realStoreWithHistory()
+    const coordinator = createRefineCoordinator({ store, completeFor: () => cannedComplete('{}') })
+    const mismatch = await coordinator.execute({ mode: 'rollback', source: 'tool', scope: 'global', rollbackId: 'seed', agent: liveAgent })
+    expect(mismatch.error?.code).toBe('rollback-scope-mismatch')
+    const first = await coordinator.execute({ mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'seed', agent: liveAgent })
+    expect(first.commitStatus).toBe('committed')
+    const second = await coordinator.execute({ mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'seed', agent: liveAgent })
+    expect(second.error?.code).toBe('rollback-already-rolled-back')
+  })
+
+  it('serializes same-scope commits while allowing planning outside the lock', async () => {
+    const store = delayedStore()
+    let planning = 0
+    let planningMax = 0
+    let sequence = 0
+    const complete = async () => {
+      planning += 1
+      planningMax = Math.max(planningMax, planning)
+      await Promise.resolve()
+      planning -= 1
+      sequence += 1
+      return JSON.stringify({ id: sequence === 1 ? 'first' : 'second', summary: 'test', edits: [{ action: 'create', kind: 'memory', id: `m${sequence}`, content: 'x' }] })
+    }
+    const coordinator = createRefineCoordinator({ store, completeFor: () => complete as Complete })
+    const first = coordinator.execute(planRequest('local', 'tool'))
+    const second = coordinator.execute(planRequest('local', 'tool'))
+    await Promise.all([first, second])
+    expect(store.commitOrder()).toEqual(['first', 'second'])
+    expect(planningMax).toBeGreaterThan(1)
+    expect(store.commitOverlap()).toBe(1)
+  })
+
   it('delayed-store fixture records commits without overlap', async () => {
     const store = delayedStore()
     await Promise.all([

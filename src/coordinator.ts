@@ -1,7 +1,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import type { Complete } from './planner.ts'
-import { validateEdit } from './refine.ts'
+import { rollbackProposal, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
@@ -142,8 +142,45 @@ function counts(appliedEdits: Array<{ applied: boolean }>): { appliedCount: numb
   }, { appliedCount: 0, rejectedCount: 0 })
 }
 
+class KeyedMutex {
+  private readonly tails = new Map<string, Promise<void>>()
+
+  async run<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolve => { release = resolve })
+    this.tails.set(key, current)
+    await previous
+    try {
+      return await work()
+    } finally {
+      release()
+      if (this.tails.get(key) === current) this.tails.delete(key)
+    }
+  }
+}
+
+function executionFromCommit(
+  result: RefinementResult & { materialization: MaterializationResult },
+  approval: RefineExecutionResult['approval'],
+): RefineExecutionResult {
+  const editCounts = counts(result.appliedEdits ?? [])
+  return {
+    commitStatus: editCounts.rejectedCount > 0 ? 'committed-with-rejected-edits' : 'committed',
+    approval,
+    ...editCounts,
+    refinement: result,
+    ...(result.materialization === undefined ? {} : { materialization: result.materialization }),
+    ...(result.materialization?.status === 'failed' ? {
+      failedAt: 'materialization' as const,
+      error: { code: 'materialization-failed' as const, message: 'skill materialization failed' },
+    } : {}),
+  }
+}
+
 export function createRefineCoordinator(options: RefineCoordinatorOptions): RefineCoordinator {
   const maxTrajectoryChars = options.maxTrajectoryChars ?? 12_000
+  const mutex = new KeyedMutex()
   return {
     async execute(request) {
       const validationError = validateRequest(request)
@@ -151,12 +188,41 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         return { ...errorResult('validation', 'invalid-request', validationError) }
       }
       if (request.signal?.aborted) return errorResult('validation', 'aborted', 'refinement request aborted')
-      if (request.mode !== 'plan') return emptyResult()
+      if (request.mode === 'rollback') {
+         const history = options.store.history(request.agent)
+         const target = history.find(item => item.id === request.rollbackId)
+         if (!target) return errorResult('validation', 'rollback-target-not-found', `no refinement found with id ${request.rollbackId}`)
+         if (target.scope !== request.scope) return errorResult('validation', 'rollback-scope-mismatch', `refinement ${request.rollbackId} belongs to ${target.scope} scope`)
+         if (target.rollbackOf !== undefined || history.some(item => item.rollbackOf === target.id)) {
+           return errorResult('validation', 'rollback-already-rolled-back', `refinement ${request.rollbackId} has already been rolled back`)
+         }
+         const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
+         return mutex.run(key, async () => {
+           if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted')
+           const commitHistory = options.store.history(request.agent)
+           const commitTarget = commitHistory.find(item => item.id === request.rollbackId)
+           if (!commitTarget) return errorResult('commit', 'rollback-target-not-found', `no refinement found with id ${request.rollbackId}`)
+           if (commitTarget.scope !== request.scope) return errorResult('commit', 'rollback-scope-mismatch', `refinement ${request.rollbackId} belongs to ${commitTarget.scope} scope`)
+           if (commitTarget.rollbackOf !== undefined || commitHistory.some(item => item.rollbackOf === commitTarget.id)) {
+             return errorResult('commit', 'rollback-already-rolled-back', `refinement ${request.rollbackId} has already been rolled back`)
+           }
+           const commitState = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
+           const proposal = rollbackProposal(commitTarget)
+           try {
+             const result = await options.store.applyRefinement(request.agent, proposal, {
+               global: request.scope === 'global', rollbackOf: commitTarget.id, baseline: commitState,
+             })
+             return executionFromCommit(result, 'not-required')
+           } catch (error) {
+             return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error))
+           }
+         })
+       }
+       if (request.mode !== 'plan') return emptyResult()
 
       const localState = options.store.localState(request.agent)
       const globalState = options.store.globalState()
-      const baseline = request.scope === 'global' ? globalState : localState
-      const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
+       const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
       const historyText = historyForPrompt(options.store.history(request.agent))
       const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
 
@@ -206,11 +272,15 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       }
       if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
 
-      let result: RefinementResult & { materialization: MaterializationResult }
+      const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
+       return mutex.run(key, async () => {
+         if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
+         const commitBaseline = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
+         let result: RefinementResult & { materialization: MaterializationResult }
       try {
         result = await options.store.applyRefinement(request.agent, proposal as never, {
           global: request.scope === 'global',
-          baseline,
+          baseline: commitBaseline,
           automatic: request.source === 'automatic',
         })
       } catch (error) {
@@ -229,7 +299,8 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         } : {}),
       }
       return committed
-    },
+       })
+     },
   }
 }
 
