@@ -68,6 +68,8 @@ export interface SkillEntry extends HarnessEntry {
   /** Legacy execution-contract fields from the pre-file era; kept for state compatibility. */
   reference?: string
   arguments?: string
+  /** Bundle auxiliary files: forward-slash-relative paths under scripts/ or references/, mapped to contents. */
+  files?: Record<string, string>
 }
 
 /** A reusable delegation spec. */
@@ -90,6 +92,8 @@ export interface RefinementEdit {
   /** Legacy fields, tolerated for state compatibility. */
   reference?: string
   arguments?: string
+  /** Auxiliary files for skill edits (scripts/ or references/ only); omitted on update keeps existing, {} clears them, a map replaces them. */
+  files?: Record<string, string>
   /** Internal lifecycle edit fields; not required in model JSON. */
   archive?: boolean
   pin?: boolean
@@ -185,4 +189,28 @@ export interface RefinementPlanInput {
   trajectoryText: string
   scopeInstruction: string
   instructions?: string
+}
+
+/** Error codes used in `MaterializationResult.errors`. */
+export type MaterializationErrorCode =
+  | 'not-a-directory'
+  | 'not-harness-owned'
+  | 'remove-failed'
+  | 'write-failed'
+  | 'materialize-failed'
+
+/** Skill bundle materialization outcome for one committed refinement (spec §7.7). */
+export interface MaterializationResult {
+  /** completed: all targets written or confirmed unchanged; partial: some targets failed or were skipped; failed: nothing succeeded. */
+  status: 'completed' | 'partial' | 'failed'
+  /** Absolute paths of files written, in stable order. */
+  written: string[]
+  /** Absolute paths of files already matching the target entry (not rewritten). */
+  unchanged: string[]
+  /** Absolute paths skipped because the bundle is not harness-owned. */
+  skipped: string[]
+  /** Relative paths found on disk but absent from the entry; never auto-deleted. */
+  staleCandidates: string[]
+  /** Per-path failure or skip details; non-retryable entries are warnings. */
+  errors: Array<{ path?: string; code: MaterializationErrorCode; retryable: boolean; message: string }>
 }

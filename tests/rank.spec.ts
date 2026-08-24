@@ -63,3 +63,20 @@ describe('ranked injection', () => {
     expect(result.overview).toContain('- a v1: pin versions'); expect(result.overview).not.toContain('- b v1: other'); expect(result.injectedKeys).toEqual(['local:s1:memory:a'])
   })
 })
+
+describe('formatHarnessStateForPromptStructured files key list', () => {
+  it('renders files keys without their contents', () => {
+    const state = freshState()
+    state.entries.skill['oq-gen'] = {
+      id: 'oq-gen', kind: 'skill', version: 1,
+      content: '## Steps', description: 'quantize',
+      files: { 'scripts/oq_quantize.py': 'print(1)', 'references/t.md': '# t' },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const { overview } = formatHarnessStateForPromptStructured(state, '', {
+      sessionId: 's1', maxPerKind: 6, isLocal: () => false,
+    })
+    expect(overview).toContain('files: scripts/oq_quantize.py, references/t.md')
+    expect(overview).not.toContain('print(1)')
+  })
+})

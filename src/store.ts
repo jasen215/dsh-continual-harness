@@ -15,7 +15,8 @@ import type { HarnessSnapshot } from './benchmark.ts'
 import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, entryToEditFields, rollbackProposal } from './refine.ts'
 import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
-import { reconcileSkillFiles } from './skills.ts'
+import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills.ts'
+import type { SkillBundleLimits } from './skills.ts'
 import {
   appendGlobalRefinement,
   appendUsageEvents,
@@ -30,7 +31,7 @@ import {
   saveHarnessState,
 } from './storage.ts'
 import { aggregateUsage } from './usage.ts'
-import type { HarnessState, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
+import type { HarnessState, MaterializationResult, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
@@ -61,6 +62,8 @@ export class HarnessStore {
   private readonly maxEntryGrowth: number | undefined
   /** Kinds protected from the automatic path; plumbed for Config wiring. */
   private readonly protectedKinds: readonly RefinementKind[] | undefined
+  /** Skill bundle limits used by L1 files validation (spec §7.10). */
+  private readonly skillBundleLimits: SkillBundleLimits
   /** Per-kind cap for ranked prompt injection. */
   private readonly maxInjectedEntriesPerKind: number
   /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
@@ -73,6 +76,7 @@ export class HarnessStore {
       skillsDir?: string
       maxEntryGrowth?: number
       protectedKinds?: readonly RefinementKind[]
+      skillBundleLimits?: SkillBundleLimits
       maxInjectedEntriesPerKind?: number
     } = {},
   ) {
@@ -80,6 +84,7 @@ export class HarnessStore {
     this.skillsDir = options.skillsDir ?? dshHomePath('skills')
     this.maxEntryGrowth = options.maxEntryGrowth
     this.protectedKinds = options.protectedKinds
+    this.skillBundleLimits = options.skillBundleLimits ?? DEFAULT_SKILL_BUNDLE_LIMITS
     this.maxInjectedEntriesPerKind = options.maxInjectedEntriesPerKind ?? DEFAULT_ENTRIES_PER_KIND
   }
 
@@ -128,6 +133,13 @@ export class HarnessStore {
       .filter(event => event.type === HARNESS_REFINEMENT_EVENT)
       .map(event => event.data)
     return mergeRefinementHistory(local, loadGlobalRefinementHistory(this.home))
+  }
+
+  /** fs-backed create-conflict gate: a create onto a non-harness-owned bundle is rejected (spec §7.4). */
+  private createConflictError(id: string): string | undefined {
+    const inspected = inspectSkillBundle(defaultSkillFsOps, this.skillsDir, id)
+    if (inspected.state === 'missing' || (inspected.state === 'present' && inspected.harnessOwned)) return undefined
+    return `skill directory "${id}" exists and is not harness-owned; pick another id`
   }
 
   /** Structured overview + injected keys for prompt injection. */
@@ -192,7 +204,11 @@ export class HarnessStore {
    * against an earlier snapshot pass it via `options.baseline` so edits over
    * entries changed during planning are rejected.
    */
-  applyRefinement(agent: Agent, plan: RefinementProposal, options: CommitOptions = {}): RefinementResult {
+  applyRefinement(
+    agent: Agent,
+    plan: RefinementProposal,
+    options: CommitOptions = {},
+  ): RefinementResult & { materialization: MaterializationResult } {
     const global = options.global === true
     const target = global ? this.globalState() : this.localState(agent)
     const baseline = options.baseline ?? target
@@ -202,6 +218,8 @@ export class HarnessStore {
       baselineState: baseline,
       ...(this.maxEntryGrowth === undefined ? {} : { maxEntryGrowth: this.maxEntryGrowth }),
       ...(this.protectedKinds === undefined ? {} : { protectedKinds: this.protectedKinds }),
+      skillBundleLimits: this.skillBundleLimits,
+      editGate: edit => edit.action === 'create' && edit.kind === 'skill' ? this.createConflictError(edit.id) : undefined,
       // local commits see the global store read-only through the rule layer
       ...(global ? {} : { globalEntries: this.globalState().entries }),
       ...(options.automatic === undefined ? {} : { automatic: options.automatic }),
@@ -215,9 +233,9 @@ export class HarnessStore {
       saveHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)), state)
     }
     agent.session.append(HARNESS_REFINEMENT_EVENT, result)
-    this.materializeSkills(agent, result)
+    const materialization = this.materializeSkills(agent, result)
     agentEvents(this.ctx, agent).emit('harness/refined', { result })
-    return result
+    return Object.assign(result, { materialization })
   }
 
   /** Promote a local entry to global by copy: local stays unchanged; a same-id
@@ -243,28 +261,43 @@ export class HarnessStore {
   /**
    * Materialize the SKILL.md bundles for skill ids touched by a committed
    * refinement, from the effective merged view, so dsh's filesystem skill
-   * provider picks the generated skills up live. A materialization failure
-   * logs and never fails the already-persisted commit.
+   * provider picks the generated skills up live. Write faults are collected
+   * into the returned MaterializationResult; the already-persisted commit is
+   * never failed (spec §7.5/§7.7).
    */
-  private materializeSkills(agent: Agent, result: RefinementResult): void {
+  private materializeSkills(agent: Agent, result: RefinementResult): MaterializationResult {
     const touched = result.appliedEdits
       .filter(edit => edit.applied && edit.kind === 'skill')
       .map(edit => edit.id)
-    if (touched.length === 0) return
+    if (touched.length === 0) {
+      return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
+    }
+    const effective = this.state(agent).entries.skill
+    const activeSkills: typeof effective = {}
+    for (const id of touched) {
+      const entry = effective[id]
+      if (entry !== undefined && entry.metadata?.lifecycleState !== 'archived') activeSkills[id] = entry
+    }
     try {
-      const effective = this.state(agent).entries.skill
-      const activeSkills: typeof effective = {}
-      for (const [id, entry] of Object.entries(effective)) {
-        if (entry.metadata?.lifecycleState !== 'archived') activeSkills[id] = entry
-      }
-      reconcileSkillFiles(this.skillsDir, activeSkills, touched)
+      return reconcileSkillFiles(this.skillsDir, activeSkills, touched)
     } catch (error) {
-      this.ctx.logger('harness').warn(`skill materialization failed: ${String(error)}`)
+      return {
+        status: 'failed',
+        written: [],
+        unchanged: [],
+        skipped: [],
+        staleCandidates: [],
+        errors: [{ code: 'materialize-failed', retryable: true, message: String(error) }],
+      }
     }
   }
 
   /** Roll back a committed refinement by id from the merged history. */
-  rollbackRefinement(agent: Agent, rollbackId: string, options: CommitOptions = {}): RefinementResult {
+  rollbackRefinement(
+    agent: Agent,
+    rollbackId: string,
+    options: CommitOptions = {},
+  ): RefinementResult & { materialization: MaterializationResult } {
     const global = options.global === true
     const history = global ? loadGlobalRefinementHistory(this.home) : this.history(agent)
     const target = history.find(result => result.id === rollbackId)

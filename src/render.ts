@@ -21,14 +21,29 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
-function formatEntry(entry: { id: string; version: number; content: string; description?: string; reference?: string; arguments?: string }, max: number): string {
+function formatEntry(
+  entry: {
+    id: string
+    version: number
+    content: string
+    description?: string
+    reference?: string
+    arguments?: string
+    files?: Record<string, string>
+  },
+  max: number,
+): string {
   const summary = entry.description !== undefined && entry.description !== ''
     ? entry.description
     : entry.content
   const legacy = entry.reference !== undefined && entry.arguments !== undefined
     ? ` | reference: ${entry.reference} | arguments: ${entry.arguments}`
     : ''
-  return `- ${entry.id} v${entry.version}: ${truncate(summary, max)}${legacy}`
+  const fileKeys = entry.files === undefined ? [] : Object.keys(entry.files)
+  const filesNote = fileKeys.length === 0
+    ? ''
+    : ` | files: ${fileKeys.join(', ')}`
+  return `- ${entry.id} v${entry.version}: ${truncate(summary, max)}${legacy}${filesNote}`
 }
 
 /** Max query length fed to ranking. */

@@ -23,6 +23,8 @@ export const HARNESS_SCHEMA_VERSION = 2
 export const USAGE_EVENTS_FILE_NAME = 'usage.events.jsonl'
 /** Kind names accepted by the harness layer. */
 export const REFINEMENT_KINDS = ['prompt', 'memory', 'skill', 'subagent'] as const
+/** Kebab-case pattern dsh requires for skill names (and the safe path form). */
+export const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 /** Benchmark store directory name under the harness home. */
 export const BENCHMARK_DIR_NAME = 'benchmark'
 /** Fixed-case store file name (cases and frozen state). */

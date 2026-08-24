@@ -137,3 +137,18 @@ describe('proposal parsing (task 3)', () => {
     expect(proposal.edits[0]).not.toHaveProperty('blastRadius')
   })
 })
+
+describe('REFINEMENT_SYSTEM_PROMPT skill files contract', () => {
+  it('documents the structured files map and its text-only contract', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('"files" map')
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('scripts/ or references/')
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('text-only')
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('forward slashes')
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('generated from content')
+    expect(REFINEMENT_SYSTEM_PROMPT).toContain('UTF-8 bytes')
+  })
+
+  it('states the routing boundary: no full skill-authoring loop', () => {
+    expect(REFINEMENT_SYSTEM_PROMPT).toMatch(/never.*skill-authoring|skill-authoring.*loop/i)
+  })
+})
