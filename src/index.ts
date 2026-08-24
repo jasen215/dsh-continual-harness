@@ -13,7 +13,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
+import { requireGlobalApproval } from './approval.ts'
+import { completeViaAgent, DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
+import { createRefineCoordinator } from './coordinator.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
@@ -181,11 +183,32 @@ export function apply(ctx: Context, config: Config): void {
     },
     maxInjectedEntriesPerKind: config.maxInjectedEntriesPerKind,
   })
-  registerHarnessTool(ctx, store, {
-    defaultGlobal: config.defaultGlobal,
+  // One protocol-independent coordinator owns request validation, planner
+  // context capture, approval gating, commit serialization, and result
+  // projection for both the tool and (from Task 5) the automatic driver.
+  const coordinator = createRefineCoordinator({
+    store,
+    completeFor: agent => completeViaAgent(ctx, agent, config.plannerMaxTokens),
     maxTrajectoryChars: config.maxTrajectoryChars,
-    plannerMaxTokens: config.plannerMaxTokens,
-    requireGlobalApproval: config.requireGlobalApproval,
+    // The conservative approval gate rides the tool plan path only: the user
+    // sees the planner's own summary before any global write commits. The
+    // thrown message keeps the historical "global write not approved" wording
+    // so the tool's not-committed summary stays recognizable.
+    ...(config.requireGlobalApproval
+      ? {
+        requireGlobalApproval: async (agent, signal, summary) => {
+          try {
+            await requireGlobalApproval(ctx, agent, signal, `Target: global store; planner plan: ${summary}`)
+          } catch (error) {
+            throw new Error(`global write not approved: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        },
+        requireGlobalApprovalForTool: true,
+      }
+      : {}),
+  })
+  registerHarnessTool(ctx, coordinator, {
+    defaultGlobal: config.defaultGlobal,
   })
   if (config.wrapupEnabled) {
     registerHarnessWrapup(ctx, store)

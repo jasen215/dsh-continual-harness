@@ -15,7 +15,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { readdirSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { appendReview } from './audit.ts'
-import { requireGlobalApproval } from './approval.ts'
 import {
   appendBenchmarkRun,
   buildSnapshot,
@@ -29,16 +28,14 @@ import {
   validateCandidateDelta,
 } from './benchmark.ts'
 import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
-import { completeViaAgent } from './complete.ts'
+import type { RefineCoordinator, RefineExecutionResult } from './coordinator.ts'
 import { BENCHMARK_DIR_NAME, BENCHMARK_RUNS_FILE_NAME, BENCHMARK_SNAPSHOTS_DIR_NAME } from './domain.ts'
 import { runCellEvaluation } from './evaluate.ts'
 import type { CellEvaluation } from './evaluate.ts'
-import { planRefinement, scopeInstruction } from './planner.ts'
-import { overviewForPrompt, historyForPrompt } from './render.ts'
 import { decideBenchmark } from './score.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { HarnessStore } from './store.ts'
-import type { BlastRadius, HarnessState, MaterializationResult, RefinementAction, RefinementKind, RefinementResult } from './types.ts'
+import type { HarnessState, MaterializationResult, RefinementResult } from './types.ts'
 import { suggestWrapup } from './wrapup.ts'
 
 const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backed prompt notes, memories, skill contracts, or subagent specs from the current trajectory, or roll back a prior refinement. Prefer this tool over any standalone skill-authoring skill whenever the user asks to turn what we just did into a reusable skill — e.g. "把xxx流程做成skill", "save our process as a skill", "create a skill from this workflow". The base system prompt is immutable; only this supplemental layer changes. Use after a repeated failure, a reusable tactic, a repeated delegation role, or a durable fact or preference. Pass instructions to focus the planner. Keep edits small and evidence-backed.'
@@ -47,12 +44,6 @@ const DESCRIPTION = 'Refine the continual harness: persist small, evidence-backe
 export interface ToolOptions {
   /** Store the tool targets when the call omits `global`. */
   defaultGlobal: boolean
-  /** Trajectory window fed to the planner. */
-  maxTrajectoryChars: number
-  /** Output budget for the planning call. */
-  plannerMaxTokens: number
-  /** Require explicit human approval before a global write commits. */
-  requireGlobalApproval: boolean
 }
 
 const OUTPUT_SCHEMA = {
@@ -185,8 +176,8 @@ export function registerHarnessWrapup(ctx: Context, store: HarnessStore): void {
   }))
 }
 
-/** Register the `harness_refine` tool over the store. */
-export function registerHarnessTool(ctx: Context, store: HarnessStore, options: ToolOptions): void {
+/** Register the `harness_refine` tool as a pure adapter over the coordinator. */
+export function registerHarnessTool(ctx: Context, coordinator: RefineCoordinator, options: ToolOptions): void {
   ctx.tools.register(defineTool({
     name: 'harness_refine',
     description: DESCRIPTION,
@@ -212,55 +203,14 @@ export function registerHarnessTool(ctx: Context, store: HarnessStore, options: 
       const agent = exec.agent
       if (!agent) throw new Error('harness_refine requires a live agent')
       const global = args.global ?? options.defaultGlobal
-      if (args.rollback_id) {
-        const result = store.rollbackRefinement(agent, args.rollback_id, { global })
-        return summarize(result.id, result.scope, result.summary, result.appliedEdits, result.materialization)
-      }
-      // Capture the target store's state before planning: the commit compares
-      // the current entries against this baseline and rejects any edit whose
-      // target entry changed while the plan was being produced or approved.
-      // Reading each layer once also feeds the planner's merged overview.
-      const localState = store.localState(agent)
-      const globalState = store.globalState()
-      const baseline = global ? globalState : localState
-      const plan = await planRefinement({
-        stateOverview: overviewForPrompt(mergeHarnessStates(globalState, localState)),
-        historyText: historyForPrompt(store.history(agent)),
-        trajectoryText: store.trajectory(agent, options.maxTrajectoryChars),
-        scopeInstruction: scopeInstruction(global),
-        ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
-      }, completeViaAgent(ctx, agent, options.plannerMaxTokens), exec.signal)
-      validatePlannerFiles(plan)
-      // The conservative approval gate rides the plan path only: the user sees
-      // the planner's own summary before any global write commits. Rollback
-      // restores recorded state and never requires approval.
-      if (options.requireGlobalApproval && global) {
-        try {
-          await requireGlobalApproval(ctx, agent, exec.signal,
-            `Target: global store; planner plan: ${plan.summary}`)
-        } catch (error) {
-          return { refinement_id: 'none', scope: 'global' as const, summary: `global write not approved: ${String(error)}`, applied: 0, failed: 0, edits: [] }
-        }
-      }
-      const result = store.applyRefinement(agent, plan, { global, baseline })
-      return summarize(result.id, result.scope, result.summary, result.appliedEdits, result.materialization)
+      const request = args.rollback_id
+        ? { mode: 'rollback' as const, source: 'tool' as const, scope: global ? 'global' as const : 'local' as const, rollbackId: args.rollback_id, agent, signal: exec.signal }
+        : { mode: 'plan' as const, source: 'tool' as const, scope: global ? 'global' as const : 'local' as const, agent, ...(args.instructions === undefined ? {} : { instructions: args.instructions }), signal: exec.signal }
+      const execution = await coordinator.execute(request)
+      return summarizeExecution(execution, global ? 'global' : 'local')
     },
     presentCall: () => ({ card: 'generic' as const, title: 'Refine continual harness', kind: 'other' as const }),
   }))
-}
-
-function validatePlannerFiles(plan: { edits: ReadonlyArray<{ kind?: unknown; files?: unknown }> }): void {
-  for (const [editIndex, edit] of plan.edits.entries()) {
-    if (edit.kind !== 'skill' || edit.files === undefined) continue
-    if (typeof edit.files !== 'object' || edit.files === null || Array.isArray(edit.files)) {
-      throw new Error(`edit ${editIndex} files must be an object with string values`)
-    }
-    for (const [path, value] of Object.entries(edit.files)) {
-      if (typeof value !== 'string') {
-        throw new Error(`edit ${editIndex} files[${JSON.stringify(path)}] must be a string`)
-      }
-    }
-  }
 }
 
 /** Project a MaterializationResult into the tool-output shape (snake_case keys). */
@@ -275,28 +225,19 @@ function toToolMaterialization(materialization: MaterializationResult) {
   }
 }
 
-function summarize(
-  id: string,
-  scope: 'local' | 'global',
-  summary: string,
-  edits: ReadonlyArray<{
-    action: RefinementAction
-    kind: RefinementKind
-    id: string
-    applied: boolean
-    error?: string
-    reason?: string
-    blastRadius?: BlastRadius
-  }>,
-  materialization?: MaterializationResult,
-) {
+/**
+ * Project a coordinator execution onto the tool's snake_case output schema.
+ * Counts come only from the coordinator result; edits are projected without
+ * recounting; `refinement_id` is `'none'` when nothing committed.
+ */
+function summarizeExecution(execution: RefineExecutionResult, scope: 'local' | 'global') {
   return {
-    refinement_id: id,
-    scope,
-    summary,
-    applied: edits.filter(edit => edit.applied).length,
-    failed: edits.filter(edit => !edit.applied).length,
-    edits: edits.map(edit => ({
+    refinement_id: execution.refinement?.id ?? 'none',
+    scope: execution.refinement?.scope ?? scope,
+    summary: execution.refinement?.summary ?? execution.error?.message ?? 'no refinement produced',
+    applied: execution.appliedCount,
+    failed: execution.rejectedCount,
+    edits: (execution.refinement?.appliedEdits ?? []).map(edit => ({
       action: edit.action,
       kind: edit.kind,
       id: edit.id,
@@ -305,7 +246,7 @@ function summarize(
       ...(edit.reason === undefined ? {} : { reason: edit.reason }),
       ...(edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }),
     })),
-    ...(materialization === undefined ? {} : { materialization: toToolMaterialization(materialization) }),
+    ...(execution.materialization === undefined ? {} : { materialization: toToolMaterialization(execution.materialization) }),
   }
 }
 
