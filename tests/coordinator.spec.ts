@@ -415,6 +415,7 @@ describe('createRefineCoordinator', () => {
         ...refinementResult('r'),
         appliedEdits: [
           { action: 'create', kind: 'skill', id: 'one', applied: true, blastRadius: 'general' },
+          { action: 'update', kind: 'skill', id: 'one', applied: true, blastRadius: 'general' },
           { action: 'create', kind: 'memory', id: 'm1', applied: true, blastRadius: 'general' },
         ],
       }))
@@ -434,13 +435,13 @@ describe('createRefineCoordinator', () => {
       const result = await coordinator.execute(planRequest('local', 'tool'))
       expect(result.commitStatus).toBe('committed')
       expect(run).toHaveBeenCalledTimes(1)
-      expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      expect(run).toHaveBeenCalledWith({
         refinementId: 'r',
         touchedSkillIds: ['one'],
         entries: expect.objectContaining({ one: expect.any(Object) }),
-        materialization: emptyMaterialization(),
-        enableSecurity: false,
-      }))
+      })
+      expect(run.mock.calls[0]?.[0]).not.toHaveProperty('materialization')
+      expect(run.mock.calls[0]?.[0]).not.toHaveProperty('enableSecurity')
       expect(result.diagnostics).toMatchObject({ status: 'completed', errors: [] })
     })
 

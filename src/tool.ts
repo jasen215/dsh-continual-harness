@@ -47,7 +47,7 @@ export interface ToolOptions {
   defaultGlobal: boolean
 }
 
-/** The materialization sub-object shared by the top-level and diagnostics output shapes (snake_case keys). */
+/** The top-level materialization output shape (snake_case keys). */
 const MATERIALIZATION_OUTPUT_PROPERTIES = {
   status: { type: 'string', enum: ['completed', 'partial', 'failed'] },
   written: { type: 'array', items: { type: 'string' } },
@@ -69,7 +69,7 @@ const MATERIALIZATION_OUTPUT_PROPERTIES = {
   },
 } as const
 
-/** The post-apply diagnostics summary (spec §5): status, findings, optional materialization, provider errors. */
+/** The post-apply diagnostics summary (spec §5): status, findings, provider errors. */
 const DIAGNOSTICS_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -99,11 +99,6 @@ const DIAGNOSTICS_OUTPUT_SCHEMA = {
           severity: { type: 'string', enum: ['low', 'medium', 'high'] },
         },
       },
-    },
-    materialization: {
-      type: 'object',
-      additionalProperties: false,
-      properties: MATERIALIZATION_OUTPUT_PROPERTIES,
     },
     errors: {
       type: 'array',
@@ -283,9 +278,10 @@ function toToolMaterialization(materialization: MaterializationResult) {
 
 /**
  * Project a DiagnosticReport into the tool-output shape: snake_case issue
- * keys, optional severity kept only when present, and the report's own
- * materialization mapped through the same snake_case projection. Provider
- * errors pass through unchanged so a failed scan is never hidden.
+ * keys, optional severity kept only when present. Provider errors pass
+ * through unchanged so a failed scan is never hidden. Materialization is not
+ * part of the diagnostics report — it is projected once at the top level by
+ * `summarizeExecution`.
  */
 function toToolDiagnostics(diagnostics: DiagnosticReport) {
   return {
@@ -301,7 +297,6 @@ function toToolDiagnostics(diagnostics: DiagnosticReport) {
       message: issue.message,
       ...(issue.severity === undefined ? {} : { severity: issue.severity }),
     })),
-    ...(diagnostics.materialization === undefined ? {} : { materialization: toToolMaterialization(diagnostics.materialization) }),
     errors: diagnostics.errors,
   }
 }

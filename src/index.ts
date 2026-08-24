@@ -231,9 +231,9 @@ export function apply(ctx: Context, config: Config): void {
   })
   // One protocol-independent coordinator owns request validation, planner
   // context capture, approval gating, commit serialization, and result
-  // projection for both the tool and (from Task 5) the automatic driver.
-  // The same coordinator carries the post-apply diagnostics runner (Task 8),
-  // so tool, command, and automatic gate all see one report per commit.
+  // projection for both the tool and the automatic driver. The same
+  // coordinator carries the post-apply diagnostics runner, so tool, command,
+  // and automatic gate all see one report per commit.
   const coordinator = createRefineCoordinator({
     store,
     completeFor: agent => completeViaAgent(ctx, agent, config.plannerMaxTokens),

@@ -667,31 +667,27 @@ describe('harness_refine coordinator adapter', () => {
         status: 'partial' as const,
         structural: [],
         security: [],
-        materialization: {
-          status: 'completed',
-          written: ['w'],
-          unchanged: [],
-          skipped: [],
-          staleCandidates: ['s'],
-          errors: [],
-        },
         errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
       },
     }))
     const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
     const result = await executeTool(ctx, 'harness_refine', { global: true }, agent())
     const json = resultJson(result)
-    // counts come only from the coordinator output and are unchanged by diagnostics
-    expect(json).toMatchObject({ applied: 1, failed: 0, refinement_id: 'r' })
-    expect(json.diagnostics).toMatchObject({
-      status: 'partial',
-      structural: [],
-      security: [],
-      errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+    // counts come only from the coordinator output; the top-level materialization
+    // stays put, while diagnostics carries only diagnostics fields
+    expect(json).toMatchObject({
+      applied: 1,
+      failed: 0,
+      refinement_id: 'r',
+      materialization: expect.any(Object),
+      diagnostics: {
+        status: 'partial',
+        structural: [],
+        security: [],
+        errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+      },
     })
-    // camelCase materialization fields map to the existing snake_case output
-    const diagnostics = json.diagnostics as { materialization: Record<string, unknown> }
-    expect(diagnostics.materialization.stale_candidates).toEqual(['s'])
+    expect(json.diagnostics).not.toHaveProperty('materialization')
   })
 
   it('omits the diagnostics key when the coordinator result has none', async () => {
