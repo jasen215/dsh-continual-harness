@@ -321,8 +321,9 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
        return mutex.run(key, async () => {
          if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
-         const commitState = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
-          void commitState
+         // The Store re-reads the target state inside applyRefinement for
+         // commit-time conflict detection (spec §5.1/§6.3); the coordinator
+         // captured its planner baseline once and does not re-read here.
          let result: RefinementResult & { materialization: MaterializationResult }
       try {
         result = await options.store.applyRefinement(request.agent, proposal as never, {

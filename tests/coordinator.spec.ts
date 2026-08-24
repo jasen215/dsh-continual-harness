@@ -382,6 +382,32 @@ describe('createRefineCoordinator', () => {
     expect(result).toMatchObject({ commitStatus: 'committed', appliedCount: 1, rejectedCount: 0, failedAt: 'materialization', error: { code: 'materialization-failed' } })
   })
 
+  it('maps a throwing Store commit to the stable commit-failed code without a success result', async () => {
+    const store = fakeStore()
+    store.applyRefinement = vi.fn(async () => { throw new Error('disk full') })
+    const plan = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
+    expect(plan).toMatchObject({
+      commitStatus: 'not-committed',
+      approval: 'not-required',
+      appliedCount: 0,
+      rejectedCount: 0,
+      failedAt: 'commit',
+      error: { code: 'commit-failed', message: 'disk full' },
+    })
+    expect(plan.refinement).toBeUndefined()
+
+    const { store: rolling, agent: liveAgent } = realStoreWithHistory()
+    rolling.applyRefinement = vi.fn(async () => { throw new Error('disk full') })
+    const rollback = await createRefineCoordinator({ store: rolling, completeFor: () => cannedComplete('{}') })
+      .execute({ mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'seed', agent: liveAgent })
+    expect(rollback).toMatchObject({
+      commitStatus: 'not-committed',
+      failedAt: 'commit',
+      error: { code: 'commit-failed', message: 'disk full' },
+    })
+    expect(rollback.refinement).toBeUndefined()
+  })
+
   describe('post-apply diagnostics hook', () => {
     it('runs the injected runner once after a committed plan with touched skills', async () => {
       const store = fakeStore()
