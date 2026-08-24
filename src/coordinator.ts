@@ -222,6 +222,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
 
       const localState = options.store.localState(request.agent)
       const globalState = options.store.globalState()
+       const baseline = request.scope === 'global' ? globalState : localState
        const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
       const historyText = historyForPrompt(options.store.history(request.agent))
       const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
@@ -275,12 +276,13 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
        return mutex.run(key, async () => {
          if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
-         const commitBaseline = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
+         const commitState = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
+          void commitState
          let result: RefinementResult & { materialization: MaterializationResult }
       try {
         result = await options.store.applyRefinement(request.agent, proposal as never, {
           global: request.scope === 'global',
-          baseline: commitBaseline,
+          baseline,
           automatic: request.source === 'automatic',
         })
       } catch (error) {

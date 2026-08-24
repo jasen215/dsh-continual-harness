@@ -105,9 +105,13 @@ function realStoreWithHistory(): { store: HarnessStore; agent: Agent } {
 function delayedStore(): HarnessStore & {
   commitOrder(): string[]
   plannerOverlap(): number
+  plannerStart(): void
+  plannerEnd(): void
   commitOverlap(): number
 } {
   const order: string[] = []
+  let activePlanner = 0
+  let maxPlanner = 0
   let activeCommit = 0
   let maxCommit = 0
   const store = fakeStore(() => {}) as HarnessStore & {
@@ -124,7 +128,9 @@ function delayedStore(): HarnessStore & {
     return refinementResult(plan.id)
   })
   store.commitOrder = () => order
-  store.plannerOverlap = () => 0
+  store.plannerOverlap = () => maxPlanner
+  store.plannerStart = () => { activePlanner += 1; maxPlanner = Math.max(maxPlanner, activePlanner) }
+  store.plannerEnd = () => { activePlanner -= 1 }
   store.commitOverlap = () => maxCommit
   return store
 }
@@ -207,16 +213,13 @@ describe('createRefineCoordinator', () => {
     expect(second.error?.code).toBe('rollback-already-rolled-back')
   })
 
-  it('serializes same-scope commits while allowing planning outside the lock', async () => {
+  it('serializes same-scope commits while allowing concurrent planner work outside the lock', async () => {
     const store = delayedStore()
-    let planning = 0
-    let planningMax = 0
     let sequence = 0
     const complete = async () => {
-      planning += 1
-      planningMax = Math.max(planningMax, planning)
+      store.plannerStart()
       await Promise.resolve()
-      planning -= 1
+      store.plannerEnd()
       sequence += 1
       return JSON.stringify({ id: sequence === 1 ? 'first' : 'second', summary: 'test', edits: [{ action: 'create', kind: 'memory', id: `m${sequence}`, content: 'x' }] })
     }
@@ -225,7 +228,7 @@ describe('createRefineCoordinator', () => {
     const second = coordinator.execute(planRequest('local', 'tool'))
     await Promise.all([first, second])
     expect(store.commitOrder()).toEqual(['first', 'second'])
-    expect(planningMax).toBeGreaterThan(1)
+    expect(store.plannerOverlap()).toBeGreaterThan(1)
     expect(store.commitOverlap()).toBe(1)
   })
 
@@ -251,6 +254,26 @@ describe('createRefineCoordinator', () => {
     expect(result.refinement?.id).toBe('plan-1')
     expect(result.materialization?.status).toBe('completed')
     expect(result.refinement?.appliedEdits).toHaveLength(1)
+  })
+
+  it('passes the planner snapshot so a target mutation is rejected as a conflict', async () => {
+    const store = fakeStore()
+    const baseline = emptyState()
+    const changed = { ...emptyState(), entries: { ...emptyState().entries, memory: { changed: { kind: 'memory', id: 'changed', content: 'new', version: 1 } } } }
+    vi.mocked(store.localState).mockReturnValueOnce(baseline).mockReturnValueOnce(changed)
+    store.applyRefinement = vi.fn(async (_agent, _proposal, options) => {
+      expect(options.baseline).toBe(baseline)
+      return {
+        ...refinementResult('conflict'),
+        appliedEdits: [{ action: 'update', kind: 'memory', id: 'changed', applied: false, blastRadius: 'general', error: 'entry changed during refinement planning' }],
+        materialization: emptyMaterialization(),
+      }
+    })
+    const result = await createRefineCoordinator({
+      store,
+      completeFor: () => cannedComplete({ id: 'conflict', summary: 'conflict', edits: [{ action: 'update', kind: 'memory', id: 'changed', content: 'planned', reason: 'test' }] }),
+    }).execute(planRequest('local', 'tool'))
+    expect(result).toMatchObject({ commitStatus: 'committed-with-rejected-edits', appliedCount: 0, rejectedCount: 1 })
   })
 
   it('maps partial Store application to committed-with-rejected-edits', async () => {
