@@ -28,6 +28,7 @@ import {
   validateCandidateDelta,
 } from './benchmark.ts'
 import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
+import { executionSummary } from './coordinator.ts'
 import type { RefineCoordinator, RefineExecutionResult } from './coordinator.ts'
 import { BENCHMARK_DIR_NAME, BENCHMARK_RUNS_FILE_NAME, BENCHMARK_SNAPSHOTS_DIR_NAME } from './domain.ts'
 import { runCellEvaluation } from './evaluate.ts'
@@ -314,7 +315,7 @@ function summarizeExecution(execution: RefineExecutionResult, scope: 'local' | '
   return {
     refinement_id: execution.refinement?.id ?? 'none',
     scope: execution.refinement?.scope ?? scope,
-    summary: execution.refinement?.summary ?? execution.error?.message ?? 'no refinement produced',
+    summary: executionSummary(execution),
     applied: execution.appliedCount,
     failed: execution.rejectedCount,
     edits: (execution.refinement?.appliedEdits ?? []).map(edit => ({

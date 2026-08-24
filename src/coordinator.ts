@@ -1,7 +1,16 @@
+/**
+ * Protocol-independent refine execution pipeline: validates requests, plans
+ * through the Complete seam, gates global tool writes behind approval, and
+ * commits through the HarnessStore — shared by the harness_refine tool, the
+ * automatic driver gate, and the optional /refine command. Post-apply
+ * diagnostics run after every committed refinement.
+ * @module dsh-continual-harness
+ */
+
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import type { Complete } from './planner.ts'
-import { rollbackProposal, validateEdit } from './refine.ts'
+import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
@@ -12,6 +21,7 @@ import type {
   DiagnosticReport,
   HarnessScope,
   MaterializationResult,
+  RefinementProposal,
   RefinementResult,
   SkillEntry,
 } from './types.ts'
@@ -87,6 +97,11 @@ export interface RefineCoordinatorOptions {
   diagnostics?: DiagnosticRunner
 }
 
+/** One-line summary for a refinement result; shared by the tool and command renderers. */
+export function executionSummary(execution: RefineExecutionResult): string {
+  return execution.refinement?.summary ?? execution.error?.message ?? 'no refinement produced'
+}
+
 function validateRequest(request: RefineRequest): string | undefined {
   if (!request || typeof request !== 'object' || !request.agent) return 'agent is required'
   if (request.mode === 'plan') {
@@ -135,6 +150,21 @@ function counts(appliedEdits: Array<{ applied: boolean }>): { appliedCount: numb
   }, { appliedCount: 0, rejectedCount: 0 })
 }
 
+/** Rollback target validation shared by the fast-fail phase and the in-mutex re-check. */
+function rollbackErrorFor(
+  history: RefinementResult[],
+  rollbackId: string,
+  scope: HarnessScope,
+): { target: RefinementResult } | { error: { code: RefineErrorCode; message: string } } {
+  const target = history.find(item => item.id === rollbackId)
+  if (!target) return { error: { code: 'rollback-target-not-found', message: `no refinement found with id ${rollbackId}` } }
+  if (target.scope !== scope) return { error: { code: 'rollback-scope-mismatch', message: `refinement ${rollbackId} belongs to ${target.scope} scope` } }
+  if (target.rollbackOf !== undefined || history.some(item => item.rollbackOf === target.id)) {
+    return { error: { code: 'rollback-already-rolled-back', message: `refinement ${rollbackId} has already been rolled back` } }
+  }
+  return { target }
+}
+
 class KeyedMutex {
   private readonly tails = new Map<string, Promise<void>>()
 
@@ -163,8 +193,8 @@ function executionFromCommit(
     approval,
     ...editCounts,
     refinement: result,
-    ...(result.materialization === undefined ? {} : { materialization: result.materialization }),
-    ...(result.materialization?.status === 'failed' ? {
+    materialization: result.materialization,
+    ...(result.materialization.status === 'failed' ? {
       failedAt: 'materialization' as const,
       error: { code: 'materialization-failed' as const, message: 'skill materialization failed' },
     } : {}),
@@ -191,14 +221,15 @@ async function attachDiagnostics(
   if (request.signal?.aborted) {
     return { ...committed, failedAt: 'diagnostics', error: { code: 'aborted', message: 'refinement request aborted' } }
   }
-  const touchedSkillIds = committed.refinement.appliedEdits
-    .filter(edit => edit.applied && edit.kind === 'skill')
-    .map(edit => edit.id)
-  const entries = options.store.state(request.agent).entries.skill as Record<string, SkillEntry>
+  const touched = touchedSkillIds(committed.refinement.appliedEdits)
+  // Providers iterate only touched ids; skip the merged-state read when nothing was touched.
+  const entries = touched.length === 0
+    ? {} as Record<string, SkillEntry>
+    : options.store.state(request.agent).entries.skill as Record<string, SkillEntry>
   try {
     const diagnostics = await options.diagnostics.run({
       refinementId: committed.refinement.id,
-      touchedSkillIds,
+      touchedSkillIds: touched,
       entries,
       ...(committed.materialization === undefined ? {} : { materialization: committed.materialization }),
       // The coordinator itself never requests security; the runner's
@@ -226,42 +257,37 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         return { ...errorResult('validation', 'invalid-request', validationError) }
       }
       if (request.signal?.aborted) return errorResult('validation', 'aborted', 'refinement request aborted')
+
       if (request.mode === 'rollback') {
-         const history = options.store.history(request.agent)
-         const target = history.find(item => item.id === request.rollbackId)
-         if (!target) return errorResult('validation', 'rollback-target-not-found', `no refinement found with id ${request.rollbackId}`)
-         if (target.scope !== request.scope) return errorResult('validation', 'rollback-scope-mismatch', `refinement ${request.rollbackId} belongs to ${target.scope} scope`)
-         if (target.rollbackOf !== undefined || history.some(item => item.rollbackOf === target.id)) {
-           return errorResult('validation', 'rollback-already-rolled-back', `refinement ${request.rollbackId} has already been rolled back`)
-         }
-         const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
-         return mutex.run(key, async () => {
-           if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted')
-           const commitHistory = options.store.history(request.agent)
-           const commitTarget = commitHistory.find(item => item.id === request.rollbackId)
-           if (!commitTarget) return errorResult('commit', 'rollback-target-not-found', `no refinement found with id ${request.rollbackId}`)
-           if (commitTarget.scope !== request.scope) return errorResult('commit', 'rollback-scope-mismatch', `refinement ${request.rollbackId} belongs to ${commitTarget.scope} scope`)
-           if (commitTarget.rollbackOf !== undefined || commitHistory.some(item => item.rollbackOf === commitTarget.id)) {
-             return errorResult('commit', 'rollback-already-rolled-back', `refinement ${request.rollbackId} has already been rolled back`)
-           }
-           const commitState = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
-           const proposal = rollbackProposal(commitTarget)
-           try {
-             const result = await options.store.applyRefinement(request.agent, proposal, {
-               global: request.scope === 'global', rollbackOf: commitTarget.id, baseline: commitState,
-             })
-             return attachDiagnostics(options, request, executionFromCommit(result, 'not-required'))
-           } catch (error) {
-             return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error))
-           }
-         })
-       }
-       if (request.mode !== 'plan') return emptyResult()
+        const history = options.store.history(request.agent)
+        const resolved = rollbackErrorFor(history, request.rollbackId, request.scope)
+        if ('error' in resolved) return errorResult('validation', resolved.error.code, resolved.error.message)
+        const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
+        return mutex.run(key, async () => {
+          if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted')
+          const commitHistory = options.store.history(request.agent)
+          const commitResolved = rollbackErrorFor(commitHistory, request.rollbackId, request.scope)
+          if ('error' in commitResolved) return errorResult('commit', commitResolved.error.code, commitResolved.error.message)
+          const commitTarget = commitResolved.target
+          const commitState = request.scope === 'global' ? options.store.globalState() : options.store.localState(request.agent)
+          const proposal = rollbackProposal(commitTarget)
+          try {
+            const result = await options.store.applyRefinement(request.agent, proposal, {
+              global: request.scope === 'global',
+              rollbackOf: commitTarget.id,
+              baseline: commitState,
+            })
+            return attachDiagnostics(options, request, executionFromCommit(result, 'not-required'))
+          } catch (error) {
+            return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error))
+          }
+        })
+      }
 
       const localState = options.store.localState(request.agent)
       const globalState = options.store.globalState()
-       const baseline = request.scope === 'global' ? globalState : localState
-       const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
+      const baseline = request.scope === 'global' ? globalState : localState
+      const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
       const historyText = historyForPrompt(options.store.history(request.agent))
       const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
 
@@ -312,24 +338,24 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
 
       const key = request.scope === 'global' ? 'global' : `local:${String(request.agent.session.id)}`
-       return mutex.run(key, async () => {
-         if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
-         // The Store re-reads the target state inside applyRefinement for
-         // commit-time conflict detection (spec §5.1/§6.3); the coordinator
-         // captured its planner baseline once and does not re-read here.
-         let result: RefinementResult & { materialization: MaterializationResult }
-      try {
-        result = await options.store.applyRefinement(request.agent, proposal as never, {
-          global: request.scope === 'global',
-          baseline,
-          automatic: request.source === 'automatic',
-        })
-      } catch (error) {
-        return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error), approval)
-      }
-      const committed = executionFromCommit(result, approval)
-      return attachDiagnostics(options, request, committed)
-       })
-     },
+      return mutex.run(key, async () => {
+        if (request.signal?.aborted) return errorResult('commit', 'aborted', 'refinement request aborted', approval)
+        // The Store re-reads the target state inside applyRefinement for
+        // commit-time conflict detection (spec §5.1/§6.3); the coordinator
+        // captured its planner baseline once and does not re-read here.
+        let result: RefinementResult & { materialization: MaterializationResult }
+        try {
+          result = await options.store.applyRefinement(request.agent, proposal as RefinementProposal, {
+            global: request.scope === 'global',
+            baseline,
+            automatic: request.source === 'automatic',
+          })
+        } catch (error) {
+          return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error), approval)
+        }
+        const committed = executionFromCommit(result, approval)
+        return attachDiagnostics(options, request, committed)
+      })
+    },
   }
 }

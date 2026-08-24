@@ -1,4 +1,12 @@
+/**
+ * Optional `/refine` slash-command adapter: parses raw input into a coordinator
+ * request, executes once, and renders the result as plain text. Registered only
+ * when the host provides a `commands` capability.
+ * @module dsh-continual-harness
+ */
+
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { executionSummary } from './coordinator.ts'
 import type { RefineCoordinator, RefineExecutionResult, RefineRequest } from './coordinator.ts'
 
 /**
@@ -35,7 +43,7 @@ const SCOPE_FLAGS = ['--global', '--local'] as const
 type ScopeFlag = (typeof SCOPE_FLAGS)[number]
 
 function isScopeFlag(token: string): token is ScopeFlag {
-  return token === '--global' || token === '--local'
+  return (SCOPE_FLAGS as readonly string[]).includes(token)
 }
 
 function scopeOf(flag: ScopeFlag): 'local' | 'global' {
@@ -44,11 +52,7 @@ function scopeOf(flag: ScopeFlag): 'local' | 'global' {
 
 /** Strip one leading `/refine` or `refine` token; a bare remainder passes through. */
 function stripRefineToken(rawInput: string): string {
-  const trimmed = rawInput.trim()
-  if (trimmed === '/refine' || trimmed === 'refine') return ''
-  if (trimmed.startsWith('/refine ')) return trimmed.slice('/refine '.length)
-  if (trimmed.startsWith('refine ')) return trimmed.slice('refine '.length)
-  return trimmed
+  return rawInput.trim().replace(/^\/?refine(?=\s|$)/, '').trim()
 }
 
 function parsePlan(tokens: string[], defaultGlobal: boolean): ParsedRefineCommand | { error: string } {
@@ -108,7 +112,7 @@ function renderExecution(result: RefineExecutionResult, scope: 'local' | 'global
     `refinement: ${result.refinement?.id ?? 'none'}`,
     `applied: ${result.appliedCount}`,
     `rejected: ${result.rejectedCount}`,
-    `summary: ${result.refinement?.summary ?? result.error?.message ?? 'no refinement produced'}`,
+    `summary: ${executionSummary(result)}`,
   ]
   if (result.error) lines.push(`error: ${result.error.code} ${result.error.message}`)
   // Concise post-apply diagnostics: one status line, then one line per
@@ -183,6 +187,5 @@ export function registerRefineCommand(
   coordinator: RefineCoordinator,
   options: { defaultGlobal: boolean },
 ): { dispose(): void } {
-  const registration = commands.register('refine', createRefineCommandAdapter(coordinator, options))
-  return { dispose: () => registration.dispose() }
+  return commands.register('refine', createRefineCommandAdapter(coordinator, options))
 }
