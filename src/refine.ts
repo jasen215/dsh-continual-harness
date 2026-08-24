@@ -355,6 +355,11 @@ export function applyRefinementProposal(
   return { result, state: next }
 }
 
+/** Skill entries touched by applied edits; shared by materialization and post-apply diagnostics. */
+export function touchedSkillIds(appliedEdits: Array<Pick<AppliedRefinementEdit, 'applied' | 'kind' | 'id'>>): string[] {
+  return appliedEdits.filter(edit => edit.applied && edit.kind === 'skill').map(edit => edit.id)
+}
+
 /** Revert a committed result: reverse edit order, restoring full entries from
  * snapshots when available; legacy content-only records degrade and are marked. */
 export function rollbackProposal(target: RefinementResult): RefinementProposal {
