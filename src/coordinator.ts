@@ -11,7 +11,6 @@ import type {
   AutoRefineReason,
   DiagnosticReport,
   HarnessScope,
-  HarnessState,
   MaterializationResult,
   RefinementResult,
   SkillEntry,
@@ -85,12 +84,6 @@ export interface RefineCoordinatorOptions {
   maxTrajectoryChars?: number
   requireGlobalApproval?: (agent: Agent, signal: AbortSignal | undefined, summary: string) => Promise<void>
   requireGlobalApprovalForTool?: boolean
-  plannerContext?: (agent: Agent, scope: HarnessScope) => {
-    baseline: HarnessState
-    stateOverview: string
-    historyText: string
-    trajectoryText: string
-  }
   diagnostics?: DiagnosticRunner
 }
 
@@ -334,21 +327,9 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       } catch (error) {
         return errorResult('commit', 'commit-failed', error instanceof Error ? error.message : String(error), approval)
       }
-      const editCounts = counts(result.appliedEdits ?? [])
-      const committed: RefineExecutionResult = {
-        commitStatus: editCounts.rejectedCount > 0 ? 'committed-with-rejected-edits' : 'committed',
-        approval,
-        ...editCounts,
-        refinement: result,
-        ...(result.materialization === undefined ? {} : { materialization: result.materialization }),
-        ...(result.materialization?.status === 'failed' ? {
-          failedAt: 'materialization' as const,
-          error: { code: 'materialization-failed' as const, message: 'skill materialization failed' },
-        } : {}),
-      }
+      const committed = executionFromCommit(result, approval)
       return attachDiagnostics(options, request, committed)
        })
      },
   }
 }
-
