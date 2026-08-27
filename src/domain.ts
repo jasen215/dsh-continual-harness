@@ -20,8 +20,10 @@ export const HARNESS_REFINEMENT_EVENT = 'harness/refinement'
 export const HARNESS_STATE_SOURCE = 'harness-state'
 /** Monotonic schema version of the harness state file. */
 export const HARNESS_SCHEMA_VERSION = 2
+/** Prefix shared by the active injection telemetry log and its epoch-stamped archives. */
+export const USAGE_ARCHIVE_PREFIX = 'usage.events.'
 /** Append-only injection telemetry event log under the harness home. */
-export const USAGE_EVENTS_FILE_NAME = 'usage.events.jsonl'
+export const USAGE_EVENTS_FILE_NAME = `${USAGE_ARCHIVE_PREFIX}jsonl`
 /** Kind names accepted by the harness layer. */
 export const REFINEMENT_KINDS = ['prompt', 'memory', 'skill', 'subagent'] as const
 /** Kebab-case pattern dsh requires for skill names (and the safe path form). */
