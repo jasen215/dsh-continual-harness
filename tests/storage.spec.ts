@@ -4,11 +4,13 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   appendGlobalRefinement,
+  appendLocalRefinement,
   emptyHarnessState,
   getGlobalHarnessStateDir,
   getLocalHarnessStateDir,
   loadGlobalRefinementHistory,
   loadHarnessState,
+  loadSessionRefinementHistory,
   loadUsageEvents,
   migrateHarnessState,
   appendUsageEvent,
@@ -218,5 +220,13 @@ describe('harness state storage', () => {
     appendGlobalRefinement(home, result)
     const history = loadGlobalRefinementHistory(home)
     expect(history).toEqual([result])
+  })
+
+  it('appends and reloads the session-local refinement journal per session', () => {
+    const home = tempHome()
+    const result: RefinementResult = { id: 'r10', summary: 's', appliedEdits: [], committedAt: 't', scope: 'local' }
+    appendLocalRefinement(home, 'session-a', result)
+    expect(loadSessionRefinementHistory(home, 'session-a')).toEqual([result])
+    expect(loadSessionRefinementHistory(home, 'session-b')).toEqual([])
   })
 })

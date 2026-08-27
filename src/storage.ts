@@ -120,16 +120,25 @@ export function saveHarnessState(dir: string, state: HarnessState): void {
   renameSync(tmp, file)
 }
 
-/** Append one global refinement to the cross-session history. */
-export function appendGlobalRefinement(home: string, result: RefinementResult): void {
-  const dir = getGlobalHarnessStateDir(home)
+/** Append one refinement record to a refinement journal (jsonl). */
+export function appendRefinement(dir: string, result: RefinementResult): void {
   mkdirSync(dir, { recursive: true })
   appendFileSync(join(dir, REFINEMENT_HISTORY_FILE_NAME), `${JSON.stringify(result)}\n`, 'utf8')
 }
 
-/** Read the cross-session refinement history; a corrupt line is skipped. */
-export function loadGlobalRefinementHistory(home: string): RefinementResult[] {
-  const file = join(getGlobalHarnessStateDir(home), REFINEMENT_HISTORY_FILE_NAME)
+/** Append one global refinement to the cross-session history. */
+export function appendGlobalRefinement(home: string, result: RefinementResult): void {
+  appendRefinement(getGlobalHarnessStateDir(home), result)
+}
+
+/** Append one session-local refinement to the session's history journal. */
+export function appendLocalRefinement(home: string, sessionKey: string, result: RefinementResult): void {
+  appendRefinement(getLocalHarnessStateDir(home, sessionKey), result)
+}
+
+/** Read one refinement journal; a corrupt line is skipped. */
+function loadRefinementHistory(dir: string): RefinementResult[] {
+  const file = join(dir, REFINEMENT_HISTORY_FILE_NAME)
   if (!existsSync(file)) return []
   const results: RefinementResult[] = []
   for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -141,6 +150,16 @@ export function loadGlobalRefinementHistory(home: string): RefinementResult[] {
     }
   }
   return results
+}
+
+/** Read the cross-session refinement history. */
+export function loadGlobalRefinementHistory(home: string): RefinementResult[] {
+  return loadRefinementHistory(getGlobalHarnessStateDir(home))
+}
+
+/** Read the session-local refinement history (full records kept for rollback). */
+export function loadSessionRefinementHistory(home: string, sessionKey: string): RefinementResult[] {
+  return loadRefinementHistory(getLocalHarnessStateDir(home, sessionKey))
 }
 
 /** Merge histories with local session events first, de-duplicated by id. */
