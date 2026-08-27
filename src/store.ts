@@ -19,12 +19,14 @@ import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, rec
 import type { SkillBundleLimits } from './skills.ts'
 import {
   appendGlobalRefinement,
+  appendLocalRefinement,
   appendUsageEvents,
   defaultHarnessHome,
   getGlobalHarnessStateDir,
   getLocalHarnessStateDir,
   loadGlobalRefinementHistory,
   loadHarnessState,
+  loadSessionRefinementHistory,
   loadUsageEvents,
   mergeHarnessStates,
   mergeRefinementHistory,
@@ -172,9 +174,17 @@ export class HarnessStore {
     return buildSnapshot(mergeHarnessStates(global, local), snapshotId, refinementId, { local, global })
   }
 
-  /** Merged refinement history: session store refinements first, then global history. */
+  /**
+   * Merged refinement history: the session journal (full records, first for
+   * dedupe-by-id fidelity), then the session state copy (conclusion-only),
+   * then the cross-session history (full records).
+   */
   history(agent: Agent): RefinementResult[] {
-    const local = this.localState(agent).refinements
+    const sessionKey = String(agent.session.id)
+    const local = [
+      ...loadSessionRefinementHistory(this.home, sessionKey),
+      ...this.localState(agent).refinements,
+    ]
     return mergeRefinementHistory(local, loadGlobalRefinementHistory(this.home))
   }
 
@@ -274,6 +284,7 @@ export class HarnessStore {
       appendGlobalRefinement(this.home, result)
     } else {
       saveHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)), state)
+      appendLocalRefinement(this.home, String(agent.session.id), result)
     }
     // The `harness/refinement` session event is out-of-repo vocabulary: the
     // harness core's generated KNOWN_SESSION_EVENT_TYPES does not include it,

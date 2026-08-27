@@ -239,6 +239,32 @@ describe('full entry snapshots and rollback', () => {
     expect(rollback.edits[0]).toHaveProperty('rollbackDegraded', true)
   })
 
+  it('persists a conclusion-only record in the state while the result keeps full snapshots', () => {
+    const state = freshState()
+    state.entries.memory['m'] = {
+      id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't',
+      title: 'old title', metadata: { sourceSession: 's1' },
+    }
+    const { result, state: next } = applyRefinementProposal(state, {
+      id: 'r-strip', summary: 'update',
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'new' }],
+    }, { id: 'r-strip', scope: 'local', baselineState: state })
+    // The in-memory result keeps the snapshots (rollback/diagnostics use them).
+    expect(result.appliedEdits[0]).toMatchObject({ applied: true, reason: 'why', blastRadius: 'general' })
+    expect(result.appliedEdits[0]?.beforeEntry?.content).toBe('old')
+    expect(result.appliedEdits[0]?.beforeEntry?.title).toBe('old title')
+    expect(result.appliedEdits[0]?.afterEntry?.content).toBe('new')
+    // The persisted state copy records only the conclusion + edit metadata.
+    const persisted = next.refinements[0]!
+    const edit = persisted.appliedEdits[0]!
+    expect(persisted.summary).toBe('update')
+    expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'm', applied: true, reason: 'why', blastRadius: 'general' })
+    expect(edit.before).toBeUndefined()
+    expect(edit.after).toBeUndefined()
+    expect(edit.beforeEntry).toBeUndefined()
+    expect(edit.afterEntry).toBeUndefined()
+  })
+
   it('detects a baseline mismatch on skill persisted fields', () => {
     const baseline = freshState()
     baseline.entries.skill['skill'] = {

@@ -351,8 +351,29 @@ export function applyRefinementProposal(
     committedAt: now,
     scope: options.scope,
   }
-  next.refinements.push(result)
+  // The state file records conclusions only (no snapshot bodies); the caller
+  // journaling the full record (refinements.jsonl) keeps rollback fidelity.
+  next.refinements.push(stripRefinementSnapshots(result))
   return { result, state: next }
+}
+
+/**
+ * Conclusion-only projection of a committed refinement for the state file:
+ * applied edits keep their metadata (action/kind/id/blastRadius/applied/
+ * error/reason) but drop the content snapshot bodies (before/after/
+ * beforeEntry/afterEntry). The full record stays in the refinements.jsonl
+ * journal (rollback/audit), so `harness_state.json` only records conclusions
+ * and stays small. The in-memory result is unaffected, so diagnostics,
+ * materialization, and the tool result still see the full snapshots.
+ */
+export function stripRefinementSnapshots(result: RefinementResult): RefinementResult {
+  return {
+    ...result,
+    appliedEdits: result.appliedEdits.map(edit => {
+      const { before, after, beforeEntry, afterEntry, ...rest } = edit
+      return rest
+    }),
+  }
 }
 
 /** Skill entries touched by applied edits; shared by materialization and post-apply diagnostics. */

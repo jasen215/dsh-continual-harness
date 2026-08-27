@@ -8,7 +8,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { HarnessStore, serializeTrajectory } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { getGlobalHarnessStateDir, getLocalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
+import { getGlobalHarnessStateDir, getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from '../src/storage.ts'
 import type { RefinementProposal } from '../src/types.ts'
 
 const tempDirs: string[] = []
@@ -128,6 +128,31 @@ describe('HarnessStore', () => {
     expect(session.events.some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(false)
     expect(store.state(agent).entries.memory['fact']?.content).toBe('durable')
     expect(store.history(agent).map(entry => entry.id)).toEqual(['refine_1'])
+  })
+
+  it('keeps the state file conclusion-only while the session journal holds full records', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = testStore(ctx, home)
+    const { agent } = stubAgent('journal-agent')
+    store.applyRefinement(agent, {
+      id: 'refine_j', summary: 'update',
+      edits: [{ action: 'create', kind: 'memory', id: 'note', content: 'first' }],
+    }, {})
+    const sessionDir = getLocalHarnessStateDir(home, 'journal-agent')
+    // Session journal: the full record with snapshot bodies, for rollback.
+    const journal = readFileSync(join(sessionDir, 'refinements.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    expect(journal).toHaveLength(1)
+    expect(journal[0]?.id).toBe('refine_j')
+    expect(journal[0]?.appliedEdits[0]?.after).toBe('first')
+    expect(journal[0]?.appliedEdits[0]?.afterEntry?.content).toBe('first')
+    // State file copy: conclusion-only — same id/summary/edit metadata, no bodies.
+    const saved = loadHarnessState(sessionDir)
+    expect(saved.refinements[0]?.id).toBe('refine_j')
+    expect(saved.refinements[0]?.summary).toBe('update')
+    expect(saved.refinements[0]?.appliedEdits[0]).toMatchObject({ action: 'create', kind: 'memory', id: 'note', applied: true })
+    expect(saved.refinements[0]?.appliedEdits[0]?.after).toBeUndefined()
+    expect(saved.refinements[0]?.appliedEdits[0]?.afterEntry).toBeUndefined()
   })
 
   it('rolls back a refinement from the merged history', () => {

@@ -726,6 +726,8 @@ function deriveCandidateSnapshot(reference: HarnessSnapshot, refinement: Refinem
 function applyEditsToEntries(entries: HarnessState['entries'], refinement: RefinementResult): void {
   for (const edit of refinement.appliedEdits) {
     if (!edit.applied) continue
+    // No else: a conclusion-only record carries no replayable content, and
+    // history() always serves the full journal record, so this is unreachable.
     if (edit.action === 'delete') {
       delete entries[edit.kind][edit.id]
     } else if (edit.afterEntry !== undefined) {
