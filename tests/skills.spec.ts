@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -133,15 +133,48 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
     expect(readFileSync(join(dir, 'oq', 'scripts', 'oq_quantize.py'), 'utf8')).toBe('print(1)')
   })
 
-  it('replaces changed files, keeps unchanged ones, and reports stale files without deleting them', () => {
+  it('replaces changed files, keeps unchanged ones, and deletes stale files from owned bundles', () => {
     const dir = tempDir()
     reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/oq_quantize.py': 'v1' }) }, ['oq'])
     writeFileSync(join(dir, 'oq', 'extra.md'), 'user file')
     const result = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/oq_quantize.py': 'v2' }) }, ['oq'])
     expect(readFileSync(join(dir, 'oq', 'scripts', 'oq_quantize.py'), 'utf8')).toBe('v2')
     expect(result.written).toEqual([join(dir, 'oq', 'scripts', 'oq_quantize.py')])
-    expect(result.staleCandidates).toEqual(['extra.md'])
-    expect(existsSync(join(dir, 'oq', 'extra.md'))).toBe(true)
+    expect(result.removed).toEqual([join(dir, 'oq', 'extra.md')])
+    expect(existsSync(join(dir, 'oq', 'extra.md'))).toBe(false)
+  })
+
+  it('removes empty parent directories after deleting stale files, never the bundle root', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq') }, ['oq'])
+    mkdirSync(join(dir, 'oq', 'deep', 'nest'), { recursive: true })
+    writeFileSync(join(dir, 'oq', 'deep', 'nest', 'stale.txt'), 'x')
+
+    const result = reconcileSkillFiles(dir, { oq: entry('oq') }, ['oq'])
+
+    expect(result.removed).toEqual([join(dir, 'oq', 'deep', 'nest', 'stale.txt')])
+    expect(existsSync(join(dir, 'oq', 'deep'))).toBe(false)
+    expect(existsSync(join(dir, 'oq', 'SKILL.md'))).toBe(true)
+    expect(existsSync(join(dir, 'oq'))).toBe(true)
+  })
+
+  it('keeps the file and reports remove-failed when deletion fails, continuing other files', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/a.py': 'a' }) }, ['oq'])
+    writeFileSync(join(dir, 'oq', 'extra1.md'), 'x')
+    writeFileSync(join(dir, 'oq', 'extra2.md'), 'y')
+    const failing: SkillFsOps = {
+      ...defaultSkillFsOps,
+      rmSync(path) {
+        if (path.endsWith('extra1.md')) throw new Error('permission denied')
+        defaultSkillFsOps.rmSync(path)
+      },
+    }
+    const result = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/a.py': 'a' }) }, ['oq'], failing)
+    expect(existsSync(join(dir, 'oq', 'extra1.md'))).toBe(true)
+    expect(existsSync(join(dir, 'oq', 'extra2.md'))).toBe(false)
+    expect(result.removed).toEqual([join(dir, 'oq', 'extra2.md')])
+    expect(result.errors.some(error => error.code === 'remove-failed' && error.retryable === true)).toBe(true)
   })
 
   it('skips a bundle whose existing SKILL.md lacks harness provenance', () => {
@@ -290,6 +323,71 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
     expect(result.skipped).toContain(bundle)
     expect(result.errors.some(error => error.path === bundle && error.code === 'not-a-directory' && error.retryable === true)).toBe(true)
     expect(result.written).toContain(join(dir, 'good', 'SKILL.md'))
+  })
+
+  it('skips symlink files and symlink dirs during discovery (lstat, no follow)', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/x.py': 'x' }) }, ['oq'])
+    // target outside the bundle; a symlink inside the bundle points at it
+    writeFileSync(join(dir, 'outside.txt'), 'outside')
+    symlinkSync(join(dir, 'outside.txt'), join(dir, 'oq', 'link.txt'))
+    mkdirSync(join(dir, 'extdir'), { recursive: true })
+    writeFileSync(join(dir, 'extdir', 'nested.txt'), 'nested')
+    symlinkSync(join(dir, 'extdir'), join(dir, 'oq', 'linkdir'))
+
+    const result = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/x.py': 'x' }) }, ['oq'])
+
+    // symlinks are not removed and their targets are untouched
+    expect(result.removed).toEqual([])
+    expect(readFileSync(join(dir, 'outside.txt'), 'utf8')).toBe('outside')
+    expect(readFileSync(join(dir, 'extdir', 'nested.txt'), 'utf8')).toBe('nested')
+    expect(result.errors.some(error => error.code === 'symlink-skipped' && error.retryable === false)).toBe(true)
+  })
+
+  it('never traverses or deletes outside the bundle root via hostile directory entries', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq') }, ['oq'])
+    writeFileSync(join(dir, 'outside.txt'), 'precious')
+    const hostile: SkillFsOps = {
+      ...defaultSkillFsOps,
+      readdirSync(path) {
+        const names = defaultSkillFsOps.readdirSync(path)
+        return path.endsWith('oq') ? [...names, '..'] : names
+      },
+    }
+    const result = reconcileSkillFiles(dir, { oq: entry('oq') }, ['oq'], hostile)
+    expect(existsSync(join(dir, 'outside.txt'))).toBe(true)
+    expect(existsSync(join(dir, 'oq', 'SKILL.md'))).toBe(true)
+    expect(result.removed).toEqual([])
+  })
+
+  it('is idempotent across repeated reconciles after stale files are removed', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/x.py': 'x' }) }, ['oq'])
+    writeFileSync(join(dir, 'oq', 'extra.md'), 'x')
+    const first = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/x.py': 'x' }) }, ['oq'])
+    expect(first.removed).toEqual([join(dir, 'oq', 'extra.md')])
+    const second = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/x.py': 'x' }) }, ['oq'])
+    expect(second.removed).toEqual([])
+    expect(second.status).toBe('completed')
+  })
+
+  it('reports partial (not failed) when stale deletions succeeded but writes failed', () => {
+    const dir = tempDir()
+    reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/a.py': 'v1' }, 'body v1') }, ['oq'])
+    writeFileSync(join(dir, 'oq', 'extra.md'), 'x')
+    const failing: SkillFsOps = {
+      ...defaultSkillFsOps,
+      writeFileSync(path, data, encoding) {
+        if (path.endsWith('.tmp')) throw new Error('disk full')
+        defaultSkillFsOps.writeFileSync(path, data, encoding)
+      },
+    }
+    const result = reconcileSkillFiles(dir, {
+      oq: entry('oq', { 'scripts/a.py': 'v2' }, 'body v2'),
+    }, ['oq'], failing)
+    expect(result.removed).toEqual([join(dir, 'oq', 'extra.md')])
+    expect(result.status).toBe('partial')
   })
 })
 

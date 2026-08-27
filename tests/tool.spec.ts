@@ -81,7 +81,7 @@ function agent(id = 'tool-coordinator-agent'): Agent {
 }
 
 function emptyMaterialization(): MaterializationResult {
-  return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
+  return { status: 'completed', written: [], unchanged: [], skipped: [], removed: [], errors: [] }
 }
 
 function refinementResult(id: string, edits: RefinementResult['appliedEdits'] = []): RefinementResult & { materialization: MaterializationResult } {
@@ -690,6 +690,74 @@ describe('harness_refine coordinator adapter', () => {
     expect(json.diagnostics).not.toHaveProperty('materialization')
   })
 
+  it('maps optional security file/line/evidence fields into tool output', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('r-sec'),
+      materialization: emptyMaterialization(),
+      diagnostics: {
+        status: 'completed' as const,
+        structural: [],
+        security: [{
+          skillId: 'one',
+          code: 'secret-exposure',
+          message: 'looks like a credential',
+          severity: 'high',
+          file: 'SKILL.md',
+          line: 2,
+          evidence: 'sk-key-like',
+        }],
+        errors: [],
+      },
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const json = resultJson(await executeTool(ctx, 'harness_refine', { global: true }, agent()))
+    expect(json.diagnostics.security[0]).toEqual({
+      skill_id: 'one',
+      code: 'secret-exposure',
+      message: 'looks like a credential',
+      severity: 'high',
+      file: 'SKILL.md',
+      line: 2,
+      evidence: 'sk-key-like',
+    })
+  })
+
+  it('projects a security finding without optional fields to just skill_id/code/message', async () => {
+    const execute = vi.fn(async () => ({
+      commitStatus: 'committed' as const,
+      approval: 'not-required' as const,
+      appliedCount: 1,
+      rejectedCount: 0,
+      refinement: refinementResult('r-sec-bare'),
+      materialization: emptyMaterialization(),
+      diagnostics: {
+        status: 'completed' as const,
+        structural: [],
+        security: [{
+          skillId: 'one',
+          code: 'secret-exposure',
+          message: 'looks like a credential',
+        }],
+        errors: [],
+      },
+    }))
+    const ctx = await mountRefineTool({ execute }, { defaultGlobal: true })
+    const json = resultJson(await executeTool(ctx, 'harness_refine', { global: true }, agent()))
+    expect(json.diagnostics.security[0]).toEqual({
+      skill_id: 'one',
+      code: 'secret-exposure',
+      message: 'looks like a credential',
+    })
+    expect(json.diagnostics.security[0]).not.toHaveProperty('severity')
+    expect(json.diagnostics.security[0]).not.toHaveProperty('file')
+    expect(json.diagnostics.security[0]).not.toHaveProperty('line')
+    expect(json.diagnostics.security[0]).not.toHaveProperty('evidence')
+  })
+
   it('omits the diagnostics key when the coordinator result has none', async () => {
     const execute = vi.fn(async () => ({
       commitStatus: 'committed' as const,
@@ -723,7 +791,7 @@ describe('harness_refine coordinator adapter', () => {
         written: ['w1'],
         unchanged: [],
         skipped: [],
-        staleCandidates: ['s1'],
+        removed: ['s1'],
         errors: [{ path: 'p', code: 'c', retryable: true, message: 'm' }],
       },
     }))
@@ -737,7 +805,7 @@ describe('harness_refine coordinator adapter', () => {
     const edits = json.edits as Array<Record<string, unknown>>
     expect(edits[4]).toMatchObject({ id: 'e', applied: false, error: 'rejected' })
     const materialization = json.materialization as Record<string, unknown>
-    expect(materialization.stale_candidates).toEqual(['s1'])
+    expect(materialization.removed).toEqual(['s1'])
     expect(materialization.errors).toEqual([{ path: 'p', code: 'c', retryable: true, message: 'm' }])
   })
 })

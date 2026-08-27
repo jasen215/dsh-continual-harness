@@ -41,6 +41,16 @@ function providerError(reason: unknown): { code: string; message: string } {
   return { code: 'provider-failed', message }
 }
 
+/** Append issues to the report array matching a provider key (structural vs security). */
+function appendIssues(
+  report: DiagnosticReport,
+  key: 'structural' | 'security',
+  items: unknown[],
+): void {
+  if (key === 'structural') report.structural.push(...(items as SkillBundleIssue[]))
+  else report.security.push(...(items as SecurityIssue[]))
+}
+
 /**
  * Create the aggregating runner. Enabled providers run with
  * `Promise.allSettled` so one failure never discards another provider's
@@ -82,11 +92,14 @@ export function createDiagnosticRunner(options: DiagnosticRunnerOptions): Diagno
       settled.forEach((outcome, index) => {
         const provider = enabled[index]!
         if (outcome.status === 'fulfilled') {
-          if (provider.key === 'structural') report.structural.push(...(outcome.value as SkillBundleIssue[]))
-          else report.security.push(...(outcome.value as SecurityIssue[]))
+          appendIssues(report, provider.key, outcome.value)
           return
         }
         failed = true
+        // A provider rejection may carry collected issues (e.g. ScanTruncatedError):
+        // keep them in the report so truncation never discards findings.
+        const reason = outcome.reason as { issues?: unknown[] } | undefined
+        if (Array.isArray(reason?.issues)) appendIssues(report, provider.key, reason.issues)
         const error = providerError(outcome.reason)
         report.errors.push({ provider: provider.name, code: error.code, message: error.message })
       })

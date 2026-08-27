@@ -61,7 +61,7 @@ function emptyState(): HarnessState {
 }
 
 function emptyMaterialization(): MaterializationResult {
-  return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
+  return { status: 'completed', written: [], unchanged: [], skipped: [], removed: [], errors: [] }
 }
 
 function refinementResult(id: string): RefinementResult & { materialization: MaterializationResult } {

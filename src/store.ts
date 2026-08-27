@@ -333,7 +333,7 @@ export class HarnessStore {
   private materializeSkills(agent: Agent, result: RefinementResult): MaterializationResult {
     const touched = touchedSkillIds(result.appliedEdits)
     if (touched.length === 0) {
-      return { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] }
+      return { status: 'completed', written: [], unchanged: [], skipped: [], removed: [], errors: [] }
     }
     const effective = this.state(agent).entries.skill
     const activeSkills: typeof effective = {}
@@ -349,7 +349,7 @@ export class HarnessStore {
         written: [],
         unchanged: [],
         skipped: [],
-        staleCandidates: [],
+        removed: [],
         errors: [{ code: 'materialize-failed', retryable: true, message: String(error) }],
       }
     }
