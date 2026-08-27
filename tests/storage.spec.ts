@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -14,11 +14,12 @@ import {
   loadUsageEvents,
   migrateHarnessState,
   appendUsageEvent,
+  appendUsageEvents,
   mergeHarnessStates,
   mergeRefinementHistory,
   saveHarnessState,
 } from '../src/storage.ts'
-import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
+import { USAGE_ARCHIVE_PREFIX, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import type { HarnessState, RefinementResult } from '../src/types.ts'
 
 const tempDirs: string[] = []
@@ -182,6 +183,28 @@ describe('harness state storage', () => {
     const events = loadUsageEvents(home)
     expect(events).toHaveLength(2)
     expect(events[0]).toEqual({ key: 'global:memory:fact', at: '2026-01-01T00:00:00.000Z' })
+  })
+
+  it('rotates usage.events.jsonl past the size threshold and loads across archives in order', () => {
+    const home = tempHome()
+    const tiny = 200 // bytes; small enough to trip rotation without MB-scale fixtures
+    appendUsageEvents(home, [{ key: 'k:1', at: '2026-01-01T00:00:00.000Z' }], tiny)
+    // Fill the active file past the threshold: ~20 events × ~55 bytes each.
+    const batch = Array.from({ length: 20 }, (_, i) => ({ key: `k:${i + 2}`, at: `2026-01-01T00:00:0${i}.000Z` }))
+    appendUsageEvents(home, batch, tiny)
+    // The next append must archive the oversized file before writing.
+    appendUsageEvents(home, [{ key: 'k:new', at: '2026-01-02T00:00:00.000Z' }], tiny)
+
+    const files = readdirSync(home).filter(name => name.startsWith(USAGE_ARCHIVE_PREFIX)).sort()
+    expect(files.length).toBeGreaterThanOrEqual(2)
+    expect(files.some(name => name.startsWith(USAGE_ARCHIVE_PREFIX))).toBe(true)
+
+    const events = loadUsageEvents(home)
+    expect(events).toHaveLength(22) // 1 + 20 + 1 across the rotation boundary
+    expect(events[0]).toEqual({ key: 'k:1', at: '2026-01-01T00:00:00.000Z' })
+    expect(events[events.length - 1]).toEqual({ key: 'k:new', at: '2026-01-02T00:00:00.000Z' })
+    // The active file restarted small instead of continuing to grow.
+    expect(statSync(join(home, 'usage.events.jsonl')).size).toBeLessThan(tiny)
   })
 
   it('degrades a corrupt or version-mismatched file to empty state', () => {

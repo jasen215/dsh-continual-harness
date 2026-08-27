@@ -5,7 +5,7 @@
  * @module dsh-continual-harness
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
@@ -14,6 +14,7 @@ import {
   HARNESS_STATE_FILE_NAME,
   REFINEMENT_HISTORY_FILE_NAME,
   REFINEMENT_KINDS,
+  USAGE_ARCHIVE_PREFIX,
   USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
 import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
@@ -136,20 +137,29 @@ export function appendLocalRefinement(home: string, sessionKey: string, result: 
   appendRefinement(getLocalHarnessStateDir(home, sessionKey), result)
 }
 
+/**
+ * Parse newline-delimited JSON text, skipping blank lines and corrupt
+ * entries; `cast` validates and shapes each parsed line (return null to drop).
+ */
+function parseJsonLines<T>(content: string, cast: (parsed: unknown) => T | null): T[] {
+  const out: T[] = []
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const value = cast(JSON.parse(line))
+      if (value !== null) out.push(value)
+    } catch {
+      // skip the corrupt line
+    }
+  }
+  return out
+}
+
 /** Read one refinement journal; a corrupt line is skipped. */
 function loadRefinementHistory(dir: string): RefinementResult[] {
   const file = join(dir, REFINEMENT_HISTORY_FILE_NAME)
   if (!existsSync(file)) return []
-  const results: RefinementResult[] = []
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue
-    try {
-      results.push(JSON.parse(line) as RefinementResult)
-    } catch {
-      // skip corrupt line
-    }
-  }
-  return results
+  return parseJsonLines(readFileSync(file, 'utf8'), parsed => parsed as RefinementResult)
 }
 
 /** Read the cross-session refinement history. */
@@ -174,35 +184,85 @@ export function mergeRefinementHistory(local: RefinementResult[], global: Refine
   return merged
 }
 
-/** Append one injection telemetry event line under the harness home. */
+/** Rotate the active usage log when it exceeds this size (default 1 MiB). */
+export const USAGE_ROTATION_BYTES = 1024 * 1024
+
+/**
+ * Append one injection telemetry event line under the harness home.
+ * Delegates to the batch writer so rotation policy stays in one place.
+ */
 export function appendUsageEvent(home: string, event: { key: string; at: string }): void {
-  mkdirSync(home, { recursive: true })
-  appendFileSync(join(home, USAGE_EVENTS_FILE_NAME), `${JSON.stringify(event)}\n`, 'utf8')
+  appendUsageEvents(home, [event])
 }
 
-/** Append many telemetry events in one open/write (batch, same timestamp). */
-export function appendUsageEvents(home: string, events: Array<{ key: string; at: string }>): void {
+/**
+ * Append many telemetry events in one open/write (batch, same timestamp).
+ *
+ * Rotation: once the active `usage.events.jsonl` reaches `rotationBytes`, it
+ * is renamed to an epoch-stamped archive (`usage.events.<ms>.jsonl`) before
+ * the new lines are written, so the active file stays small while the full
+ * history is preserved across archives. Archives are never auto-deleted (a
+ * pruning policy is left to the operator). `rotationBytes` is injectable for
+ * tests; production callers use the default threshold.
+ */
+export function appendUsageEvents(
+  home: string,
+  events: Array<{ key: string; at: string }>,
+  rotationBytes: number = USAGE_ROTATION_BYTES,
+): void {
   if (events.length === 0) return
   mkdirSync(home, { recursive: true })
+  const file = join(home, USAGE_EVENTS_FILE_NAME)
+  rotateUsageFileIfNeeded(home, file, rotationBytes)
   const lines = events.map(event => `${JSON.stringify(event)}\n`).join('')
-  appendFileSync(join(home, USAGE_EVENTS_FILE_NAME), lines, 'utf8')
+  appendFileSync(file, lines, 'utf8')
 }
 
-/** Read the injection telemetry log; missing file → empty, bad lines skipped. */
+/** Rename the active usage log to an archive when it has grown past the threshold. */
+function rotateUsageFileIfNeeded(home: string, file: string, rotationBytes: number): void {
+  let size: number
+  try {
+    size = statSync(file).size
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return // missing active file → nothing to rotate
+  }
+  if (size >= rotationBytes) {
+    renameSync(file, join(home, `${USAGE_ARCHIVE_PREFIX}${Date.now()}.jsonl`))
+  }
+}
+
+/** Shape-check one usage event line; null drops it. */
+function parseUsageEvent(value: unknown): { key: string; at: string } | null {
+  const event = value as { key?: unknown; at?: unknown }
+  return typeof event.key === 'string' && typeof event.at === 'string'
+    ? { key: event.key, at: event.at }
+    : null
+}
+
+/**
+ * Read the injection telemetry log across the active file and every rotated
+ * archive; missing home → empty, bad lines skipped. Files are merged in name
+ * order — epoch-stamped archives sort before the plain active file — so
+ * event order is preserved across rotations.
+ */
 export function loadUsageEvents(home: string): Array<{ key: string; at: string }> {
-  const file = join(home, USAGE_EVENTS_FILE_NAME)
-  if (!existsSync(file)) return []
+  let files: string[]
+  try {
+    files = readdirSync(home).filter(name => name.startsWith(USAGE_ARCHIVE_PREFIX)).sort()
+  } catch {
+    return []
+  }
   const events: Array<{ key: string; at: string }> = []
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue
+  for (const name of files) {
+    const file = join(home, name)
+    let content: string
     try {
-      const event = JSON.parse(line) as { key?: unknown; at?: unknown }
-      if (typeof event.key === 'string' && typeof event.at === 'string') {
-        events.push({ key: event.key, at: event.at })
-      }
+      content = readFileSync(file, 'utf8')
     } catch {
-      // skip the corrupt line
+      continue // skip an unreadable file, keep the rest
     }
+    events.push(...parseJsonLines(content, parseUsageEvent))
   }
   return events
 }

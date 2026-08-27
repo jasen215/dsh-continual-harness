@@ -1,7 +1,8 @@
 /**
  * Injection telemetry: scope-qualified usage keys and in-memory aggregation
  * over `usage.events.jsonl`. Approximate telemetry only — never proof that the
- * model read or cited an entry. MVP: no snapshot/compact/lock.
+ * model read or cited an entry. MVP: no snapshot/compact/lock; the active log
+ * rotates by size threshold into epoch-stamped archives (see storage.ts).
  * @module dsh-continual-harness
  */
 
