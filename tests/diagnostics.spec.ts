@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createDiagnosticRunner, structuralProvider } from '../src/diagnostics.ts'
+import { ScanTruncatedError, securityProvider } from '../src/scan.ts'
 import type {
   DiagnosticRequest,
   SkillBundleIssue,
@@ -105,6 +106,34 @@ describe('createDiagnosticRunner', () => {
     expect(report.structural).toHaveLength(1)
     expect(report.errors).toEqual([{ provider: 'security', code: 'scanner-limit', message: 'provider exceeded input budget' }])
   })
+
+  it('keeps optional file/line/evidence fields on security findings', async () => {
+    const report = await createDiagnosticRunner({
+      structural: { name: 'structural', run: async () => [] },
+      security: {
+        name: 'security',
+        run: async () => [{
+          skillId: 'one',
+          code: 'secret-exposure',
+          message: 'looks like a credential',
+          severity: 'high',
+          file: 'scripts/one.py',
+          line: 3,
+          evidence: 'sk-key-like',
+        }],
+      },
+      enableSecurity: true,
+    }).run(request())
+    expect(report.security).toEqual([{
+      skillId: 'one',
+      code: 'secret-exposure',
+      message: 'looks like a credential',
+      severity: 'high',
+      file: 'scripts/one.py',
+      line: 3,
+      evidence: 'sk-key-like',
+    }])
+  })
 })
 
 describe('structuralProvider', () => {
@@ -151,5 +180,34 @@ describe('structuralProvider issue shape', () => {
       entries: { 'no-desc': skillEntry('no-desc', 'plain body') },
     }))
     expect(issues[0]).toMatchObject({ skillId: 'no-desc', code: 'description-missing', message: expect.any(String) })
+  })
+})
+
+describe('securityProvider', () => {
+  it('scans only touched skills and fills skillId per entry', async () => {
+    const issues = await securityProvider.run({
+      refinementId: 'r',
+      touchedSkillIds: ['one', 'missing'],
+      entries: {
+        one: { ...skillEntry('one'), content: ('sk-' + 'abcdef1234567890abcdef1234567890') },
+        untouched: { ...skillEntry('untouched'), content: ('sk-' + 'abcdef1234567890abcdef1234567890') },
+      },
+    })
+    expect(issues).toHaveLength(1)
+    expect(issues[0]).toMatchObject({ skillId: 'one', code: 'secret-exposure' })
+  })
+
+  it('propagates truncation with its collected issues through the runner', async () => {
+    const truncated = new ScanTruncatedError([
+      { skillId: 'one', code: 'secret-exposure', message: 'looks like a credential', file: 'SKILL.md', line: 2 },
+    ])
+    const report = await createDiagnosticRunner({
+      structural: { name: 'structural', run: async () => [] },
+      security: { name: 'security', run: async () => { throw truncated } },
+      enableSecurity: true,
+    }).run(request())
+    expect(report.status).toBe('partial')
+    expect(report.security).toEqual(truncated.issues)
+    expect(report.errors).toEqual([{ provider: 'security', code: 'findings-truncated', message: 'security scan stopped at the findings limit' }])
   })
 })

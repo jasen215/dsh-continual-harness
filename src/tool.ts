@@ -53,7 +53,7 @@ const MATERIALIZATION_OUTPUT_PROPERTIES = {
   written: { type: 'array', items: { type: 'string' } },
   unchanged: { type: 'array', items: { type: 'string' } },
   skipped: { type: 'array', items: { type: 'string' } },
-  stale_candidates: { type: 'array', items: { type: 'string' } },
+  removed: { type: 'array', items: { type: 'string' } },
   errors: {
     type: 'array',
     items: {
@@ -97,6 +97,9 @@ const DIAGNOSTICS_OUTPUT_SCHEMA = {
           code: { type: 'string' },
           message: { type: 'string' },
           severity: { type: 'string', enum: ['low', 'medium', 'high'] },
+          file: { type: 'string' },
+          line: { type: 'integer' },
+          evidence: { type: 'string' },
         },
       },
     },
@@ -271,7 +274,7 @@ function toToolMaterialization(materialization: MaterializationResult) {
     written: materialization.written,
     unchanged: materialization.unchanged,
     skipped: materialization.skipped,
-    stale_candidates: materialization.staleCandidates,
+    removed: materialization.removed,
     errors: materialization.errors,
   }
 }
@@ -296,6 +299,9 @@ function toToolDiagnostics(diagnostics: DiagnosticReport) {
       code: issue.code,
       message: issue.message,
       ...(issue.severity === undefined ? {} : { severity: issue.severity }),
+      ...(issue.file === undefined ? {} : { file: issue.file }),
+      ...(issue.line === undefined ? {} : { line: issue.line }),
+      ...(issue.evidence === undefined ? {} : { evidence: issue.evidence }),
     })),
     errors: diagnostics.errors,
   }

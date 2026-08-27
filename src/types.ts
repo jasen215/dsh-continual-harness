@@ -197,6 +197,9 @@ export type MaterializationErrorCode =
   | 'not-harness-owned'
   | 'remove-failed'
   | 'write-failed'
+  | 'unsafe-path'
+  | 'symlink-skipped'
+  | 'special-file-skipped'
   | 'materialize-failed'
 
 /** Skill bundle materialization outcome for one committed refinement (spec §7.7). */
@@ -209,8 +212,8 @@ export interface MaterializationResult {
   unchanged: string[]
   /** Absolute paths skipped because the bundle is not harness-owned. */
   skipped: string[]
-  /** Relative paths found on disk but absent from the entry; never auto-deleted. */
-  staleCandidates: string[]
+  /** Absolute paths of stale files deleted from owned bundles during this reconcile. */
+  removed: string[]
   /** Per-path failure or skip details; non-retryable entries are warnings. */
   errors: Array<{ path?: string; code: MaterializationErrorCode; retryable: boolean; message: string }>
 }
@@ -240,6 +243,12 @@ export interface SecurityIssue {
   code: string
   message: string
   severity?: 'low' | 'medium' | 'high'
+  /** Bundle-relative path: 'SKILL.md' body/frontmatter or a scripts/references file path. */
+  file?: string
+  /** 1-based line within `file`; omitted for description findings. */
+  line?: number
+  /** Typed, redacted marker (e.g. 'sk-key-like'); never the matched secret text. */
+  evidence?: string
 }
 
 /** Aggregated post-apply diagnostics report (spec §5). */
@@ -252,7 +261,12 @@ export interface DiagnosticReport {
   errors: Array<{ provider: string; code: string; message: string }>
 }
 
-/** One independent post-apply diagnostics provider. */
+/**
+ * One independent post-apply diagnostics provider. A provider rejection may
+ * carry a partial `issues: TIssue[]` on the error object; the runner keeps
+ * those issues in the report and records the error (used by truncation,
+ * e.g. ScanTruncatedError).
+ */
 export interface DiagnosticProvider<TIssue> {
   name: string
   run(request: DiagnosticRequest): Promise<TIssue[]>

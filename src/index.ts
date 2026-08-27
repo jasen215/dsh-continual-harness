@@ -19,6 +19,7 @@ import { createRefineCoordinator } from './coordinator.ts'
 import { registerRefineCommand } from './command.ts'
 import type { CommandsCapability } from './command.ts'
 import { createDiagnosticRunner, structuralProvider } from './diagnostics.ts'
+import { securityProvider } from './scan.ts'
 import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { HARNESS_REFINEMENT_EVENT, registerSessionEventType } from './domain.ts'
@@ -28,7 +29,7 @@ import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { HarnessStore } from './store.ts'
 import { registerBenchmarkTool, registerHarnessTool, registerHarnessWrapup } from './tool.ts'
-import type { DiagnosticProvider, RefinementKind, SecurityIssue } from './types.ts'
+import type { RefinementKind } from './types.ts'
 
 export const name = 'continual-harness'
 export const inject = ['agents', 'tools']
@@ -173,43 +174,6 @@ export const Config: z<Config> = z.object({
   securityEnabled: z.boolean().default(false),
 })
 
-/** Credential-like patterns the local security provider flags (minimal L3). */
-const SECRET_PATTERNS: ReadonlyArray<{ code: string; pattern: RegExp }> = [
-  { code: 'secret-exposure', pattern: /(sk-[A-Za-z0-9]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16})/ },
-]
-
-/**
- * Local optional L3 security provider (spec §2): a minimal pure scanner over
- * touched skill entries — no external scanner dependency. It flags obvious
- * credential-like content in a touched skill's body or bundle files and never
- * scans beyond `request.touchedSkillIds`.
- */
-const localSecurityProvider: DiagnosticProvider<SecurityIssue> = {
-  name: 'security',
-  async run(request) {
-    const issues: SecurityIssue[] = []
-    for (const skillId of request.touchedSkillIds) {
-      const entry = request.entries[skillId]
-      if (entry === undefined) continue
-      const texts = [entry.content, ...Object.values(entry.files ?? {})]
-      for (const text of texts) {
-        for (const { code, pattern } of SECRET_PATTERNS) {
-          if (pattern.test(text)) {
-            issues.push({
-              skillId,
-              code,
-              message: 'touched skill content looks like a credential; rotate and remove it before sharing',
-              severity: 'high',
-            })
-            break
-          }
-        }
-      }
-    }
-    return issues
-  },
-}
-
 /**
  * Mount the continual harness: store, tool, projection, and driver. All
  * contributions register through effect-based APIs and dispose with the
@@ -248,7 +212,7 @@ export function apply(ctx: Context, config: Config): void {
       ? {
         diagnostics: createDiagnosticRunner({
           structural: structuralProvider,
-          ...(config.securityEnabled ? { security: localSecurityProvider } : {}),
+          ...(config.securityEnabled ? { security: securityProvider } : {}),
           enableSecurity: config.securityEnabled,
         }),
       }

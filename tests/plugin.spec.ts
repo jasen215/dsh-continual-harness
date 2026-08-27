@@ -724,7 +724,7 @@ describe('post-apply diagnostics wiring', () => {
       edits: [{
         action: 'create', kind: 'skill', id: 'secret-demo',
         description: 'Use whenever handling tokens',
-        content: '## Steps\n1. Call the API with sk-abcdef1234567890abcdef1234567890',
+        content: '## Steps\n1. Call the API with ' + ('sk-' + 'abcdef1234567890abcdef1234567890'),
       }],
     }) as never)
     await ctx.plugin(plugin, { ...pluginConfig(home), securityEnabled: true })
@@ -753,7 +753,7 @@ describe('post-apply diagnostics wiring', () => {
       edits: [{
         action: 'create', kind: 'skill', id: 'secret-demo-off',
         description: 'Use whenever handling tokens',
-        content: '## Steps\n1. Call the API with sk-abcdef1234567890abcdef1234567890',
+        content: '## Steps\n1. Call the API with ' + ('sk-' + 'abcdef1234567890abcdef1234567890'),
       }],
     }) as never)
     await ctx.plugin(plugin, pluginConfig(home))
@@ -793,7 +793,7 @@ describe('harness_refine bundle materialization result', () => {
       written: string[]
       unchanged: string[]
       skipped: string[]
-      stale_candidates: string[]
+      removed: string[]
       errors: unknown[]
     }
     expect(materialization).toEqual({
@@ -805,10 +805,50 @@ describe('harness_refine bundle materialization result', () => {
       ],
       unchanged: [],
       skipped: [],
-      stale_candidates: [],
+      removed: [],
       errors: [],
     })
     expect(existsSync(join(home, 'skills', 'bundle-demo', 'SKILL.md'))).toBe(true)
     expect(readFileSync(join(home, 'skills', 'bundle-demo', 'scripts', 'bundle.py'), 'utf8')).toBe('print(1)')
+  })
+
+  it('deletes a user-added file from an owned bundle on the next update', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    // seed the owned bundle through the store (an update plan cannot create a
+    // missing entry), then drop a foreign file into it
+    const seeder = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
+    seeder.applyRefinement(stubAgent('seed-executor').agent, {
+      id: 'refine_seed_bundle',
+      summary: 'create a bundle skill',
+      edits: [{
+        action: 'create', kind: 'skill', id: 'bundle-demo',
+        description: 'Use whenever bundling',
+        content: '## Steps\n1. Run `scripts/bundle.py`',
+        files: { 'scripts/bundle.py': 'print(1)' },
+      }],
+    }, { global: true })
+    writeFileSync(join(home, 'skills', 'bundle-demo', 'notes.md'), 'manual notes')
+    ctx.provide('llm', makePlanLlm({
+      id: 'refine_bundle_update',
+      summary: 'update the bundle skill',
+      edits: [{
+        action: 'update', kind: 'skill', id: 'bundle-demo',
+        description: 'Use whenever bundling',
+        content: '## Steps\n1. Run `scripts/bundle.py`',
+        files: { 'scripts/bundle.py': 'print(2)' },
+        reason: 'bump the script',
+      }],
+    }) as never)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const result = await execute(ctx, 'harness_refine', { global: true }, stubAgent('executor').agent)
+    const json = resultJson(result)
+    const materialization = json.materialization as { removed: string[] }
+    expect(materialization.removed).toEqual([join(home, 'skills', 'bundle-demo', 'notes.md')])
+    expect(existsSync(join(home, 'skills', 'bundle-demo', 'notes.md'))).toBe(false)
   })
 })

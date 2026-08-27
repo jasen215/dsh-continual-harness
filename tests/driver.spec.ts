@@ -143,7 +143,7 @@ function refinementResult(id: string): RefinementResult & { materialization: Mat
     appliedEdits: [],
     committedAt: new Date().toISOString(),
     scope: 'local',
-    materialization: { status: 'completed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [] },
+    materialization: { status: 'completed', written: [], unchanged: [], skipped: [], removed: [], errors: [] },
   }
 }
 
@@ -1025,7 +1025,7 @@ describe('registerHarnessDriver', () => {
       appliedCount: 1,
       rejectedCount: 0,
       refinement: refinementResult('auto-1'),
-      materialization: { status: 'failed', written: [], unchanged: [], skipped: [], staleCandidates: [], errors: [{ path: 'x', code: 'boom', retryable: true, message: 'disk full' }] },
+      materialization: { status: 'failed', written: [], unchanged: [], skipped: [], removed: [], errors: [{ path: 'x', code: 'boom', retryable: true, message: 'disk full' }] },
       failedAt: 'materialization' as const,
       error: { code: 'materialization-failed' as const, message: 'skill materialization failed' },
     }))

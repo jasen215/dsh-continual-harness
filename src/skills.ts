@@ -7,7 +7,7 @@
  * @module dsh-continual-harness
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { KEBAB_CASE_PATTERN } from './domain.ts'
 import type { HarnessEntry, MaterializationErrorCode, MaterializationResult } from './types.ts'
@@ -131,40 +131,63 @@ export function skillBundleDir(dir: string, id: string): string {
   return join(dir, id)
 }
 
+/** A discovered relative path is only processable when it stays inside the bundle root. */
+export function isSafeBundleRelative(rel: string): boolean {
+  if (rel === '' || rel.startsWith('/') || rel.includes('\\')) return false
+  return rel.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
+}
+
 /** Injectable fs surface so materialization write faults are testable (spec §7.11). */
 export interface SkillFsOps {
   existsSync(path: string): boolean
   readdirSync(path: string): string[]
-  statSync(path: string): { isDirectory(): boolean }
+  lstatSync(path: string): { isDirectory(): boolean; isSymbolicLink(): boolean; isFile(): boolean }
   mkdirSync(path: string, opts?: { recursive?: boolean }): void
   writeFileSync(path: string, data: string, encoding: 'utf8'): void
   renameSync(oldPath: string, newPath: string): void
   readFileSync(path: string, encoding: 'utf8'): string
   rmSync(path: string, opts?: { recursive?: boolean; force?: boolean }): void
+  /** Remove an empty directory only; non-empty or missing throws (walk abort). */
+  rmdirSync(path: string): void
 }
 
 /** The default fs surface: direct `node:fs` bindings. */
 export const defaultSkillFsOps: SkillFsOps = {
   existsSync,
   readdirSync,
-  statSync,
+  lstatSync,
   mkdirSync,
   writeFileSync,
   renameSync,
   readFileSync,
   rmSync,
+  rmdirSync,
 }
 
-function collectRelativeFiles(dir: string, fsOps: SkillFsOps, prefix = '', knownExists = false): string[] {
+export interface DiscoveredEntry {
+  rel: string
+  kind: 'file' | 'symlink' | 'other'
+}
+
+function collectRelativeFiles(dir: string, fsOps: SkillFsOps, prefix = '', knownExists = false): DiscoveredEntry[] {
   if (!knownExists && !fsOps.existsSync(dir)) return []
-  const files: string[] = []
+  const entries: DiscoveredEntry[] = []
   for (const name of fsOps.readdirSync(dir)) {
+    if (!isSafeBundleRelative(name)) continue // hostile entry; never traverse or delete
     const rel = prefix ? `${prefix}/${name}` : name
     const full = join(dir, name)
-    if (fsOps.statSync(full).isDirectory()) files.push(...collectRelativeFiles(full, fsOps, rel, true))
-    else files.push(rel)
+    let stat
+    try {
+      stat = fsOps.lstatSync(full)
+    } catch {
+      continue // vanished between readdir and lstat; skip
+    }
+    if (stat.isDirectory()) entries.push(...collectRelativeFiles(full, fsOps, rel, true))
+    else if (stat.isSymbolicLink()) entries.push({ rel, kind: 'symlink' })
+    else if (stat.isFile()) entries.push({ rel, kind: 'file' })
+    else entries.push({ rel, kind: 'other' })
   }
-  return files
+  return entries
 }
 
 function recordError(
@@ -175,6 +198,20 @@ function recordError(
   message: string,
 ): void {
   result.errors.push({ ...(path === undefined ? {} : { path }), code, retryable, message })
+}
+
+/** Remove now-empty parent directories of a deleted file, stopping at the bundle root or the first non-empty dir. */
+function removeEmptyParentDirs(bundleRoot: string, rel: string, fsOps: SkillFsOps): void {
+  let dir = dirname(rel)
+  while (dir !== '.' && dir !== '') {
+    const full = join(bundleRoot, dir)
+    try {
+      fsOps.rmdirSync(full) // rmdirSync only removes an empty dir
+    } catch {
+      return // non-empty, missing, or otherwise undeletable — stop the walk
+    }
+    dir = dirname(dir)
+  }
 }
 
 /** On-disk state of one skill bundle path (spec §7.4 ownership decision). */
@@ -192,7 +229,7 @@ export type SkillBundleInspection =
 export function inspectSkillBundle(fsOps: SkillFsOps, dir: string, id: string): SkillBundleInspection {
   const bundle = skillBundleDir(dir, id)
   if (!fsOps.existsSync(bundle)) return { state: 'missing' }
-  if (!fsOps.statSync(bundle).isDirectory()) return { state: 'non-directory', bundle }
+  if (!fsOps.lstatSync(bundle).isDirectory()) return { state: 'non-directory', bundle }
   const skillFile = join(bundle, 'SKILL.md')
   const markdown = fsOps.existsSync(skillFile) ? fsOps.readFileSync(skillFile, 'utf8') : ''
   return { state: 'present', bundle, harnessOwned: isHarnessOwnedBundle(markdown) }
@@ -205,8 +242,9 @@ export function inspectSkillBundle(fsOps: SkillFsOps, dir: string, id: string): 
  * touched; ids outside `touchedIds` are never touched. A bundle is only
  * written to or deleted when its existing SKILL.md carries the full harness
  * provenance; otherwise it is skipped with a `not-harness-owned` entry.
- * Stale files are reported, never deleted. Write faults are collected; the
- * committed refinement is never failed by this function.
+ * Stale regular files in owned bundles are deleted; symlink/special files
+ * are skipped with warnings. Write faults are collected; the committed
+ * refinement is never failed by this function.
  */
 export function reconcileSkillFiles(
   dir: string,
@@ -219,7 +257,7 @@ export function reconcileSkillFiles(
     written: [],
     unchanged: [],
     skipped: [],
-    staleCandidates: [],
+    removed: [],
     errors: [],
   }
   let removedCount = 0
@@ -266,9 +304,32 @@ export function reconcileSkillFiles(
       result.skipped.push(inspected.bundle)
       continue
     }
-    // stale candidates: every on-disk file absent from the entry; never auto-deleted
-    for (const rel of collectRelativeFiles(bundle, fsOps, '', inspected.state === 'present')) {
-      if (targets[rel] === undefined) result.staleCandidates.push(rel)
+    // discovered entries: symlink/special files are skipped with warnings;
+    // stale regular files in an owned bundle are deleted
+    for (const item of collectRelativeFiles(bundle, fsOps, '', inspected.state === 'present')) {
+      if (item.kind !== 'file') {
+        recordError(
+          result,
+          join(bundle, item.rel),
+          item.kind === 'symlink' ? 'symlink-skipped' : 'special-file-skipped',
+          false,
+          `"${item.rel}" is ${item.kind === 'symlink' ? 'a symbolic link' : 'a special file'}; skipped`,
+        )
+        continue
+      }
+      if (targets[item.rel] !== undefined) continue
+      if (!isSafeBundleRelative(item.rel)) {
+        recordError(result, join(bundle, item.rel), 'unsafe-path', false, `"${item.rel}" escapes the bundle root; skipped`)
+        continue
+      }
+      const file = join(bundle, item.rel)
+      try {
+        fsOps.rmSync(file, { force: true })
+        result.removed.push(file)
+        removeEmptyParentDirs(bundle, item.rel, fsOps)
+      } catch (error) {
+        recordError(result, file, 'remove-failed', true, String(error))
+      }
     }
     for (const [rel, content] of Object.entries(targets)) {
       const file = join(bundle, rel)
@@ -292,7 +353,7 @@ export function reconcileSkillFiles(
       }
     }
   }
-  const successful = result.written.length + result.unchanged.length + removedCount
+  const successful = result.written.length + result.unchanged.length + result.removed.length + removedCount
   const fatal = result.errors.some(error => error.retryable)
   if (fatal) {
     result.status = successful > 0 || result.skipped.length > 0 ? 'partial' : 'failed'
