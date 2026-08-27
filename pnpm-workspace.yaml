@@ -5,6 +5,7 @@ packages:
 
 allowBuilds:
   esbuild: true
+  koffi: true
 minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent@0.1.0-rc.7'
   - '@deepseek-ai/dsh-attachment@0.1.0-rc.7'
@@ -22,3 +23,4 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-user-approval@0.1.0-rc.7'
 onlyBuiltDependencies:
   - esbuild
+  - koffi
