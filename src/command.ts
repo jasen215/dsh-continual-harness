@@ -10,12 +10,16 @@
  * Detached, not awaited: the host `commands` executor awaits the handler for
  * the whole RPC round-trip, and the UI keeps the submitted draft visible until
  * that settle. The handler therefore acknowledges immediately with a
- * `status: started` result and runs the coordinator in the background; the
- * outcome is delivered through the optional outcome reporter (by default a
- * plugin-source session message plus a harness log line) when it settles. The
- * invocation's `signal` is deliberately not forwarded: it belongs to the UI
- * request and may abort once the handler settles, which would kill the very
- * refinement the user just started.
+ * `status: started` result and runs the coordinator in the background; when
+ * the execution settles, the default outcome reporter updates the original
+ * command card in place (a second `command/done` lifecycle event carrying the
+ * rendered result, keyed by the host's `commandId`) and mirrors the same text
+ * into the harness log. The two cards are stage-labeled — `stage: ack-done`
+ * while the refine runs, `stage: refine-done` for the settled result — so a
+ * user can tell the acknowledgment apart from the outcome. The invocation's
+ * `signal` is deliberately not forwarded: it belongs to the UI request and
+ * may abort once the handler settles, which would kill the very refinement
+ * the user just started.
  * @module dsh-continual-harness
  */
 
@@ -29,12 +33,17 @@ import type { HarnessScope } from './types.ts'
 /**
  * One command invocation from a host `commands` capability. The host passes
  * the raw input without the command name and `/` prefix; the adapter also
- * accepts the full `/refine ...` form.
+ * accepts the full `/refine ...` form. `commandId` is the host's lifecycle
+ * pairing id for this execution (`command/run` ↔ `command/done`); the default
+ * outcome reporter reuses it to update the original command card once the
+ * detached execution settles.
  */
 export interface CommandInvocation {
   rawInput: string
   agent?: Agent
   signal?: AbortSignal
+  /** Host-minted lifecycle pairing id, when the host provides one. */
+  commandId?: string
 }
 
 /** A command handler result in the host's discriminated shape. */
@@ -153,6 +162,7 @@ export function parseRefineCommand(rawInput: string, defaultGlobal: boolean): Pa
 
 function renderExecution(result: RefineExecutionResult, scope: 'local' | 'global'): string {
   const lines = [
+    'stage: refine-done',
     `status: ${result.commitStatus === 'not-committed' ? 'not-committed' : 'committed'}`,
     `scope: ${result.refinement?.scope ?? scope}`,
     `refinement: ${result.refinement?.id ?? 'none'}`,
@@ -244,15 +254,17 @@ export function createRefineCommandAdapter(
 /** Immediate acknowledgment text: the refine is running, not yet settled. */
 function startedAck(parsed: ParsedRefineCommand): string {
   return [
+    'stage: ack-done',
     'status: started',
     `scope: ${parsed.scope}`,
-    'summary: /refine is running in the background; the outcome will be reported when it settles',
+    'summary: /refine is running in the background; the result will replace this card when it settles',
   ].join('\n')
 }
 
 /** Acknowledgment for a submit that skipped because one execution is in flight. */
 function alreadyRunningAck(parsed: ParsedRefineCommand): string {
   return [
+    'stage: ack-done',
     'status: already-running',
     `scope: ${parsed.scope}`,
     'summary: a /refine execution is already running for this session; the new request was skipped',
@@ -311,13 +323,25 @@ function thrownResult(error: unknown): RefineExecutionResult {
   }
 }
 
+/** One settled command lifecycle event, in the host's `command/done` shape. */
+interface CommandDoneEvent {
+  commandId: string
+  kind: 'success' | 'error'
+  text?: string
+}
+
+/** Runtime append signature for the host-owned `command/done` lifecycle event. */
+type CommandDoneAppend = (type: 'command/done', data: CommandDoneEvent) => unknown
+
 /**
- * Default async outcome reporter for a detached `/refine` execution: appends
- * one plugin-source `user/message` to the session carrying the rendered
- * outcome (so it shows in the transcript and satisfies the model-visible ⟺
- * logged rule), and mirrors the same text into the harness logger — the log
- * copy also survives a session that is disposed mid-execution. Fully
- * contained: an append or log failure never breaks the agent loop.
+ * Default outcome reporter for a detached `/refine` execution. With the
+ * host's `commandId`, appends a second `command/done` lifecycle event for the
+ * same pairing id carrying the rendered outcome, so the client updates the
+ * original command card in place (started → result); without it, falls back
+ * to one plugin-source `user/message` so the outcome stays visible. Mirrors
+ * the same text into the harness logger — the log copy also survives a
+ * session that is disposed mid-execution. Fully contained: an append or log
+ * failure never breaks the agent loop.
  */
 export function reportRefineOutcome(
   invocation: CommandInvocation,
@@ -327,7 +351,60 @@ export function reportRefineOutcome(
   const agent = invocation.agent
   if (!agent) return
   const text = renderExecution(execution, scope)
-  const message = createUserMessage({
+  // The settle can land inside a transient window (session restore after a
+  // profile restart) where the append briefly fails; one bounded retry keeps
+  // the card update from being silently lost. Failures are logged, never
+  // thrown: a reporting failure must not break the agent loop.
+  const attempt = (): boolean => {
+    try {
+      if (invocation.commandId !== undefined) {
+        // Bind the method: destructuring would detach `this` and the append
+        // would fail on the session's internal `this.log` access.
+        const append = agent.session.append.bind(agent.session) as unknown as CommandDoneAppend
+        append('command/done', {
+          commandId: invocation.commandId,
+          kind: 'success',
+          text,
+        })
+      } else {
+        appendRefineOutcomeMessage(agent, execution, text)
+      }
+      return true
+    } catch (error) {
+      try {
+        agent.ctx.logger('harness').warn(
+          `/refine outcome append failed (commandId=${String(invocation.commandId)} session=${String(agent.session.id)} seq=${agent.session.seq}): ${error instanceof Error ? error.message : String(error)}`,
+        )
+      } catch {
+        // a logger failure must never break the agent loop
+      }
+      return false
+    }
+  }
+  const settled = (appended: boolean): void => {
+    try {
+      agent.ctx.logger('harness').info(`/refine settled${appended ? '' : ' [append failed]'}:\n${text}`)
+    } catch {
+      // a logger failure must never break the agent loop
+    }
+  }
+  if (attempt()) {
+    settled(true)
+  } else {
+    settled(false)
+    void new Promise((resolve) => setTimeout(resolve, 1500)).then(() => {
+      attempt()
+    })
+  }
+}
+
+/**
+ * Fallback visibility for an outcome with no host `commandId`: one
+ * plugin-source `user/message` carrying the rendered result, mirroring the
+ * projection's session-append pattern.
+ */
+function appendRefineOutcomeMessage(agent: Agent, execution: RefineExecutionResult, text: string): void {
+  agent.session.append('user/message', createUserMessage({
     source: {
       kind: 'plugin',
       plugin: PLUGIN_NAME,
@@ -335,17 +412,7 @@ export function reportRefineOutcome(
       summary: boundContextSummary(executionSummary(execution)),
     },
     content: [{ type: 'text', text }],
-  })
-  try {
-    agent.session.append('user/message', message, { surfaceOp: 'append' })
-  } catch {
-    // a session append failure must never break the agent loop
-  }
-  try {
-    agent.ctx.logger('harness').info(`/refine settled:\n${text}`)
-  } catch {
-    // a logger failure must never break the agent loop
-  }
+  }), { surfaceOp: 'append' })
 }
 
 /**

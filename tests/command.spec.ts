@@ -98,6 +98,7 @@ describe('createRefineCommandAdapter', () => {
     // The handler settled while the coordinator has not even started yet: the
     // draft can clear as soon as the host RPC round-trip finishes.
     expect(result.kind).toBe('success')
+    expect(result.text).toContain('stage: ack-done')
     expect(result.text).toContain('status: started')
     expect(result.text).toContain('scope: local')
     expect(execute).not.toHaveBeenCalled()
@@ -131,6 +132,7 @@ describe('createRefineCommandAdapter', () => {
     expect(first.text).toContain('status: started')
     await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1))
     const second = await handler({ rawInput: '/refine --local focus', agent: a })
+    expect(second.text).toContain('stage: ack-done')
     expect(second.text).toContain('status: already-running')
     expect(execute).toHaveBeenCalledTimes(1)
     resolveExecute(notCommitted())
@@ -203,22 +205,26 @@ describe('createRefineCommandAdapter', () => {
     const a = agent()
     const appendSpy = vi.spyOn(a.session, 'append')
     const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
-    await handler({ rawInput: '/refine --local focus', agent: a })
+    await handler({ rawInput: '/refine --local focus', agent: a, commandId: 'cmd-1' })
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
-    const [, message] = appendSpy.mock.calls[0]
-    expect(message.source).toMatchObject({ kind: 'plugin', plugin: PLUGIN_NAME })
+    const [type, data] = appendSpy.mock.calls[0]
+    expect(type).toBe('command/done')
+    expect(data.commandId).toBe('cmd-1')
+    expect(data.kind).toBe('success')
   })
 
-  it('default reporter appends a plugin-source user message with the rendered outcome', async () => {
+  it('default reporter updates the original command card with the rendered outcome', async () => {
     const a = agent()
     const appendSpy = vi.spyOn(a.session, 'append')
     const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false, report: reportRefineOutcome })
-    await handler({ rawInput: '/refine --local focus', agent: a })
+    await handler({ rawInput: '/refine --local focus', agent: a, commandId: 'cmd-1' })
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
-    const [type, message] = appendSpy.mock.calls[0]
-    expect(type).toBe('user/message')
-    expect(message.source).toMatchObject({ kind: 'plugin', plugin: PLUGIN_NAME })
-    const text = message.content[0].text
+    const [type, data] = appendSpy.mock.calls[0]
+    expect(type).toBe('command/done')
+    expect(data.commandId).toBe('cmd-1')
+    expect(data.kind).toBe('success')
+    const text = data.text as string
+    expect(text).toContain('stage: refine-done')
     expect(text).toContain('status: committed')
     expect(text).toContain('refinement: r-cmd')
     expect(text).toContain('summary: saved two lessons; one update rejected')
@@ -228,10 +234,10 @@ describe('createRefineCommandAdapter', () => {
     const a = agent()
     const appendSpy = vi.spyOn(a.session, 'append')
     const handler = createRefineCommandAdapter(fakeCoordinator(notCommitted()), { defaultGlobal: true, report: reportRefineOutcome })
-    await handler({ rawInput: '/refine', agent: a })
+    await handler({ rawInput: '/refine', agent: a, commandId: 'cmd-1' })
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
-    const [, message] = appendSpy.mock.calls[0]
-    const text = message.content[0].text
+    const [, data] = appendSpy.mock.calls[0]
+    const text = data.text as string
     expect(text).toContain('status: not-committed')
     expect(text).toContain('refinement: none')
   })
@@ -244,14 +250,14 @@ describe('createRefineCommandAdapter', () => {
       failedAt: 'validation',
       error: { code: 'rollback-target-not-found', message: 'no refinement found with id missing' },
     }), { defaultGlobal: true, report: reportRefineOutcome })
-    const result = await handler({ rawInput: '/refine rollback missing --global', agent: a })
+    const result = await handler({ rawInput: '/refine rollback missing --global', agent: a, commandId: 'cmd-1' })
     expect(result.text).toContain('scope: global')
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
-    const [, message] = appendSpy.mock.calls[0]
+    const [, data] = appendSpy.mock.calls[0]
     // No refinement exists on the failure result; the requested scope must
     // still render truthfully instead of falling back to a guessed local.
-    expect(message.content[0].text).toContain('scope: global')
-    expect(message.content[0].text).toContain('error: rollback-target-not-found no refinement found with id missing')
+    expect(data.text).toContain('scope: global')
+    expect(data.text).toContain('error: rollback-target-not-found no refinement found with id missing')
   })
 
   it('default reporter renders a completed diagnostics line', async () => {
@@ -266,26 +272,23 @@ describe('createRefineCommandAdapter', () => {
         errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
       },
     }), { defaultGlobal: false, report: reportRefineOutcome })
-    await handler({ rawInput: '/refine --local focus', agent: a })
+    await handler({ rawInput: '/refine --local focus', agent: a, commandId: 'cmd-1' })
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
-    const [, message] = appendSpy.mock.calls[0]
-    expect(message.content[0].text).toContain('diagnostics: partial')
-    expect(message.content[0].text).toContain('diagnostics-error: security provider-failed scanner failed')
+    const [, data] = appendSpy.mock.calls[0]
+    expect(data.text).toContain('diagnostics: partial')
+    expect(data.text).toContain('diagnostics-error: security provider-failed scanner failed')
   })
 
-  it('default reporter renders an error outcome without throwing', async () => {
+  it('default reporter falls back to a plugin-source user message without a commandId', async () => {
     const a = agent()
     const appendSpy = vi.spyOn(a.session, 'append')
-    const handler = createRefineCommandAdapter(fakeCoordinator({
-      ...notCommitted(),
-      failedAt: 'validation',
-      error: { code: 'rollback-target-not-found', message: 'no refinement found with id missing' },
-    }), { defaultGlobal: true, report: reportRefineOutcome })
-    const result = await handler({ rawInput: '/refine rollback missing --local', agent: a })
-    expect(result.kind).toBe('success')
+    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false, report: reportRefineOutcome })
+    await handler({ rawInput: '/refine --local focus', agent: a })
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
-    const [, message] = appendSpy.mock.calls[0]
-    expect(message.content[0].text).toContain('error: rollback-target-not-found no refinement found with id missing')
+    const [type, message] = appendSpy.mock.calls[0]
+    expect(type).toBe('user/message')
+    expect(message.source).toMatchObject({ kind: 'plugin', plugin: PLUGIN_NAME })
+    expect(message.content[0].text).toContain('status: committed')
   })
 })
 

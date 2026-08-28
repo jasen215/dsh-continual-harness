@@ -61,7 +61,9 @@ function probeAppendIgnorable(): boolean {
   if (appendSupportsIgnorable === undefined) {
     try {
       const probe = Session.create(SessionId('__harness-ignorable-probe__'))
-      const append = probe.append as unknown as IgnorableAppend
+      // Bind the method: destructuring would detach `this` and the append
+      // would fail on the session's internal `this.log` access.
+      const append = probe.append.bind(probe) as unknown as IgnorableAppend
       const event = append('todo/write', { todos: [] }, { ignorable: true })
       appendSupportsIgnorable = event.ignorable === true
     } catch {
@@ -79,7 +81,7 @@ function probeAppendIgnorable(): boolean {
  */
 function appendIgnorableSessionEvent(session: Session, type: string, data: unknown): void {
   if (!probeAppendIgnorable()) return
-  const append = session.append as unknown as IgnorableAppend
+  const append = session.append.bind(session) as unknown as IgnorableAppend
   append(type, data, { ignorable: true })
 }
 
