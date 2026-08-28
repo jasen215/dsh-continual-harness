@@ -1,7 +1,8 @@
 /**
  * The harness store: read/merge/apply/rollback over local and global state
- * files, trajectory serialization, and the durable session event/emit commit
- * path. A plain class owned by the plugin's `apply`; not a Cordis service.
+ * files, trajectory serialization, and the commit path that persists each
+ * refinement and emits the scoped `harness/refined` event. A plain class
+ * owned by the plugin's `apply`; not a Cordis service.
  * @module dsh-continual-harness
  */
 
@@ -9,10 +10,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
-import { HARNESS_REFINEMENT_EVENT } from './domain.ts'
 import { applyRefinementProposal, entryToEditFields, rollbackProposal, touchedSkillIds } from './refine.ts'
 import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills.ts'
@@ -37,53 +37,6 @@ import type { HarnessState, MaterializationResult, RefinementKind, RefinementPro
 
 /** Default tail-biased trajectory window for planning. */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
-
-/**
- * Runtime shape of `Session.append` once upstream AppendOptions lands: a
- * non-surface event append that may carry the `ignorable` envelope marker.
- * `Session.append` currently types non-surface events with no third
- * argument, so the capability is reached through an explicit escape hatch.
- */
-type IgnorableAppend = (type: string, data: unknown, opts?: { ignorable?: true }) => { ignorable?: true }
-
-/**
- * Whether the running dsh-session's `Session.append` can emit the
- * `ignorable` envelope marker on a non-surface event. The harness core
- * currently rejects unknown out-of-repo event types at read time unless the
- * event carries `ignorable: true`, but `append` has no such writer option
- * yet (upstream AppendOptions is pending); probing the returned envelope
- * detects the capability exactly, so the plugin writes the informational
- * session event only when a reader can actually skip it.
- */
-let appendSupportsIgnorable: boolean | undefined
-
-function probeAppendIgnorable(): boolean {
-  if (appendSupportsIgnorable === undefined) {
-    try {
-      const probe = Session.create(SessionId('__harness-ignorable-probe__'))
-      // Bind the method: destructuring would detach `this` and the append
-      // would fail on the session's internal `this.log` access.
-      const append = probe.append.bind(probe) as unknown as IgnorableAppend
-      const event = append('todo/write', { todos: [] }, { ignorable: true })
-      appendSupportsIgnorable = event.ignorable === true
-    } catch {
-      appendSupportsIgnorable = false
-    }
-  }
-  return appendSupportsIgnorable
-}
-
-/**
- * Append a non-surface session event carrying the `ignorable` envelope
- * marker, but only when the running dsh-session supports it; no-op
- * otherwise. Use for out-of-repo informational events so every reader may
- * safely skip them.
- */
-function appendIgnorableSessionEvent(session: Session, type: string, data: unknown): void {
-  if (!probeAppendIgnorable()) return
-  const append = session.append.bind(session) as unknown as IgnorableAppend
-  append(type, data, { ignorable: true })
-}
 
 /** Options for a store commit. */
 export interface CommitOptions {
@@ -253,8 +206,8 @@ export class HarnessStore {
 
   /**
    * Commit a planned refinement: apply to the target store with baseline
-   * conflict detection, persist, append the durable session event, append the
-   * global history when global, and emit the scoped `harness/refined` event.
+   * conflict detection, persist, append the global history when global, and
+   * emit the scoped `harness/refined` event.
    * The baseline defaults to the commit-time read; callers that planned
    * against an earlier snapshot pass it via `options.baseline` so edits over
    * entries changed during planning are rejected.
@@ -288,18 +241,14 @@ export class HarnessStore {
       saveHarnessState(getLocalHarnessStateDir(this.home, String(agent.session.id)), state)
       appendLocalRefinement(this.home, String(agent.session.id), result)
     }
-    // The `harness/refinement` session event is out-of-repo vocabulary: the
-    // harness core's generated KNOWN_SESSION_EVENT_TYPES does not include it,
-    // and a reader meeting an unrecognized non-ignorable type refuses the
-    // whole log (SessionFormatUnsupportedError). The event is purely
-    // informational — history() reads the on-disk store, which already
-    // persists every result — so write it only when the running harness can
-    // emit `ignorable: true` (then every reader may safely skip it); otherwise
-    // omit it to keep every session readable, including after this plugin is
-    // unmounted. The scoped `harness/refined` emit below still fires
-    // regardless, so live observers and the invariant companion are
+    // No informational session event is appended for the commit: an
+    // out-of-repo append would make the whole log refuse a cold read (see
+    // `registerSessionEventType` in domain.ts for the vocabulary constraint
+    // and why the legacy type stays registered). Durable facts already ride
+    // known vocabulary (`tool/result` for tool commits, `command/done` for
+    // `/refine`) plus the on-disk store. The scoped `harness/refined` emit
+    // below still fires, so live observers and the invariant companion are
     // unaffected.
-    appendIgnorableSessionEvent(agent.session, HARNESS_REFINEMENT_EVENT, result)
     const materialization = this.materializeSkills(agent, result)
     agentEvents(this.ctx, agent).emit('harness/refined', { result })
     return Object.assign(result, { materialization })
