@@ -14,6 +14,12 @@ export const HARNESS_DIR_NAME = 'harness'
 export const HARNESS_STATE_FILE_NAME = 'harness_state.json'
 /** Cross-session global refinement history file name. */
 export const REFINEMENT_HISTORY_FILE_NAME = 'refinements.jsonl'
+/**
+ * Package identity stamped on plugin-authored message sources (and skill
+ * provenance). One spelling across the package: message sources and skill
+ * authors must not drift into a second `continual-harness` variant.
+ */
+export const PLUGIN_NAME = 'dsh-continual-harness'
 /** Session event type carrying a committed refinement result. */
 export const HARNESS_REFINEMENT_EVENT = 'harness/refinement'
 /** Message source kind of injected harness-state overviews. */

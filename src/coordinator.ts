@@ -71,6 +71,7 @@ export type RefineErrorCode =
   | 'commit-failed'
   | 'materialization-failed'
   | 'diagnostics-failed'
+  | 'unexpected-error'
 
 export interface RefineExecutionResult {
   commitStatus: CommitStatus
