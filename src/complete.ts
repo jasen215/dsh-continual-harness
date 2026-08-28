@@ -8,6 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { PLUGIN_NAME } from './domain.ts'
 import type { Complete } from './planner.ts'
 
 /** Default planning output budget for the refiner. */
@@ -38,7 +39,7 @@ async function streamToText(
     system: params.system,
     maxTokens: params.maxTokens,
     messages: [createUserMessage({
-      source: { kind: 'plugin', plugin: 'dsh-continual-harness' },
+      source: { kind: 'plugin', plugin: PLUGIN_NAME },
       content: [{ type: 'text', text: params.user }],
     })],
     ...(params.signal === undefined ? {} : { signal: params.signal }),

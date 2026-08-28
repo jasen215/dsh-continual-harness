@@ -241,6 +241,8 @@ export function apply(ctx: Context, config: Config): void {
   // only when the Cordis context provides a `commands` service, and the
   // registration disposes with the plugin context. A missing capability logs
   // exactly one warning and never prevents the rest of the plugin from loading.
+  // The adapter's default reporter delivers the settled outcome as a
+  // plugin-source session message plus a harness log line.
   const commands = ctx.get('commands') as CommandsCapability | undefined
   if (commands) {
     ctx.effect(() => {

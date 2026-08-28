@@ -6,9 +6,11 @@ import {
   createRefineCommandAdapter,
   parseRefineCommand,
   registerRefineCommand,
+  reportRefineOutcome,
 } from '../src/command.ts'
-import type { CommandsCapability } from '../src/command.ts'
+import type { CommandDefinition, CommandsCapability } from '../src/command.ts'
 import type { RefineCoordinator, RefineExecutionResult } from '../src/coordinator.ts'
+import { PLUGIN_NAME } from '../src/domain.ts'
 
 function agent(id = 'command-agent'): Agent {
   const session = Session.create(SessionId(id))
@@ -87,111 +89,84 @@ describe('parseRefineCommand', () => {
 })
 
 describe('createRefineCommandAdapter', () => {
-  it('maps domain three-state status into command text two-state status', async () => {
-    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
+  it('acknowledges immediately with status started without awaiting the execution', async () => {
+    let resolveExecute!: (result: RefineExecutionResult) => void
+    const execute = vi.fn(() => new Promise<RefineExecutionResult>(resolve => { resolveExecute = resolve }))
+    const report = vi.fn()
+    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: false, report })
     const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+    // The handler settled while the coordinator has not even started yet: the
+    // draft can clear as soon as the host RPC round-trip finishes.
     expect(result.kind).toBe('success')
-    expect(result.text).toContain('status: committed')
-    expect(result.kind).toBe('success')
+    expect(result.text).toContain('status: started')
     expect(result.text).toContain('scope: local')
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('applied: 2')
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('rejected: 1')
+    expect(execute).not.toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1))
+    resolveExecute(committedWithRejected())
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
   })
 
-  it('keeps the refinement id and summary for a committed result', async () => {
-    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
-    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
+  it('reports the settled execution and requested scope through the outcome reporter', async () => {
+    const report = vi.fn()
+    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false, report })
+    const a = agent()
+    const result = await handler({ rawInput: '/refine --local focus', agent: a })
     expect(result.kind).toBe('success')
-    expect(result.text).toContain('refinement: r-cmd')
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('summary: saved two lessons; one update rejected')
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
+    const [invocation, execution, scope] = report.mock.calls[0]
+    expect(invocation.agent).toBe(a)
+    expect(scope).toBe('local')
+    expect(execution.commitStatus).toBe('committed-with-rejected-edits')
+    expect(execution.appliedCount).toBe(2)
   })
 
-  it('maps only not-committed to status not-committed with refinement none', async () => {
-    const coordinator = fakeCoordinator(notCommitted())
-    const handler = createRefineCommandAdapter(coordinator, { defaultGlobal: true })
-    const result = await handler({ rawInput: '/refine', agent: agent() })
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('status: not-committed')
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('refinement: none')
+  it('skips a second submit while one execution is still in flight', async () => {
+    let resolveExecute!: (result: RefineExecutionResult) => void
+    const execute = vi.fn(() => new Promise<RefineExecutionResult>(resolve => { resolveExecute = resolve }))
+    const report = vi.fn()
+    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: false, report })
+    const a = agent()
+    const first = await handler({ rawInput: '/refine --local focus', agent: a })
+    expect(first.text).toContain('status: started')
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1))
+    const second = await handler({ rawInput: '/refine --local focus', agent: a })
+    expect(second.text).toContain('status: already-running')
+    expect(execute).toHaveBeenCalledTimes(1)
+    resolveExecute(notCommitted())
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
+    // Once the first execution settled, the session accepts new submits again.
+    const third = await handler({ rawInput: '/refine --local focus', agent: a })
+    expect(third.text).toContain('status: started')
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2))
+    resolveExecute(notCommitted())
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
   })
 
-  it('appends a completed diagnostics line when the coordinator result has a report', async () => {
-    const handler = createRefineCommandAdapter(fakeCoordinator({
-      ...committedWithRejected(),
-      diagnostics: { status: 'completed', structural: [], security: [], errors: [] },
-    }), { defaultGlobal: false })
-    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('diagnostics: completed')
-  })
-
-  it('appends a disabled diagnostics line when no provider is enabled', async () => {
-    const handler = createRefineCommandAdapter(fakeCoordinator({
-      ...committedWithRejected(),
-      diagnostics: { status: 'disabled', structural: [], security: [], errors: [] },
-    }), { defaultGlobal: false })
-    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('diagnostics: disabled')
-  })
-
-  it('renders one diagnostics error line per provider error', async () => {
-    const handler = createRefineCommandAdapter(fakeCoordinator({
-      ...committedWithRejected(),
-      diagnostics: {
-        status: 'partial',
-        structural: [],
-        security: [],
-        errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
-      },
-    }), { defaultGlobal: false })
-    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('diagnostics: partial')
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('diagnostics-error: security provider-failed scanner failed')
-  })
-
-  it('omits the diagnostics line when the coordinator result has no report', async () => {
-    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
-    const result = await handler({ rawInput: '/refine --local focus', agent: agent() })
-    expect(result.kind).toBe('success')
-    expect(result.text).not.toContain('diagnostics:')
-  })
-
-  it('renders a stable error line from the domain result', async () => {
-    const coordinator = fakeCoordinator({
-      ...notCommitted(),
-      failedAt: 'validation',
-      error: { code: 'rollback-target-not-found', message: 'no refinement found with id missing' },
-    })
-    const handler = createRefineCommandAdapter(coordinator, { defaultGlobal: true })
-    const result = await handler({ rawInput: '/refine rollback missing --local', agent: agent() })
-    expect(result.kind).toBe('success')
-    expect(result.text).toContain('error: rollback-target-not-found no refinement found with id missing')
-  })
-
-  it('builds a plan request with source command and passes the signal', async () => {
+  it('builds a plan request with source command and strips the invocation signal', async () => {
     const execute = vi.fn(async () => notCommitted())
-    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: false })
+    const report = vi.fn()
+    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: false, report })
     const signal = new AbortController().signal
     await handler({ rawInput: '/refine --local focus errors', agent: agent(), signal })
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
-      mode: 'plan', source: 'command', scope: 'local', instructions: 'focus errors', agent: expect.any(Object), signal,
-    }))
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
+    const request = execute.mock.calls[0][0]
+    expect(request).toMatchObject({
+      mode: 'plan', source: 'command', scope: 'local', instructions: 'focus errors', agent: expect.any(Object),
+    })
+    // The signal belongs to the UI request and may abort once the handler
+    // settles; the detached execution must not inherit it.
+    expect(request).not.toHaveProperty('signal')
   })
 
   it('builds a rollback request with source command', async () => {
     const execute = vi.fn(async () => notCommitted())
-    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: true })
+    const report = vi.fn()
+    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: true, report })
     await handler({ rawInput: '/refine rollback r-9 --local', agent: agent() })
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
-      mode: 'rollback', source: 'command', scope: 'local', rollbackId: 'r-9', agent: expect.any(Object),
-    }))
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
+    const request = execute.mock.calls[0][0]
+    expect(request).toMatchObject({ mode: 'rollback', source: 'command', scope: 'local', rollbackId: 'r-9', agent: expect.any(Object) })
   })
 
   it('returns a usage error without calling the coordinator when the agent is missing', async () => {
@@ -211,6 +186,107 @@ describe('createRefineCommandAdapter', () => {
     expect(result.text).toContain('error:')
     expect(execute).not.toHaveBeenCalled()
   })
+
+  it('normalizes a thrown background execution into a reported error result', async () => {
+    const execute = vi.fn(async () => { throw new Error('boom') })
+    const report = vi.fn()
+    const handler = createRefineCommandAdapter({ execute }, { defaultGlobal: true, report })
+    const result = await handler({ rawInput: '/refine', agent: agent() })
+    expect(result.kind).toBe('success')
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
+    const execution = report.mock.calls[0][1] as RefineExecutionResult
+    expect(execution.commitStatus).toBe('not-committed')
+    expect(execution.error).toMatchObject({ code: 'unexpected-error', message: 'boom' })
+  })
+
+  it('default reporter fires when no reporter option is given', async () => {
+    const a = agent()
+    const appendSpy = vi.spyOn(a.session, 'append')
+    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false })
+    await handler({ rawInput: '/refine --local focus', agent: a })
+    await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
+    const [, message] = appendSpy.mock.calls[0]
+    expect(message.source).toMatchObject({ kind: 'plugin', plugin: PLUGIN_NAME })
+  })
+
+  it('default reporter appends a plugin-source user message with the rendered outcome', async () => {
+    const a = agent()
+    const appendSpy = vi.spyOn(a.session, 'append')
+    const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false, report: reportRefineOutcome })
+    await handler({ rawInput: '/refine --local focus', agent: a })
+    await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
+    const [type, message] = appendSpy.mock.calls[0]
+    expect(type).toBe('user/message')
+    expect(message.source).toMatchObject({ kind: 'plugin', plugin: PLUGIN_NAME })
+    const text = message.content[0].text
+    expect(text).toContain('status: committed')
+    expect(text).toContain('refinement: r-cmd')
+    expect(text).toContain('summary: saved two lessons; one update rejected')
+  })
+
+  it('default reporter renders a plain not-committed outcome', async () => {
+    const a = agent()
+    const appendSpy = vi.spyOn(a.session, 'append')
+    const handler = createRefineCommandAdapter(fakeCoordinator(notCommitted()), { defaultGlobal: true, report: reportRefineOutcome })
+    await handler({ rawInput: '/refine', agent: a })
+    await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
+    const [, message] = appendSpy.mock.calls[0]
+    const text = message.content[0].text
+    expect(text).toContain('status: not-committed')
+    expect(text).toContain('refinement: none')
+  })
+
+  it('default reporter renders the requested scope for a failed global run', async () => {
+    const a = agent()
+    const appendSpy = vi.spyOn(a.session, 'append')
+    const handler = createRefineCommandAdapter(fakeCoordinator({
+      ...notCommitted(),
+      failedAt: 'validation',
+      error: { code: 'rollback-target-not-found', message: 'no refinement found with id missing' },
+    }), { defaultGlobal: true, report: reportRefineOutcome })
+    const result = await handler({ rawInput: '/refine rollback missing --global', agent: a })
+    expect(result.text).toContain('scope: global')
+    await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
+    const [, message] = appendSpy.mock.calls[0]
+    // No refinement exists on the failure result; the requested scope must
+    // still render truthfully instead of falling back to a guessed local.
+    expect(message.content[0].text).toContain('scope: global')
+    expect(message.content[0].text).toContain('error: rollback-target-not-found no refinement found with id missing')
+  })
+
+  it('default reporter renders a completed diagnostics line', async () => {
+    const a = agent()
+    const appendSpy = vi.spyOn(a.session, 'append')
+    const handler = createRefineCommandAdapter(fakeCoordinator({
+      ...committedWithRejected(),
+      diagnostics: {
+        status: 'partial',
+        structural: [],
+        security: [],
+        errors: [{ provider: 'security', code: 'provider-failed', message: 'scanner failed' }],
+      },
+    }), { defaultGlobal: false, report: reportRefineOutcome })
+    await handler({ rawInput: '/refine --local focus', agent: a })
+    await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
+    const [, message] = appendSpy.mock.calls[0]
+    expect(message.content[0].text).toContain('diagnostics: partial')
+    expect(message.content[0].text).toContain('diagnostics-error: security provider-failed scanner failed')
+  })
+
+  it('default reporter renders an error outcome without throwing', async () => {
+    const a = agent()
+    const appendSpy = vi.spyOn(a.session, 'append')
+    const handler = createRefineCommandAdapter(fakeCoordinator({
+      ...notCommitted(),
+      failedAt: 'validation',
+      error: { code: 'rollback-target-not-found', message: 'no refinement found with id missing' },
+    }), { defaultGlobal: true, report: reportRefineOutcome })
+    const result = await handler({ rawInput: '/refine rollback missing --local', agent: a })
+    expect(result.kind).toBe('success')
+    await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
+    const [, message] = appendSpy.mock.calls[0]
+    expect(message.content[0].text).toContain('error: rollback-target-not-found no refinement found with id missing')
+  })
 })
 
 describe('registerRefineCommand', () => {
@@ -223,5 +299,17 @@ describe('registerRefineCommand', () => {
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ name: 'refine', handler: expect.any(Function) }))
     registration.dispose()
     expect(dispose).toHaveBeenCalled()
+  })
+
+  it('passes the outcome reporter through to the registered handler', async () => {
+    const report = vi.fn()
+    const register = vi.fn(() => ({ dispose: () => {} }))
+    const commands: CommandsCapability = { register }
+    const coordinator = fakeCoordinator(committedWithRejected())
+    registerRefineCommand(commands, coordinator, { defaultGlobal: false, report })
+    const definition = register.mock.calls[0][0] as CommandDefinition
+    const result = await definition.handler({ rawInput: '/refine --local focus', agent: agent() })
+    expect(result).toMatchObject({ kind: 'success', text: expect.stringContaining('status: started') })
+    await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(1))
   })
 })
