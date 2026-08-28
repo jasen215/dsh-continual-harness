@@ -1,6 +1,7 @@
 /**
  * Domain constants and typed extension surfaces of the continual harness
- * plugin: the durable `harness/refinement` session event, the model-visible
+ * plugin: the legacy `harness/refinement` session event type (kept readable
+ * for old logs, no longer written), the model-visible
  * `harness-state` message source, and the scoped `harness/refined` event.
  * @module dsh-continual-harness
  */
@@ -20,7 +21,7 @@ export const REFINEMENT_HISTORY_FILE_NAME = 'refinements.jsonl'
  * authors must not drift into a second `continual-harness` variant.
  */
 export const PLUGIN_NAME = 'dsh-continual-harness'
-/** Session event type carrying a committed refinement result. */
+/** Legacy session event type written by older plugin builds for a committed refinement result. */
 export const HARNESS_REFINEMENT_EVENT = 'harness/refinement'
 /** Message source kind of injected harness-state overviews. */
 export const HARNESS_STATE_SOURCE = 'harness-state'
@@ -52,9 +53,10 @@ export const BENCHMARK_CASES_SCHEMA_VERSION = 1
  * type refuses the whole log (SessionFormatUnsupportedError). The runtime
  * Set is shared with dsh-session-persistence, so registering the type keeps
  * logs containing it readable — needed for legacy logs written without the
- * `ignorable` marker. Current builds only write out-of-repo events with
- * `ignorable: true`, so this registration can be dropped once legacy logs
- * age out.
+ * `ignorable` marker. The plugin no longer writes this type at all (an
+ * append would make the whole log refuse a cold read), so this registration
+ * exists purely for legacy log readability and can be dropped once those
+ * logs age out.
  */
 export function registerSessionEventType(type: string): void {
   (KNOWN_SESSION_EVENT_TYPES as Set<string>).add(type)
