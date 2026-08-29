@@ -5,7 +5,7 @@
  * @module dsh-continual-harness
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
@@ -71,7 +71,12 @@ export function migrateHarnessState(parsed: unknown): { state: HarnessState; dia
   return { state: { schemaVersion: HARNESS_SCHEMA_VERSION, entries, refinements }, diagnostics }
 }
 
-/** Read one store file: missing → empty; corrupt/future → empty and never overwritten; old version → migrate. */
+/**
+ * Read one store file: missing → empty; corrupt/future → backed up once
+ * (`<file>.corrupt-<epoch-ms>.bak`), degraded to empty, and reported through
+ * `onDiagnostics` — so the next commit can never silently destroy the only
+ * copy of the user's entries. The file itself is never rewritten by load.
+ */
 export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: string[]) => void): HarnessState {
   const file = join(dir, HARNESS_STATE_FILE_NAME)
   if (!existsSync(file)) return emptyHarnessState()
@@ -81,7 +86,22 @@ export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: stri
     if (migrated.diagnostics.length > 0) onDiagnostics?.(migrated.diagnostics)
     return migrated.state
   } catch {
+    const backup = backupCorruptStateFile(file)
+    onDiagnostics?.([backup === undefined
+      ? `corrupt harness state file could not be backed up: ${file}`
+      : `corrupt harness state file backed up to ${backup}`])
     return emptyHarnessState()
+  }
+}
+
+/** Best-effort copy of a corrupt/future-version state file; never throws. */
+function backupCorruptStateFile(file: string): string | undefined {
+  const backup = `${file}.corrupt-${Date.now()}.bak`
+  try {
+    copyFileSync(file, backup)
+    return backup
+  } catch {
+    return undefined
   }
 }
 
