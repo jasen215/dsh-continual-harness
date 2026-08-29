@@ -29,7 +29,7 @@ import * as plugin from '../src/index.ts'
 import { appendReview } from '../src/audit.ts'
 import type { ExecutorEvidence } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { REVIEWER_SYSTEM_PROMPT } from '../src/evaluate.ts'
+import { errorMessage, makeFakeLlm, SCORE_70, SCORE_90, VALID_EVIDENCE } from './fake-llm.ts'
 import { getGlobalHarnessStateDir, getLocalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
 import { HarnessStore } from '../src/store.ts'
 import type { HarnessState } from '../src/types.ts'
@@ -114,42 +114,6 @@ function resultJson(result: ToolExecutionResult): Record<string, unknown> {
   if (block?.type !== 'text') throw new Error('expected text tool result')
   return JSON.parse(block.text) as Record<string, unknown>
 }
-
-/** The structured failure message of a tool call. */
-function errorMessage(result: ToolExecutionResult): string {
-  expect(result.isError).toBe(true)
-  if (!result.isError) throw new Error('expected tool failure')
-  return result.error.message
-}
-
-/** Llm stand-in recording provider/model and user prompts, yielding canned replies.
- *  Replies are per-cell `[executor, reviewer]` pairs in serial cell order; under
- *  pair-parallel evaluation the k-th executor call and the k-th reviewer call
- *  (both sides still arrive reference-first) map back onto that order. */
-function makeFakeLlm(
-  replies: ReadonlyArray<Record<string, unknown>>,
-  requests: Array<{ provider: string; model: string }> = [],
-) {
-  let executorCalls = 0
-  let reviewerCalls = 0
-  return {
-    get callCount() { return executorCalls + reviewerCalls },
-    async *stream(request: { provider: string; model: string; system: string }) {
-      const reviewer = request.system === REVIEWER_SYSTEM_PROMPT
-      const index = reviewer ? 2 * reviewerCalls + 1 : 2 * executorCalls
-      const reply = replies[Math.min(index, replies.length - 1)]
-      if (reviewer) reviewerCalls += 1
-      else executorCalls += 1
-      requests.push({ provider: request.provider, model: request.model })
-      yield { type: 'text-delta' as const, text: JSON.stringify(reply) }
-      yield { type: 'finish' as const, reason: { kind: 'success' as const } }
-    },
-  }
-}
-
-const VALID_EVIDENCE = { completed: true, summary: 'did the task', actions: [], observations: [] }
-const SCORE_70 = { score: 70, feedback: 'reference ok' }
-const SCORE_90 = { score: 90, feedback: 'candidate better' }
 
 /** Seed the workflow's setup steps: new → add-case → freeze → capture-reference. */
 async function seedBenchmark(ctx: Context, agent: Agent): Promise<void> {

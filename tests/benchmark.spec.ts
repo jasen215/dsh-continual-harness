@@ -11,6 +11,7 @@ import {
   hashBenchmarkCase,
   loadBenchmark,
   loadReferenceSnapshot,
+  MAX_CASE_FIELD_CHARS,
   saveBenchmarkCases,
   validateCandidateDelta,
   validateCellScore,
@@ -99,7 +100,7 @@ describe('BenchmarkCase', () => {
   })
 
   it('rejects case material beyond the field caps', () => {
-    expect(() => createBenchmarkCase({ id: 'big', title: 't', statement: 'x'.repeat(20_001), rubric: 'r' }))
+    expect(() => createBenchmarkCase({ id: 'big', title: 't', statement: 'x'.repeat(MAX_CASE_FIELD_CHARS + 1), rubric: 'r' }))
       .toThrow(/statement exceeds 20000 chars/)
   })
 

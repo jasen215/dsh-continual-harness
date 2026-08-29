@@ -15,7 +15,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { EvaluationAbortError, EvaluationTimeoutError, raceWithTimeout } from './async-safe.ts'
+import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
 import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
 import { hashBenchmarkCase } from './benchmark.ts'
 import { completeViaModel } from './complete.ts'
@@ -226,60 +226,62 @@ export async function runCellEvaluation(
   // internal controller forwards the caller's signal and is aborted on timeout.
   const controller = new AbortController()
   const callerSignal = options.signal
-  if (callerSignal !== undefined) {
-    if (callerSignal.aborted) controller.abort()
-    else callerSignal.addEventListener('abort', () => controller.abort(), { once: true })
-  }
+  const unbridge = callerSignal === undefined ? undefined : bridgeAbortSignal(callerSignal, controller)
   const callSignal = controller.signal
 
-  let executorText: string
   try {
-    executorText = await raceWithTimeout(
-      complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), callSignal),
-      timeoutMs,
-      callerSignal,
-      () => controller.abort(),
-    )
-  } catch (error) {
-    return failedCell(base, null, failureReasonFor(error, callerSignal), startedAt)
-  }
+    let executorText: string
+    try {
+      executorText = await raceWithTimeout(
+        complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), callSignal),
+        timeoutMs,
+        callerSignal,
+        () => controller.abort(),
+      )
+    } catch (error) {
+      return failedCell(base, null, failureReasonFor(error, callerSignal), startedAt)
+    }
 
-  let evidence: ExecutorEvidence
-  try {
-    evidence = parseExecutorEvidence(executorText)
-  } catch (error) {
-    // EvidenceOverflowError carries its own structured reason (via
-    // failureReasonFor); every other parser throw is malformed executor output.
-    return failedCell(base, null, error instanceof EvidenceOverflowError ? failureReasonFor(error, callerSignal) : 'malformed-executor-json', startedAt)
-  }
+    let evidence: ExecutorEvidence
+    try {
+      evidence = parseExecutorEvidence(executorText)
+    } catch (error) {
+      // EvidenceOverflowError carries its own structured reason; every other
+      // parser throw is malformed executor output.
+      return failedCell(base, null, error instanceof EvidenceOverflowError ? 'evidence-overflow' : 'malformed-executor-json', startedAt)
+    }
 
-  let reviewerText: string
-  try {
-    reviewerText = await raceWithTimeout(
-      complete(REVIEWER_SYSTEM_PROMPT, buildReviewerPrompt(input.benchmarkCase, evidence), callSignal),
-      timeoutMs,
-      callerSignal,
-      () => controller.abort(),
-    )
-  } catch (error) {
-    return failedCell(base, evidence, failureReasonFor(error, callerSignal), startedAt)
-  }
+    let reviewerText: string
+    try {
+      reviewerText = await raceWithTimeout(
+        complete(REVIEWER_SYSTEM_PROMPT, buildReviewerPrompt(input.benchmarkCase, evidence), callSignal),
+        timeoutMs,
+        callerSignal,
+        () => controller.abort(),
+      )
+    } catch (error) {
+      return failedCell(base, evidence, failureReasonFor(error, callerSignal), startedAt)
+    }
 
-  let verdict: ReviewerScore
-  try {
-    verdict = parseReviewerScore(reviewerText)
-  } catch (error) {
-    const reason = error instanceof ReviewerParseError ? error.reason : 'malformed-reviewer-json'
-    return failedCell(base, evidence, reason, startedAt)
-  }
+    let verdict: ReviewerScore
+    try {
+      verdict = parseReviewerScore(reviewerText)
+    } catch (error) {
+      const reason = error instanceof ReviewerParseError ? error.reason : 'malformed-reviewer-json'
+      return failedCell(base, evidence, reason, startedAt)
+    }
 
-  return {
-    ...base,
-    status: 'ok',
-    score: verdict.score,
-    feedback: verdict.feedback,
-    evidence,
-    durationMs: Date.now() - startedAt,
+    return {
+      ...base,
+      status: 'ok',
+      score: verdict.score,
+      feedback: verdict.feedback,
+      evidence,
+      durationMs: Date.now() - startedAt,
+    }
+  } finally {
+    // The caller's signal outlives the cell: drop the forward listener.
+    unbridge?.()
   }
 }
 
@@ -298,8 +300,8 @@ class ReviewerParseError extends Error {
  * controller (so `signal.aborted` is set) yet must still read as `timeout`. */
 function failureReasonFor(error: unknown, signal: AbortSignal | undefined): EvaluationFailureReason {
   if (error instanceof EvidenceOverflowError) return 'evidence-overflow'
-  if (error instanceof EvaluationTimeoutError) return 'timeout'
-  if (error instanceof EvaluationAbortError) return 'aborted'
+  if (error instanceof PhaseTimeoutError) return 'timeout'
+  if (error instanceof PhaseAbortError) return 'aborted'
   if (error instanceof Error && error.name === 'AbortError') return 'aborted'
   if (signal?.aborted) return 'aborted'
   return 'provider-error'

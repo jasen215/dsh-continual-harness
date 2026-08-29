@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -10,10 +10,10 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { captureReferenceSnapshot, loadBenchmark, loadReferenceSnapshot } from '../src/benchmark.ts'
+import { MAX_BENCH_CASES, captureReferenceSnapshot, loadBenchmark, loadReferenceSnapshot } from '../src/benchmark.ts'
 import type { BenchmarkDecision, ExecutorEvidence } from '../src/benchmark.ts'
 import type { RefineCoordinator } from '../src/coordinator.ts'
-import { REVIEWER_SYSTEM_PROMPT } from '../src/evaluate.ts'
+import { errorMessage, makeFakeLlm, SCORE_70, SCORE_90, VALID_EVIDENCE } from './fake-llm.ts'
 import { HarnessStore } from '../src/store.ts'
 import { registerBenchmarkTool, registerHarnessTool } from '../src/tool.ts'
 import type { BenchmarkToolOptions, ToolOptions } from '../src/tool.ts'
@@ -160,42 +160,6 @@ function resultJson(result: ToolExecutionResult): Record<string, unknown> {
   if (block?.type !== 'text') throw new Error('expected text tool result')
   return JSON.parse(block.text) as Record<string, unknown>
 }
-
-/** The structured failure message of a tool call. */
-function errorMessage(result: ToolExecutionResult): string {
-  expect(result.isError).toBe(true)
-  if (!result.isError) throw new Error('expected tool failure')
-  return result.error.message
-}
-
-/** Llm stand-in recording provider/model and user prompts, yielding canned replies.
- *  Replies are per-cell `[executor, reviewer]` pairs in serial cell order; under
- *  pair-parallel evaluation the k-th executor call and the k-th reviewer call
- *  (both sides still arrive reference-first) map back onto that order. */
-function makeFakeLlm(
-  replies: ReadonlyArray<Record<string, unknown>>,
-  requests: Array<{ provider: string; model: string }> = [],
-) {
-  let executorCalls = 0
-  let reviewerCalls = 0
-  return {
-    get callCount() { return executorCalls + reviewerCalls },
-    async *stream(request: { provider: string; model: string; system: string }) {
-      const reviewer = request.system === REVIEWER_SYSTEM_PROMPT
-      const index = reviewer ? 2 * reviewerCalls + 1 : 2 * executorCalls
-      const reply = replies[Math.min(index, replies.length - 1)]
-      if (reviewer) reviewerCalls += 1
-      else executorCalls += 1
-      requests.push({ provider: request.provider, model: request.model })
-      yield { type: 'text-delta' as const, text: JSON.stringify(reply) }
-      yield { type: 'finish' as const, reason: { kind: 'success' as const } }
-    },
-  }
-}
-
-const VALID_EVIDENCE = { completed: true, summary: 'did the task', actions: [], observations: [] }
-const SCORE_70 = { score: 70, feedback: 'reference ok' }
-const SCORE_90 = { score: 90, feedback: 'candidate better' }
 
 /** Seed one frozen case through the tool. */
 async function seedFrozenCase(ctx: Context, id = 'case-1'): Promise<void> {
@@ -598,11 +562,11 @@ describe('harness_benchmark run', () => {
   it('refuses add-case beyond the case limit', async () => {
     const home = tempHome()
     const { ctx } = await mount(home)
-    for (let index = 0; index < 50; index += 1) {
+    for (let index = 0; index < MAX_BENCH_CASES; index += 1) {
       const added = await execute(ctx, { action: 'add-case', case_id: `case-${index}`, title: 't', statement: 's', rubric: 'r' })
       expect(added.isError).toBe(false)
     }
-    const over = await execute(ctx, { action: 'add-case', case_id: 'case-50', title: 't', statement: 's', rubric: 'r' })
+    const over = await execute(ctx, { action: 'add-case', case_id: `case-${MAX_BENCH_CASES}`, title: 't', statement: 's', rubric: 'r' })
     expect(over.isError).toBe(true)
     expect(errorMessage(over)).toMatch(/benchmark:add-case:case-limit/)
   })
@@ -621,7 +585,7 @@ describe('harness_benchmark run', () => {
         current += 1
         inflight.push(current)
         peak = Math.max(peak, inflight.length)
-        await new Promise((resolve) => setTimeout(resolve, 5)) // 真实异步边界，制造交错
+        await new Promise((resolve) => setTimeout(resolve, 5)) // real async boundary to force interleaving
         inflight.pop()
         const prompt = request.messages[0]?.content.map((block) => block.text ?? '').join('\n') ?? ''
         const reply = prompt.includes('# Executor evidence') ? SCORE_70 : VALID_EVIDENCE
@@ -633,8 +597,8 @@ describe('harness_benchmark run', () => {
     expect(result.isError).toBe(false)
     const json = resultJson(result) as { cells: number; status: string }
     expect(json.cells).toBe(2)
-    expect(peak).toBe(2) // 同迭代 reference/candidate 并行
-    expect(readdirSync(join(home, 'benchmark')).filter((name) => name === 'runs.jsonl')).toEqual(['runs.jsonl'])
+    expect(peak).toBe(2) // reference and candidate of one iteration run in parallel
+    expect(existsSync(join(home, 'benchmark', 'runs.jsonl'))).toBe(true)
   })
 })
 

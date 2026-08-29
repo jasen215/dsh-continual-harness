@@ -6,7 +6,7 @@
  */
 
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   HARNESS_DIR_NAME,
@@ -74,7 +74,7 @@ export function migrateHarnessState(parsed: unknown): { state: HarnessState; dia
 
 /**
  * Read one store file: missing → empty; corrupt/future → backed up once
- * (`<file>.corrupt-<epoch-ms>.bak`), degraded to empty, and reported through
+ * (`<file>.corrupt.bak`), degraded to empty, and reported through
  * `onDiagnostics` — so the next commit can never silently destroy the only
  * copy of the user's entries. The file itself is never rewritten by load.
  */
@@ -88,32 +88,25 @@ export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: stri
     return migrated.state
   } catch {
     const backup = backupCorruptStateFile(file)
-    onDiagnostics?.([backup === undefined
-      ? `corrupt harness state file could not be backed up: ${file}`
-      : backup.reused
-        ? `corrupt harness state file already backed up at ${backup.path}`
-        : `corrupt harness state file backed up to ${backup.path}`])
+    let diagnostic: string
+    if (backup === undefined) diagnostic = `corrupt harness state file could not be backed up: ${file}`
+    else if (backup.reused) diagnostic = `corrupt harness state file already backed up at ${backup.path}`
+    else diagnostic = `corrupt harness state file backed up to ${backup.path}`
+    onDiagnostics?.([diagnostic])
     return emptyHarnessState()
   }
 }
 
 /**
  * Best-effort copy of a corrupt/future-version state file; never throws.
- * Idempotent per file: an existing `<file>.corrupt-*.bak` sibling is reused
- * instead of accumulating one file-sized copy per failed load.
+ * Idempotent per file: the deterministic `.corrupt.bak` sibling is reused
+ * instead of accumulating one file-sized copy per failed load (a corrupt
+ * file is re-read on every request until someone fixes or saves it).
  */
 function backupCorruptStateFile(file: string): { path: string; reused: boolean } | undefined {
+  const backup = `${file}.corrupt.bak`
   try {
-    const base = basename(file)
-    const existing = readdirSync(dirname(file)).find(
-      name => name.startsWith(`${base}.corrupt-`) && name.endsWith('.bak'),
-    )
-    if (existing) return { path: join(dirname(file), existing), reused: true }
-  } catch {
-    // unreadable directory → fall through to the copy attempt
-  }
-  const backup = `${file}.corrupt-${Date.now()}.bak`
-  try {
+    if (existsSync(backup)) return { path: backup, reused: true }
     copyFileSync(file, backup)
     return { path: backup, reused: false }
   } catch {

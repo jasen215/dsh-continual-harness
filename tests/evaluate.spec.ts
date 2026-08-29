@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { buildSnapshot, createBenchmarkCase, freezeBenchmarkCase } from '../src/benchmark.ts'
 import type { BenchmarkCase, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { parseExecutorEvidence, parseReviewerScore, runCellEvaluation } from '../src/evaluate.ts'
+import { MAX_EVIDENCE_ARTIFACTS, MAX_EVIDENCE_TOTAL_BYTES, parseExecutorEvidence, parseReviewerScore, runCellEvaluation } from '../src/evaluate.ts'
 import type { CellEvaluationInput } from '../src/evaluate.ts'
 import type { HarnessState } from '../src/types.ts'
 
@@ -195,52 +195,22 @@ describe('failure conversion', () => {
     expect(result.failureReason).toBe('malformed-executor-json')
   })
 
-  it('marks evidence beyond the artifact caps as a failed cell with evidence-overflow', async () => {
-    // executor 回复携带 21 个 artifacts（MAX_EVIDENCE_ARTIFACTS = 20）
-    const bigArtifacts = Array.from({ length: 21 }, (_, index) => ({ name: `f${index}.txt`, content: 'x' }))
-    const ctx = new Context()
-    ctx.provide('llm', {
-      async *stream() {
-        yield { type: 'text-delta', text: JSON.stringify({ completed: true, summary: 's', actions: [], observations: [], artifacts: bigArtifacts }) }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      },
-    } as never)
-    const cell = await runCellEvaluation(ctx, {
-      runId: 'run-overflow',
-      side: 'reference',
-      iteration: 1,
-      benchmarkCase: FROZEN_CASE,
-      snapshot: buildSnapshot(baseState(), 'ref-1'),
-      provider: 'test-provider',
-      model: 'test-model',
-    }, {})
-    expect(cell.status).toBe('failed')
-    expect(cell.failureReason).toBe('evidence-overflow')
-    expect(cell.score).toBeNull()
+  it('marks evidence beyond the artifact cap as a failed cell with evidence-overflow', async () => {
+    // executor reply carries one more artifact than MAX_EVIDENCE_ARTIFACTS allows
+    const artifacts = Array.from({ length: MAX_EVIDENCE_ARTIFACTS + 1 }, (_, index) => ({ name: `f${index}.txt`, content: 'x' }))
+    const result = await runCellEvaluation(fakeContext([], [{ completed: true, summary: 's', actions: [], observations: [], artifacts }]), input())
+    expect(result.status).toBe('failed')
+    expect(result.failureReason).toBe('evidence-overflow')
+    expect(result.score).toBeNull()
   })
 
   it('marks evidence beyond the total byte cap as a failed cell with evidence-overflow', async () => {
-    // executor 回复携带 1 个超过 MAX_EVIDENCE_TOTAL_BYTES（256 KiB）的 artifact
-    const oversizedArtifacts = [{ name: 'big.txt', content: 'x'.repeat(256 * 1024 + 1) }]
-    const ctx = new Context()
-    ctx.provide('llm', {
-      async *stream() {
-        yield { type: 'text-delta', text: JSON.stringify({ completed: true, summary: 's', actions: [], observations: [], artifacts: oversizedArtifacts }) }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      },
-    } as never)
-    const cell = await runCellEvaluation(ctx, {
-      runId: 'run-overflow',
-      side: 'reference',
-      iteration: 1,
-      benchmarkCase: FROZEN_CASE,
-      snapshot: buildSnapshot(baseState(), 'ref-1'),
-      provider: 'test-provider',
-      model: 'test-model',
-    }, {})
-    expect(cell.status).toBe('failed')
-    expect(cell.failureReason).toBe('evidence-overflow')
-    expect(cell.score).toBeNull()
+    // executor reply carries one artifact larger than MAX_EVIDENCE_TOTAL_BYTES allows
+    const artifacts = [{ name: 'big.txt', content: 'x'.repeat(MAX_EVIDENCE_TOTAL_BYTES + 1) }]
+    const result = await runCellEvaluation(fakeContext([], [{ completed: true, summary: 's', actions: [], observations: [], artifacts }]), input())
+    expect(result.status).toBe('failed')
+    expect(result.failureReason).toBe('evidence-overflow')
+    expect(result.score).toBeNull()
   })
 
   it('fails the cell on malformed reviewer JSON', async () => {

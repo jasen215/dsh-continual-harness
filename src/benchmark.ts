@@ -593,7 +593,7 @@ function benchmarkSnapshotFile(home: string, snapshotId: string): string {
   return join(home, BENCHMARK_DIR_NAME, BENCHMARK_SNAPSHOTS_DIR_NAME, `${snapshotId}.json`)
 }
 
-/** Atomic JSON write: sibling `.tmp` file, then rename, mirroring storage.ts. */
+/** Atomic JSON write: unique sibling temp via `uniqueTmpPath`, then rename. */
 function atomicWriteJson(file: string, value: unknown): void {
   mkdirSync(dirname(file), { recursive: true })
   const tmp = uniqueTmpPath(file)

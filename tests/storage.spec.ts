@@ -225,7 +225,7 @@ describe('harness state storage', () => {
     writeFileSync(join(dir, 'harness_state.json'), corrupt, 'utf8')
     const diagnostics: string[] = []
     expect(loadHarnessState(dir, (lines) => diagnostics.push(...lines))).toEqual(emptyHarnessState())
-    const backups = readdirSync(dir).filter((name) => name.includes('.corrupt-') && name.endsWith('.bak'))
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
     expect(backups).toHaveLength(1)
     expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(corrupt)
     expect(diagnostics.some((line) => line.includes('backed up to'))).toBe(true)
@@ -241,7 +241,7 @@ describe('harness state storage', () => {
     for (let i = 0; i < 3; i++) {
       expect(loadHarnessState(dir, (lines) => diagnostics.push(...lines))).toEqual(emptyHarnessState())
     }
-    const backups = readdirSync(dir).filter((name) => name.includes('.corrupt-') && name.endsWith('.bak'))
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
     expect(backups).toHaveLength(1)
     expect(diagnostics.filter((line) => line.includes('backed up to'))).toHaveLength(1)
     expect(diagnostics.filter((line) => line.includes('already backed up'))).toHaveLength(2)
@@ -255,7 +255,7 @@ describe('harness state storage', () => {
     const future = JSON.stringify({ schemaVersion: 99, entries: {}, refinements: [] })
     writeFileSync(join(dir, 'harness_state.json'), future, 'utf8')
     loadHarnessState(dir)
-    const backups = readdirSync(dir).filter((name) => name.includes('.corrupt-') && name.endsWith('.bak'))
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
     expect(backups).toHaveLength(1)
     expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(future)
   })
@@ -267,8 +267,8 @@ describe('harness state storage', () => {
     const corrupt = '{not json'
     writeFileSync(join(dir, 'harness_state.json'), corrupt, 'utf8')
     const state = loadHarnessState(dir)
-    saveHarnessState(dir, state) // applyRefinement 的提交路径最终都走到这里
-    const backups = readdirSync(dir).filter((name) => name.includes('.corrupt-') && name.endsWith('.bak'))
+    saveHarnessState(dir, state) // the commit path that applyRefinement ends up on
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
     expect(backups).toHaveLength(1)
     expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(corrupt)
     expect(JSON.parse(readFileSync(join(dir, 'harness_state.json'), 'utf8'))).toHaveProperty('schemaVersion', HARNESS_SCHEMA_VERSION)

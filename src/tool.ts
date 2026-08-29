@@ -651,17 +651,18 @@ async function actionRun(
     throw benchmarkError('run:model-options', 'run requires a provider and model: pass provider/model or configure the agent')
   }
 
-  const evaluations: CellEvaluation[] = []
-  const cellOptions = exec.signal === undefined ? {} : { signal: exec.signal }
   if (exec.signal?.aborted) {
     throw benchmarkError('run:aborted', 'run aborted; no cells were evaluated and no decision was recorded')
   }
+  const evaluations: CellEvaluation[] = []
+  const cellOptions = exec.signal === undefined ? {} : { signal: exec.signal }
   for (const benchmarkCase of frozenCases) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
+      if (exec.signal?.aborted) break
       const [refCell, candCell] = await Promise.all([
         runCellEvaluation(ctx, {
           runId,
-          side: 'reference' as const,
+          side: 'reference',
           iteration,
           benchmarkCase,
           snapshot: reference,
@@ -670,7 +671,7 @@ async function actionRun(
         }, cellOptions),
         runCellEvaluation(ctx, {
           runId,
-          side: 'candidate' as const,
+          side: 'candidate',
           iteration,
           benchmarkCase,
           snapshot: candidate,
@@ -682,6 +683,9 @@ async function actionRun(
     }
   }
 
+  if (exec.signal?.aborted) {
+    throw benchmarkError('run:aborted', 'run aborted; no decision was recorded')
+  }
   const cells: Array<CellScore & { evidence: ExecutorEvidence | null }> = evaluations.map(cellFromEvaluation)
   const decision = decideBenchmark({
     runId,
@@ -693,9 +697,6 @@ async function actionRun(
       maxFailedCells: options.maxFailedCells,
     },
   })
-  if (exec.signal?.aborted) {
-    throw benchmarkError('run:aborted', 'run aborted; no decision was recorded')
-  }
   appendBenchmarkRun(store.home, { runId, cells, decision, createdAt: decision.createdAt })
 
   return {

@@ -8,7 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { EvaluationAbortError, EvaluationTimeoutError, raceWithTimeout } from './async-safe.ts'
+import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
 import { PLUGIN_NAME } from './domain.ts'
 import type { Complete } from './planner.ts'
 
@@ -40,10 +40,7 @@ async function streamToText(
   }
   const controller = new AbortController()
   const signal = params.signal
-  if (signal !== undefined) {
-    if (signal.aborted) controller.abort()
-    else signal.addEventListener('abort', () => controller.abort(), { once: true })
-  }
+  const unbridge = signal === undefined ? undefined : bridgeAbortSignal(signal, controller)
   const work = (async (): Promise<string> => {
     let text = ''
     let failure: 'error' | 'aborted' | undefined
@@ -68,20 +65,22 @@ async function streamToText(
     return text
   })()
   try {
-    // Race against the CALLER's signal (mirroring evaluate.ts): racing against
-    // `controller.signal` here would let the deadline's own `controller.abort()`
-    // in `onTimeout` win the race as an `EvaluationAbortError`, masking the
-    // deadline as an abort. The deadline must still cancel the underlying
-    // stream, hence the internal-controller abort.
+    // Race against the CALLER's signal, not `controller.signal`: the deadline's
+    // own `controller.abort()` in `onTimeout` would otherwise win the race as a
+    // PhaseAbortError, masking the timeout. The deadline must still cancel the
+    // underlying stream, hence the internal-controller abort.
     return await raceWithTimeout(work, params.deadlineMs, signal, () => controller.abort())
   } catch (error) {
-    if (error instanceof EvaluationTimeoutError) {
+    if (error instanceof PhaseTimeoutError) {
       throw new Error(`${params.errorPrefix} timed out after ${params.deadlineMs}ms`)
     }
-    if (error instanceof EvaluationAbortError) {
+    if (error instanceof PhaseAbortError) {
       throw new Error(`${params.errorPrefix} aborted`)
     }
     throw error
+  } finally {
+    // The caller's signal outlives the call: drop the forward listener.
+    unbridge?.()
   }
 }
 

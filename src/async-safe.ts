@@ -6,13 +6,26 @@
  */
 
 /** Marker error for a phase that exceeded its timeout budget. */
-export class EvaluationTimeoutError extends Error {
-  override name = 'EvaluationTimeoutError'
+export class PhaseTimeoutError extends Error {
+  override name = 'PhaseTimeoutError'
 }
 
 /** Marker error for a phase cancelled by the caller's abort signal. */
-export class EvaluationAbortError extends Error {
-  override name = 'EvaluationAbortError'
+export class PhaseAbortError extends Error {
+  override name = 'PhaseAbortError'
+}
+
+/**
+ * Relay a caller's abort into an internal per-call controller, so cancelling
+ * the caller cancels the underlying work. Returns a cleanup fn that removes
+ * the forward listener — call it when the guarded work settles; the caller's
+ * signal usually outlives the call and would otherwise accumulate listeners.
+ */
+export function bridgeAbortSignal(from: AbortSignal, controller: AbortController): () => void {
+  const forward = (): void => controller.abort()
+  if (from.aborted) forward()
+  else from.addEventListener('abort', forward, { once: true })
+  return () => from.removeEventListener('abort', forward)
 }
 
 /** Race a promise against a per-phase timeout and the caller's abort signal.
@@ -27,11 +40,6 @@ export function raceWithTimeout<T>(
   return new Promise<T>((resolve, reject) => {
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const onAbort = (): void => settle(() => reject(new EvaluationAbortError()))
-    const fireTimeout = (): void => {
-      onTimeout?.()
-      settle(() => reject(new EvaluationTimeoutError()))
-    }
     const cleanup = (): void => {
       if (timer !== undefined) clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
@@ -41,6 +49,11 @@ export function raceWithTimeout<T>(
       settled = true
       cleanup()
       fail()
+    }
+    const onAbort = (): void => settle(() => reject(new PhaseAbortError()))
+    const fireTimeout = (): void => {
+      onTimeout?.()
+      settle(() => reject(new PhaseTimeoutError()))
     }
     if (signal !== undefined) {
       if (signal.aborted) {
@@ -54,18 +67,8 @@ export function raceWithTimeout<T>(
     }
     timer = setTimeout(fireTimeout, timeoutMs)
     promise.then(
-      value => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolve(value)
-      },
-      error => {
-        if (settled) return
-        settled = true
-        cleanup()
-        reject(error)
-      },
+      value => settle(() => resolve(value)),
+      error => settle(() => reject(error)),
     )
   })
 }

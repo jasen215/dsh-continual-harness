@@ -1,5 +1,5 @@
 import { expect, describe, it } from 'vitest'
-import { EvaluationAbortError, EvaluationTimeoutError, raceWithTimeout } from '../src/async-safe.ts'
+import { PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from '../src/async-safe.ts'
 
 /** Record unhandled rejections for the duration of one assertion block. */
 async function withoutUnhandledRejections(run: () => Promise<void>): Promise<unknown[]> {
@@ -21,7 +21,7 @@ describe('raceWithTimeout', () => {
     const unhandled = await withoutUnhandledRejections(async () => {
       const controller = new AbortController()
       controller.abort()
-      await expect(raceWithTimeout(loser, 1000, controller.signal)).rejects.toBeInstanceOf(EvaluationAbortError)
+      await expect(raceWithTimeout(loser, 1000, controller.signal)).rejects.toBeInstanceOf(PhaseAbortError)
     })
     expect(unhandled).toEqual([])
   })
@@ -33,7 +33,7 @@ describe('raceWithTimeout', () => {
       const controller = new AbortController()
       const raced = raceWithTimeout(loser, 1000, controller.signal)
       controller.abort()
-      await expect(raced).rejects.toBeInstanceOf(EvaluationAbortError)
+      await expect(raced).rejects.toBeInstanceOf(PhaseAbortError)
       rejectLoser?.(new Error('loser after settle'))
     })
     expect(unhandled).toEqual([])
@@ -43,7 +43,7 @@ describe('raceWithTimeout', () => {
     let cancelled = false
     const pending = new Promise<string>(() => {})
     await expect(raceWithTimeout(pending, 5, undefined, () => { cancelled = true }))
-      .rejects.toBeInstanceOf(EvaluationTimeoutError)
+      .rejects.toBeInstanceOf(PhaseTimeoutError)
     expect(cancelled).toBe(true)
   })
 })

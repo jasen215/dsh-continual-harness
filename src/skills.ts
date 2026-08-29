@@ -70,7 +70,7 @@ export function validateBundleFiles(
       return `bundle file key "${key}" contains an invalid path segment`
     }
     if (key === 'SKILL.md') return 'SKILL.md is generated from content and must not appear in files'
-    if (!/^(scripts|references)\//.test(key)) {
+    if (!BUNDLE_TARGET_PREFIX_RE.test(key)) {
       return `bundle file key "${key}" must start with scripts/ or references/`
     }
     if (/%[0-9a-fA-F]{2}/.test(key)) {
@@ -138,6 +138,9 @@ export function isSafeBundleRelative(rel: string): boolean {
   return rel.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
 }
 
+/** Bundle materialization targets must live under these directory prefixes. */
+const BUNDLE_TARGET_PREFIX_RE = /^(scripts|references)\//
+
 /**
  * Why a materialization target is unwritable, or undefined when it is safe:
  * the path must stay inside the bundle root AND live under scripts/ or
@@ -146,7 +149,7 @@ export function isSafeBundleRelative(rel: string): boolean {
  */
 export function unsafeBundleTargetReason(rel: string): string | undefined {
   if (!isSafeBundleRelative(rel)) return 'escapes the bundle root'
-  if (!/^(scripts|references)\//.test(rel)) return 'must live under scripts/ or references/'
+  if (!BUNDLE_TARGET_PREFIX_RE.test(rel)) return 'must live under scripts/ or references/'
   return undefined
 }
 
