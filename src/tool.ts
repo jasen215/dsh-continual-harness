@@ -23,6 +23,7 @@ import {
   freezeBenchmarkCase,
   loadBenchmark,
   loadReferenceSnapshot,
+  MAX_BENCH_CASES,
   saveBenchmarkCases,
   scopeLayerPair,
   validateCandidateDelta,
@@ -502,6 +503,9 @@ function actionAddCase(store: HarnessStore, args: Record<string, unknown>): { ac
     throw benchmarkError('add-case:missing-argument', 'add-case requires case_id, title, statement, and rubric')
   }
   const existing = loadBenchmark(store.home)
+  if (existing.length >= MAX_BENCH_CASES) {
+    throw benchmarkError('add-case:case-limit', `benchmark case limit reached (${MAX_BENCH_CASES}); delete or prune cases first`)
+  }
   if (existing.some(benchmarkCase => benchmarkCase.id === caseId)) {
     throw benchmarkError('add-case:duplicate-id', `benchmark case id already exists: ${caseId}`)
   }
@@ -647,31 +651,41 @@ async function actionRun(
     throw benchmarkError('run:model-options', 'run requires a provider and model: pass provider/model or configure the agent')
   }
 
+  if (exec.signal?.aborted) {
+    throw benchmarkError('run:aborted', 'run aborted; no cells were evaluated and no decision was recorded')
+  }
   const evaluations: CellEvaluation[] = []
-  const cellOptions = { ...(exec.signal === undefined ? {} : { signal: exec.signal }) }
+  const cellOptions = exec.signal === undefined ? {} : { signal: exec.signal }
   for (const benchmarkCase of frozenCases) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
-      evaluations.push(await runCellEvaluation(ctx, {
-        runId,
-        side: 'reference',
-        iteration,
-        benchmarkCase,
-        snapshot: reference,
-        provider,
-        model,
-      }, cellOptions))
-      evaluations.push(await runCellEvaluation(ctx, {
-        runId,
-        side: 'candidate',
-        iteration,
-        benchmarkCase,
-        snapshot: candidate,
-        provider,
-        model,
-      }, cellOptions))
+      if (exec.signal?.aborted) break
+      const [refCell, candCell] = await Promise.all([
+        runCellEvaluation(ctx, {
+          runId,
+          side: 'reference',
+          iteration,
+          benchmarkCase,
+          snapshot: reference,
+          provider,
+          model,
+        }, cellOptions),
+        runCellEvaluation(ctx, {
+          runId,
+          side: 'candidate',
+          iteration,
+          benchmarkCase,
+          snapshot: candidate,
+          provider,
+          model,
+        }, cellOptions),
+      ])
+      evaluations.push(refCell, candCell)
     }
   }
 
+  if (exec.signal?.aborted) {
+    throw benchmarkError('run:aborted', 'run aborted; no decision was recorded')
+  }
   const cells: Array<CellScore & { evidence: ExecutorEvidence | null }> = evaluations.map(cellFromEvaluation)
   const decision = decideBenchmark({
     runId,

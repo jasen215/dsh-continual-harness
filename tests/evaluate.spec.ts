@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { buildSnapshot, createBenchmarkCase, freezeBenchmarkCase } from '../src/benchmark.ts'
 import type { BenchmarkCase, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { parseExecutorEvidence, parseReviewerScore, runCellEvaluation } from '../src/evaluate.ts'
+import { MAX_EVIDENCE_ARTIFACTS, MAX_EVIDENCE_TOTAL_BYTES, parseExecutorEvidence, parseReviewerScore, runCellEvaluation } from '../src/evaluate.ts'
 import type { CellEvaluationInput } from '../src/evaluate.ts'
 import type { HarnessState } from '../src/types.ts'
 
@@ -193,6 +193,24 @@ describe('failure conversion', () => {
     expect(result.status).toBe('failed')
     expect(result.score).toBeNull()
     expect(result.failureReason).toBe('malformed-executor-json')
+  })
+
+  it('marks evidence beyond the artifact cap as a failed cell with evidence-overflow', async () => {
+    // executor reply carries one more artifact than MAX_EVIDENCE_ARTIFACTS allows
+    const artifacts = Array.from({ length: MAX_EVIDENCE_ARTIFACTS + 1 }, (_, index) => ({ name: `f${index}.txt`, content: 'x' }))
+    const result = await runCellEvaluation(fakeContext([], [{ completed: true, summary: 's', actions: [], observations: [], artifacts }]), input())
+    expect(result.status).toBe('failed')
+    expect(result.failureReason).toBe('evidence-overflow')
+    expect(result.score).toBeNull()
+  })
+
+  it('marks evidence beyond the total byte cap as a failed cell with evidence-overflow', async () => {
+    // executor reply carries one artifact larger than MAX_EVIDENCE_TOTAL_BYTES allows
+    const artifacts = [{ name: 'big.txt', content: 'x'.repeat(MAX_EVIDENCE_TOTAL_BYTES + 1) }]
+    const result = await runCellEvaluation(fakeContext([], [{ completed: true, summary: 's', actions: [], observations: [], artifacts }]), input())
+    expect(result.status).toBe('failed')
+    expect(result.failureReason).toBe('evidence-overflow')
+    expect(result.score).toBeNull()
   })
 
   it('fails the cell on malformed reviewer JSON', async () => {

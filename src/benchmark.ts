@@ -20,6 +20,7 @@ import {
   BENCHMARK_SNAPSHOTS_DIR_NAME,
   REFINEMENT_KINDS,
 } from './domain.ts'
+import { uniqueTmpPath } from './fs-safe.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { AppliedRefinementEdit, HarnessEntry, HarnessState, RefinementKind, RefinementResult } from './types.ts'
 
@@ -116,11 +117,21 @@ export type CellScoreFailureReason = 'score-non-finite' | 'score-out-of-range' |
 /** Structured result of {@link validateCellScore}. */
 export type CellScoreValidationResult = { ok: true } | { ok: false; reason: CellScoreFailureReason }
 
+/** Hard caps guarding model-driven benchmark growth (spec 项 7). */
+export const MAX_BENCH_CASES = 50
+export const MAX_CASE_FIELD_CHARS = 20_000
+
 function validateCaseMaterial(input: BenchmarkCaseInput): void {
   if (input.id.trim() === '') throw new Error('benchmark case id must be non-empty')
   if (input.title.trim() === '') throw new Error('benchmark case title must be non-empty')
   if (input.statement.trim() === '') throw new Error('benchmark case statement must be non-empty')
   if (input.rubric.trim() === '') throw new Error('benchmark case rubric must be non-empty')
+  if (input.statement.length > MAX_CASE_FIELD_CHARS) {
+    throw new Error(`benchmark case statement exceeds ${MAX_CASE_FIELD_CHARS} chars`)
+  }
+  if (input.rubric.length > MAX_CASE_FIELD_CHARS) {
+    throw new Error(`benchmark case rubric exceeds ${MAX_CASE_FIELD_CHARS} chars`)
+  }
 }
 
 /** Create a mutable draft case; rejects empty material and duplicate ids. */
@@ -582,10 +593,10 @@ function benchmarkSnapshotFile(home: string, snapshotId: string): string {
   return join(home, BENCHMARK_DIR_NAME, BENCHMARK_SNAPSHOTS_DIR_NAME, `${snapshotId}.json`)
 }
 
-/** Atomic JSON write: sibling `.tmp` file, then rename, mirroring storage.ts. */
+/** Atomic JSON write: unique sibling temp via `uniqueTmpPath`, then rename. */
 function atomicWriteJson(file: string, value: unknown): void {
   mkdirSync(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
+  const tmp = uniqueTmpPath(file)
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
   renameSync(tmp, file)
 }

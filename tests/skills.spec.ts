@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -259,7 +259,7 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
     const failing: SkillFsOps = {
       ...defaultSkillFsOps,
       writeFileSync(path, data, encoding) {
-        if (path.endsWith('fault.py.tmp')) throw new Error('disk full')
+        if (path.includes('.tmp')) throw new Error('disk full')
         defaultSkillFsOps.writeFileSync(path, data, encoding)
       },
     }
@@ -306,9 +306,8 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
       renameSync: () => { throw new Error('rename failed') },
     }
     const result = reconcileSkillFiles(dir, { oq: entry('oq', { 'scripts/fault.py': 'x' }) }, ['oq'], failing)
-    const file = join(dir, 'oq', 'scripts', 'fault.py')
     expect(result.errors.some(error => error.code === 'write-failed')).toBe(true)
-    expect(existsSync(`${file}.tmp`)).toBe(false)
+    expect(readdirSync(join(dir, 'oq', 'scripts')).filter((name) => name.endsWith('.tmp'))).toEqual([])
   })
 
   it('skips a regular-file bundle path and continues processing other touched ids', () => {
@@ -388,6 +387,22 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
     }, ['oq'], failing)
     expect(result.removed).toEqual([join(dir, 'oq', 'extra.md')])
     expect(result.status).toBe('partial')
+  })
+
+  it('refuses to write hostile files-map keys outside the bundle', () => {
+    const dir = tempDir()
+    const hostile = entry('hostile-skill', {
+      '../evil.txt': 'nope',
+      'a/../../b.txt': 'nope',
+      'other/x.txt': 'nope',
+    })
+    const result = reconcileSkillFiles(dir, { 'hostile-skill': hostile }, ['hostile-skill'])
+    expect(existsSync(join(dir, 'evil.txt'))).toBe(false)
+    expect(existsSync(join(dir, 'b.txt'))).toBe(false)
+    expect(existsSync(join(dir, 'hostile-skill', 'other'))).toBe(false)
+    expect(result.errors.filter((error) => error.code === 'unsafe-path')).toHaveLength(3)
+    expect(result.written.some((path) => path.endsWith('SKILL.md'))).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
   })
 })
 

@@ -5,7 +5,7 @@
  * @module dsh-continual-harness
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
@@ -17,6 +17,7 @@ import {
   USAGE_ARCHIVE_PREFIX,
   USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
+import { uniqueTmpPath } from './fs-safe.ts'
 import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
 
 const EMPTY_ENTRIES: HarnessState['entries'] = {
@@ -71,7 +72,12 @@ export function migrateHarnessState(parsed: unknown): { state: HarnessState; dia
   return { state: { schemaVersion: HARNESS_SCHEMA_VERSION, entries, refinements }, diagnostics }
 }
 
-/** Read one store file: missing → empty; corrupt/future → empty and never overwritten; old version → migrate. */
+/**
+ * Read one store file: missing → empty; corrupt/future → backed up once
+ * (`<file>.corrupt.bak`), degraded to empty, and reported through
+ * `onDiagnostics` — so the next commit can never silently destroy the only
+ * copy of the user's entries. The file itself is never rewritten by load.
+ */
 export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: string[]) => void): HarnessState {
   const file = join(dir, HARNESS_STATE_FILE_NAME)
   if (!existsSync(file)) return emptyHarnessState()
@@ -81,7 +87,30 @@ export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: stri
     if (migrated.diagnostics.length > 0) onDiagnostics?.(migrated.diagnostics)
     return migrated.state
   } catch {
+    const backup = backupCorruptStateFile(file)
+    let diagnostic: string
+    if (backup === undefined) diagnostic = `corrupt harness state file could not be backed up: ${file}`
+    else if (backup.reused) diagnostic = `corrupt harness state file already backed up at ${backup.path}`
+    else diagnostic = `corrupt harness state file backed up to ${backup.path}`
+    onDiagnostics?.([diagnostic])
     return emptyHarnessState()
+  }
+}
+
+/**
+ * Best-effort copy of a corrupt/future-version state file; never throws.
+ * Idempotent per file: the deterministic `.corrupt.bak` sibling is reused
+ * instead of accumulating one file-sized copy per failed load (a corrupt
+ * file is re-read on every request until someone fixes or saves it).
+ */
+function backupCorruptStateFile(file: string): { path: string; reused: boolean } | undefined {
+  const backup = `${file}.corrupt.bak`
+  try {
+    if (existsSync(backup)) return { path: backup, reused: true }
+    copyFileSync(file, backup)
+    return { path: backup, reused: false }
+  } catch {
+    return undefined
   }
 }
 
@@ -116,7 +145,7 @@ export function mergeHarnessStates(global: HarnessState, local: HarnessState): H
 export function saveHarnessState(dir: string, state: HarnessState): void {
   mkdirSync(dir, { recursive: true })
   const file = join(dir, HARNESS_STATE_FILE_NAME)
-  const tmp = `${file}.tmp`
+  const tmp = uniqueTmpPath(file)
   writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8')
   renameSync(tmp, file)
 }

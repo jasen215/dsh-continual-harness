@@ -15,6 +15,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
 import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
 import { hashBenchmarkCase } from './benchmark.ts'
 import { completeViaModel } from './complete.ts'
@@ -29,6 +30,15 @@ export const DEFAULT_EVALUATION_TIMEOUT_MS = 60_000
 
 /** The documented executor evidence fields; anything else is rejected. */
 const EXECUTOR_EVIDENCE_FIELDS: readonly string[] = ['completed', 'summary', 'actions', 'observations', 'artifacts']
+
+/** Hard caps on executor evidence size (spec 项 7): bounds run memory and runs.jsonl growth. */
+export const MAX_EVIDENCE_ARTIFACTS = 20
+export const MAX_EVIDENCE_TOTAL_BYTES = 256 * 1024
+
+/** Marker error: executor evidence exceeded the hard caps. */
+export class EvidenceOverflowError extends Error {
+  override name = 'EvidenceOverflowError'
+}
 
 /**
  * Stable evaluation failure vocabulary. These describe failures that happen
@@ -45,6 +55,7 @@ export type EvaluationFailureReason =
   | 'malformed-reviewer-json'
   | 'invalid-reviewer-score'
   | 'empty-reviewer-feedback'
+  | 'evidence-overflow'
 
 /** Per-cell evaluation input: the run identity plus one frozen case/snapshot pair. */
 export interface CellEvaluationInput {
@@ -159,6 +170,14 @@ export function parseExecutorEvidence(text: string): ExecutorEvidence {
       throw new Error('executor evidence artifacts must be an array of {name, content}')
     }
   }
+  const artifacts = object.artifacts ?? []
+  if (artifacts.length > MAX_EVIDENCE_ARTIFACTS) {
+    throw new EvidenceOverflowError(`executor evidence artifacts exceed ${MAX_EVIDENCE_ARTIFACTS}`)
+  }
+  const totalBytes = artifacts.reduce((sum, artifact) => sum + Buffer.byteLength(artifact.content, 'utf8'), 0)
+  if (totalBytes > MAX_EVIDENCE_TOTAL_BYTES) {
+    throw new EvidenceOverflowError(`executor evidence exceeds ${MAX_EVIDENCE_TOTAL_BYTES} bytes`)
+  }
   return {
     completed: object.completed,
     summary: object.summary,
@@ -207,69 +226,63 @@ export async function runCellEvaluation(
   // internal controller forwards the caller's signal and is aborted on timeout.
   const controller = new AbortController()
   const callerSignal = options.signal
-  if (callerSignal !== undefined) {
-    if (callerSignal.aborted) controller.abort()
-    else callerSignal.addEventListener('abort', () => controller.abort(), { once: true })
-  }
+  const unbridge = callerSignal === undefined ? undefined : bridgeAbortSignal(callerSignal, controller)
   const callSignal = controller.signal
 
-  let executorText: string
   try {
-    executorText = await raceWithTimeout(
-      complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), callSignal),
-      timeoutMs,
-      callerSignal,
-      () => controller.abort(),
-    )
-  } catch (error) {
-    return failedCell(base, null, failureReasonFor(error, callerSignal), startedAt)
+    let executorText: string
+    try {
+      executorText = await raceWithTimeout(
+        complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), callSignal),
+        timeoutMs,
+        callerSignal,
+        () => controller.abort(),
+      )
+    } catch (error) {
+      return failedCell(base, null, failureReasonFor(error, callerSignal), startedAt)
+    }
+
+    let evidence: ExecutorEvidence
+    try {
+      evidence = parseExecutorEvidence(executorText)
+    } catch (error) {
+      // EvidenceOverflowError carries its own structured reason; every other
+      // parser throw is malformed executor output.
+      return failedCell(base, null, error instanceof EvidenceOverflowError ? 'evidence-overflow' : 'malformed-executor-json', startedAt)
+    }
+
+    let reviewerText: string
+    try {
+      reviewerText = await raceWithTimeout(
+        complete(REVIEWER_SYSTEM_PROMPT, buildReviewerPrompt(input.benchmarkCase, evidence), callSignal),
+        timeoutMs,
+        callerSignal,
+        () => controller.abort(),
+      )
+    } catch (error) {
+      return failedCell(base, evidence, failureReasonFor(error, callerSignal), startedAt)
+    }
+
+    let verdict: ReviewerScore
+    try {
+      verdict = parseReviewerScore(reviewerText)
+    } catch (error) {
+      const reason = error instanceof ReviewerParseError ? error.reason : 'malformed-reviewer-json'
+      return failedCell(base, evidence, reason, startedAt)
+    }
+
+    return {
+      ...base,
+      status: 'ok',
+      score: verdict.score,
+      feedback: verdict.feedback,
+      evidence,
+      durationMs: Date.now() - startedAt,
+    }
+  } finally {
+    // The caller's signal outlives the cell: drop the forward listener.
+    unbridge?.()
   }
-
-  let evidence: ExecutorEvidence
-  try {
-    evidence = parseExecutorEvidence(executorText)
-  } catch {
-    return failedCell(base, null, 'malformed-executor-json', startedAt)
-  }
-
-  let reviewerText: string
-  try {
-    reviewerText = await raceWithTimeout(
-      complete(REVIEWER_SYSTEM_PROMPT, buildReviewerPrompt(input.benchmarkCase, evidence), callSignal),
-      timeoutMs,
-      callerSignal,
-      () => controller.abort(),
-    )
-  } catch (error) {
-    return failedCell(base, evidence, failureReasonFor(error, callerSignal), startedAt)
-  }
-
-  let verdict: ReviewerScore
-  try {
-    verdict = parseReviewerScore(reviewerText)
-  } catch (error) {
-    const reason = error instanceof ReviewerParseError ? error.reason : 'malformed-reviewer-json'
-    return failedCell(base, evidence, reason, startedAt)
-  }
-
-  return {
-    ...base,
-    status: 'ok',
-    score: verdict.score,
-    feedback: verdict.feedback,
-    evidence,
-    durationMs: Date.now() - startedAt,
-  }
-}
-
-/** Marker error for a phase that exceeded its timeout budget. */
-class EvaluationTimeoutError extends Error {
-  override name = 'EvaluationTimeoutError'
-}
-
-/** Marker error for a phase cancelled by the caller's abort signal. */
-class EvaluationAbortError extends Error {
-  override name = 'EvaluationAbortError'
 }
 
 /** Reviewer output problem carrying its stable failure reason. */
@@ -286,63 +299,12 @@ class ReviewerParseError extends Error {
  * error type wins over the signal state: a phase timeout aborts the internal
  * controller (so `signal.aborted` is set) yet must still read as `timeout`. */
 function failureReasonFor(error: unknown, signal: AbortSignal | undefined): EvaluationFailureReason {
-  if (error instanceof EvaluationTimeoutError) return 'timeout'
-  if (error instanceof EvaluationAbortError) return 'aborted'
+  if (error instanceof EvidenceOverflowError) return 'evidence-overflow'
+  if (error instanceof PhaseTimeoutError) return 'timeout'
+  if (error instanceof PhaseAbortError) return 'aborted'
   if (error instanceof Error && error.name === 'AbortError') return 'aborted'
   if (signal?.aborted) return 'aborted'
   return 'provider-error'
-}
-
-/** Race a promise against a per-phase timeout and the caller's abort signal.
- * When the timeout wins, `onTimeout` (if given) fires first so the caller can
- * cancel the underlying work before the rejection is observed. */
-function raceWithTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-  onTimeout?: () => void,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let settled = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const onAbort = (): void => settle(() => reject(new EvaluationAbortError()))
-    const fireTimeout = (): void => {
-      onTimeout?.()
-      settle(() => reject(new EvaluationTimeoutError()))
-    }
-    const cleanup = (): void => {
-      if (timer !== undefined) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    const settle = (fail: () => void): void => {
-      if (settled) return
-      settled = true
-      cleanup()
-      fail()
-    }
-    if (signal !== undefined) {
-      if (signal.aborted) {
-        onAbort()
-        return
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-    timer = setTimeout(fireTimeout, timeoutMs)
-    promise.then(
-      value => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolve(value)
-      },
-      error => {
-        if (settled) return
-        settled = true
-        cleanup()
-        reject(error)
-      },
-    )
-  })
 }
 
 /** Build a failed cell: score null, stable reason, timing stamped. */

@@ -33,7 +33,13 @@ interface SecretPattern {
 /** Credential-like patterns (spec §2): evidence is a typed label, never the matched text. */
 const SECRET_PATTERNS: readonly SecretPattern[] = [
   { evidence: 'sk-key-like', pattern: /sk-[A-Za-z0-9]{16,}/ },
-  { evidence: 'private-key-header', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  { evidence: 'sk-modern-key-like', pattern: /sk-(?:proj|ant|svcacct)-[A-Za-z0-9_-]{20,}/ },
+  { evidence: 'github-token-like', pattern: /gh[pousr]_[A-Za-z0-9]{20,}/ },
+  { evidence: 'github-pat-like', pattern: /github_pat_[A-Za-z0-9_]{20,}/ },
+  { evidence: 'slack-token-like', pattern: /xox[baprs]-[A-Za-z0-9-]{10,}/ },
+  { evidence: 'stripe-key-like', pattern: /sk_(?:live|test)_[A-Za-z0-9]{16,}/ },
+  { evidence: 'jwt-like', pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./ },
+  { evidence: 'private-key-header', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
   { evidence: 'google-api-key-like', pattern: /AIza[0-9A-Za-z_-]{35}/ },
   { evidence: 'aws-access-key-like', pattern: /AKIA[0-9A-Z]{16}/ },
 ]
@@ -59,6 +65,7 @@ const secretDetector: Detector = {
 }
 
 /** Zero-width, RTL/LTR override, invisible bidi marks, and other hidden control characters (spec §2). */
+// oxlint-disable-next-line no-control-regex -- matching control characters is this pattern's purpose
 const HIDDEN_CONTROL_PATTERN = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u200E\u200F\u061C\u2066-\u2069\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
 
 const hiddenControlDetector: Detector = {
@@ -124,9 +131,10 @@ function scanText(
 
 /**
  * Scan one skill entry (spec §3.2). Order is stable: description (file
- * 'SKILL.md', no line), SKILL.md body (file 'SKILL.md', 1-based lines), then
- * files sorted by relative path (1-based lines). Does not scan version,
- * updatedAt, or provenance metadata.
+ * 'SKILL.md', no line), SKILL.md body (file 'SKILL.md', 1-based lines), the
+ * legacy reference/arguments fields (file 'SKILL.md', no line — they reach the
+ * model overview without a separate file), then files sorted by relative path
+ * (1-based lines). Does not scan version, updatedAt, or provenance metadata.
  */
 export function scanSkillBundle(skillId: string, entry: SkillEntry, options?: ScanOptions): SecurityIssue[] {
   const issues: SecurityIssue[] = []
@@ -136,6 +144,10 @@ export function scanSkillBundle(skillId: string, entry: SkillEntry, options?: Sc
   }
   if (options?.signal?.aborted) return issues
   scanText(issues, skillId, 'SKILL.md', entry.content, true, options)
+  const legacy = [entry.reference, entry.arguments].filter((value): value is string => value !== undefined)
+  for (const value of legacy) {
+    scanText(issues, skillId, 'SKILL.md', value, false, options)
+  }
   const files = entry.files ?? {}
   for (const path of Object.keys(files).sort()) {
     if (options?.signal?.aborted) return issues
@@ -160,9 +172,8 @@ export const securityProvider: DiagnosticProvider<SecurityIssue> = {
       const entry = request.entries[skillId]
       if (entry === undefined) continue
       try {
-        issues.push(...scanSkillBundle(skillId, entry, {
-          ...(request.signal === undefined ? {} : { signal: request.signal }),
-        }))
+        const scanOptions = request.signal === undefined ? {} : { signal: request.signal }
+        issues.push(...scanSkillBundle(skillId, entry, scanOptions))
       } catch (error) {
         if (error instanceof ScanTruncatedError) {
           issues.push(...error.issues)

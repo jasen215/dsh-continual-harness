@@ -6,7 +6,6 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { Complete } from '../src/planner.ts'
-import { freshState } from '../src/refine.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
 import type { PlanRequest } from '../src/coordinator.ts'
@@ -258,7 +257,7 @@ describe('createRefineCoordinator', () => {
     const ctx = new Context()
     const home = tempHome()
     const store = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
-    const baseline = store.localState(agent())
+    store.localState(agent())
     const complete = cannedComplete({ id: 'plan-1', summary: 'save lesson', edits: [{ action: 'create', kind: 'memory', id: 'lesson', content: 'x' }] })
     const coordinator = createRefineCoordinator({ store, completeFor: () => complete })
     const result = await coordinator.execute(planRequest('local', 'tool', 'focus'))

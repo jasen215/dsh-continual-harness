@@ -10,6 +10,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { KEBAB_CASE_PATTERN } from './domain.ts'
+import { uniqueTmpPath } from './fs-safe.ts'
 import type { HarnessEntry, MaterializationErrorCode, MaterializationResult } from './types.ts'
 
 /** Length cap for the single-line frontmatter description. */
@@ -69,7 +70,7 @@ export function validateBundleFiles(
       return `bundle file key "${key}" contains an invalid path segment`
     }
     if (key === 'SKILL.md') return 'SKILL.md is generated from content and must not appear in files'
-    if (!/^(scripts|references)\//.test(key)) {
+    if (!BUNDLE_TARGET_PREFIX_RE.test(key)) {
       return `bundle file key "${key}" must start with scripts/ or references/`
     }
     if (/%[0-9a-fA-F]{2}/.test(key)) {
@@ -135,6 +136,21 @@ export function skillBundleDir(dir: string, id: string): string {
 export function isSafeBundleRelative(rel: string): boolean {
   if (rel === '' || rel.startsWith('/') || rel.includes('\\')) return false
   return rel.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
+}
+
+/** Bundle materialization targets must live under these directory prefixes. */
+const BUNDLE_TARGET_PREFIX_RE = /^(scripts|references)\//
+
+/**
+ * Why a materialization target is unwritable, or undefined when it is safe:
+ * the path must stay inside the bundle root AND live under scripts/ or
+ * references/ (the same prefix rule `validateBundleFiles` enforces on the
+ * edit path — the write loop re-checks because store state may predate it).
+ */
+export function unsafeBundleTargetReason(rel: string): string | undefined {
+  if (!isSafeBundleRelative(rel)) return 'escapes the bundle root'
+  if (!BUNDLE_TARGET_PREFIX_RE.test(rel)) return 'must live under scripts/ or references/'
+  return undefined
 }
 
 /** Injectable fs surface so materialization write faults are testable (spec §7.11). */
@@ -318,8 +334,13 @@ export function reconcileSkillFiles(
         continue
       }
       if (targets[item.rel] !== undefined) continue
+      // Deliberately escape-only (not the full write-path rule): stale-file
+      // cleanup must keep removing any regular file inside an owned bundle
+      // (e.g. a leftover extra.md), so the scripts/|references/ prefix rule
+      // does not gate discovery. The message is sourced from the shared
+      // helper so the two loops' unsafe-path texts cannot drift apart.
       if (!isSafeBundleRelative(item.rel)) {
-        recordError(result, join(bundle, item.rel), 'unsafe-path', false, `"${item.rel}" escapes the bundle root; skipped`)
+        recordError(result, join(bundle, item.rel), 'unsafe-path', false, `"${item.rel}" ${unsafeBundleTargetReason(item.rel)}; skipped`)
         continue
       }
       const file = join(bundle, item.rel)
@@ -332,20 +353,29 @@ export function reconcileSkillFiles(
       }
     }
     for (const [rel, content] of Object.entries(targets)) {
+      // The generated SKILL.md has a fixed, harness-controlled name and is
+      // exempt; every other target comes from entry.files and is re-checked
+      // here because store state may predate the edit-path validation that
+      // validateBundleFiles enforces.
+      const reason = rel === 'SKILL.md' ? undefined : unsafeBundleTargetReason(rel)
+      if (reason !== undefined) {
+        recordError(result, join(bundle, rel), 'unsafe-path', false, `"${rel}" ${reason}; skipped`)
+        continue
+      }
       const file = join(bundle, rel)
       if (fsOps.existsSync(file) && fsOps.readFileSync(file, 'utf8') === content) {
         result.unchanged.push(file)
         continue
       }
+      const tmp = uniqueTmpPath(file)
       try {
         fsOps.mkdirSync(join(bundle, dirname(rel)), { recursive: true })
-        const tmp = `${file}.tmp`
         fsOps.writeFileSync(tmp, content, 'utf8')
         fsOps.renameSync(tmp, file)
         result.written.push(file)
       } catch (error) {
         try {
-          fsOps.rmSync(`${file}.tmp`, { force: true })
+          fsOps.rmSync(tmp, { force: true })
         } catch {
           // best-effort cleanup; the original write error is the finding
         }

@@ -538,7 +538,7 @@ describe('harness-state projection', () => {
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(plugin, pluginConfig(home))
 
-    const { agent, session } = stubAgent('projected')
+    const { agent } = stubAgent('projected')
     const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
     seeder.applyRefinement(agent, {
       id: 'refine_p',

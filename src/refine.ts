@@ -280,7 +280,7 @@ export function applyRefinementProposal(
     if (edit.action === 'create') {
       const finalSourceSession = edit.metadata?.sourceSession ?? options.sourceSession
       const metadata = {
-        ...(edit.metadata ?? {}),
+        ...edit.metadata,
         ...(finalSourceSession === undefined ? {} : { sourceSession: finalSourceSession }),
       }
       const entry = edit.kind === 'skill'
@@ -314,8 +314,8 @@ export function applyRefinementProposal(
     }
     const finalSourceSession = edit.metadata?.sourceSession ?? options.sourceSession
     const metadata = {
-      ...(currentEntry.metadata ?? {}),
-      ...(edit.metadata ?? {}),
+      ...currentEntry.metadata,
+      ...edit.metadata,
       ...(finalSourceSession === undefined ? {} : { sourceSession: finalSourceSession }),
     }
     const nextEntry = {
@@ -370,7 +370,7 @@ export function stripRefinementSnapshots(result: RefinementResult): RefinementRe
   return {
     ...result,
     appliedEdits: result.appliedEdits.map(edit => {
-      const { before, after, beforeEntry, afterEntry, ...rest } = edit
+      const { before: _before, after: _after, beforeEntry: _beforeEntry, afterEntry: _afterEntry, ...rest } = edit
       return rest
     }),
   }

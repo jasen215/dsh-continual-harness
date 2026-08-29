@@ -20,7 +20,7 @@ import {
   saveHarnessState,
 } from '../src/storage.ts'
 import { USAGE_ARCHIVE_PREFIX, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import type { HarnessState, RefinementResult } from '../src/types.ts'
+import type { RefinementResult } from '../src/types.ts'
 
 const tempDirs: string[] = []
 
@@ -215,6 +215,63 @@ describe('harness state storage', () => {
     expect(loadHarnessState(dir)).toEqual(emptyHarnessState())
     writeFileSync(join(dir, 'harness_state.json'), JSON.stringify({ schemaVersion: 99, entries: {}, refinements: [] }), 'utf8')
     expect(loadHarnessState(dir)).toEqual(emptyHarnessState())
+  })
+
+  it('backs up a corrupt state file before a later commit can overwrite it', () => {
+    const home = tempHome()
+    const dir = getGlobalHarnessStateDir(home)
+    mkdirSync(dir, { recursive: true })
+    const corrupt = '{not json'
+    writeFileSync(join(dir, 'harness_state.json'), corrupt, 'utf8')
+    const diagnostics: string[] = []
+    expect(loadHarnessState(dir, (lines) => diagnostics.push(...lines))).toEqual(emptyHarnessState())
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(corrupt)
+    expect(diagnostics.some((line) => line.includes('backed up to'))).toBe(true)
+  })
+
+  it('backs up a corrupt state file only once across repeated loads', () => {
+    const home = tempHome()
+    const dir = getGlobalHarnessStateDir(home)
+    mkdirSync(dir, { recursive: true })
+    const corrupt = '{not json'
+    writeFileSync(join(dir, 'harness_state.json'), corrupt, 'utf8')
+    const diagnostics: string[] = []
+    for (let i = 0; i < 3; i++) {
+      expect(loadHarnessState(dir, (lines) => diagnostics.push(...lines))).toEqual(emptyHarnessState())
+    }
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
+    expect(backups).toHaveLength(1)
+    expect(diagnostics.filter((line) => line.includes('backed up to'))).toHaveLength(1)
+    expect(diagnostics.filter((line) => line.includes('already backed up'))).toHaveLength(2)
+    expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(corrupt)
+  })
+
+  it('backs up a future-version state file the same way', () => {
+    const home = tempHome()
+    const dir = getLocalHarnessStateDir(home, 'session-bak')
+    mkdirSync(dir, { recursive: true })
+    const future = JSON.stringify({ schemaVersion: 99, entries: {}, refinements: [] })
+    writeFileSync(join(dir, 'harness_state.json'), future, 'utf8')
+    loadHarnessState(dir)
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(future)
+  })
+
+  it('the backup survives the next save that would previously have wiped the data', () => {
+    const home = tempHome()
+    const dir = getGlobalHarnessStateDir(home)
+    mkdirSync(dir, { recursive: true })
+    const corrupt = '{not json'
+    writeFileSync(join(dir, 'harness_state.json'), corrupt, 'utf8')
+    const state = loadHarnessState(dir)
+    saveHarnessState(dir, state) // the commit path that applyRefinement ends up on
+    const backups = readdirSync(dir).filter((name) => name.endsWith('.corrupt.bak'))
+    expect(backups).toHaveLength(1)
+    expect(readFileSync(join(dir, backups[0]!), 'utf8')).toBe(corrupt)
+    expect(JSON.parse(readFileSync(join(dir, 'harness_state.json'), 'utf8'))).toHaveProperty('schemaVersion', HARNESS_SCHEMA_VERSION)
   })
 
   it('merges local over global with same-id shadowing under a local: prefix', () => {

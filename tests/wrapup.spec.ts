@@ -4,8 +4,6 @@ import { freshState } from '../src/refine.ts'
 import { usageKey } from '../src/usage.ts'
 
 describe('suggestWrapup', () => {
-  const noUsage = () => undefined
-
   it('suggests archive for never-injected, promote for used without global, keep otherwise', () => {
     const local = freshState()
     local.entries.memory['never'] = { id: 'never', kind: 'memory', version: 1, content: 'x', updatedAt: 't' }

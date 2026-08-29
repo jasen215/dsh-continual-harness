@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -11,6 +11,7 @@ import {
   hashBenchmarkCase,
   loadBenchmark,
   loadReferenceSnapshot,
+  MAX_CASE_FIELD_CHARS,
   saveBenchmarkCases,
   validateCandidateDelta,
   validateCellScore,
@@ -96,6 +97,11 @@ describe('BenchmarkCase', () => {
     ]) {
       expect(() => createBenchmarkCase(bad)).toThrow()
     }
+  })
+
+  it('rejects case material beyond the field caps', () => {
+    expect(() => createBenchmarkCase({ id: 'big', title: 't', statement: 'x'.repeat(MAX_CASE_FIELD_CHARS + 1), rubric: 'r' }))
+      .toThrow(/statement exceeds 20000 chars/)
   })
 
   it('rejects duplicate ids against existing cases', () => {
@@ -407,7 +413,7 @@ describe('benchmark persistence', () => {
     saveBenchmarkCases(home, [first])
     saveBenchmarkCases(home, [first, second])
     expect(loadBenchmark(home)).toEqual([first, second])
-    expect(existsSync(join(home, 'benchmark', 'cases.json.tmp'))).toBe(false)
+    expect(readdirSync(join(home, 'benchmark')).filter((name) => name.endsWith('.tmp'))).toEqual([])
     const raw = JSON.parse(readFileSync(join(home, 'benchmark', 'cases.json'), 'utf8')) as { cases: unknown[] }
     expect(raw.cases).toHaveLength(2)
   })
@@ -465,7 +471,7 @@ describe('benchmark persistence', () => {
     const snapshot = buildSnapshot(baseState(), 'ref-1')
     captureReferenceSnapshot(home, snapshot)
     expect(existsSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'))).toBe(true)
-    expect(existsSync(join(home, 'benchmark', 'snapshots', 'ref-1.json.tmp'))).toBe(false)
+    expect(readdirSync(join(home, 'benchmark', 'snapshots')).filter((name) => name.endsWith('.tmp'))).toEqual([])
     expect(loadReferenceSnapshot(home, 'ref-1')).toEqual(snapshot)
   })
 
