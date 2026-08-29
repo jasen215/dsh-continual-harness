@@ -45,6 +45,9 @@ export function raceWithTimeout<T>(
     if (signal !== undefined) {
       if (signal.aborted) {
         onAbort()
+        // The race settled immediately without waiting on `promise`; mark its
+        // own rejection handled so it cannot surface as an unhandled rejection.
+        promise.catch(() => {})
         return
       }
       signal.addEventListener('abort', onAbort, { once: true })
