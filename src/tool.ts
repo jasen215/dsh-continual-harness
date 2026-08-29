@@ -649,6 +649,9 @@ async function actionRun(
 
   const evaluations: CellEvaluation[] = []
   const cellOptions = exec.signal === undefined ? {} : { signal: exec.signal }
+  if (exec.signal?.aborted) {
+    throw benchmarkError('run:aborted', 'run aborted; no cells were evaluated and no decision was recorded')
+  }
   for (const benchmarkCase of frozenCases) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
       evaluations.push(await runCellEvaluation(ctx, {
@@ -683,6 +686,9 @@ async function actionRun(
       maxFailedCells: options.maxFailedCells,
     },
   })
+  if (exec.signal?.aborted) {
+    throw benchmarkError('run:aborted', 'run aborted; no decision was recorded')
+  }
   appendBenchmarkRun(store.home, { runId, cells, decision, createdAt: decision.createdAt })
 
   return {

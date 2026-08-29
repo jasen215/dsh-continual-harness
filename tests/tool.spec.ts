@@ -557,6 +557,35 @@ describe('harness_benchmark run', () => {
       expect(existsSync(join(home, 'benchmark', 'runs.jsonl'))).toBe(false)
     }
   })
+
+  it('an aborted run records no decision and fails with a structured error', async () => {
+    const home = tempHome()
+    const { ctx, store } = await mount(home)
+    const { agent } = stubAgent('run-abort')
+    await seedFrozenCase(ctx)
+    const { referenceId, refinementId } = await seedReferenceAndRefinement(store, agent, home)
+    const controller = new AbortController()
+    let calls = 0
+    ctx.provide('llm', {
+      async *stream() {
+        calls += 1
+        if (calls === 1) controller.abort()
+        yield { type: 'text-delta' as const, text: JSON.stringify(VALID_EVIDENCE) }
+        yield { type: 'finish' as const, reason: { kind: 'success' as const } }
+      },
+    } as never)
+    const result = await ctx.tools.execute({
+      signal: controller.signal,
+      callId: CallId(`call-${Math.random()}`),
+      name: 'harness_benchmark',
+      arguments: { action: 'run', reference_snapshot_id: referenceId, refinement_id: refinementId },
+      agent,
+    })
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected tool failure')
+    expect(result.error.message).toMatch(/benchmark:run:aborted/)
+    expect(existsSync(join(home, 'benchmark', 'runs.jsonl'))).toBe(false)
+  })
 })
 
 describe('harness_benchmark status', () => {
