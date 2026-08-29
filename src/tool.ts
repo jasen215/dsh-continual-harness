@@ -648,7 +648,7 @@ async function actionRun(
   }
 
   const evaluations: CellEvaluation[] = []
-  const cellOptions = { ...(exec.signal === undefined ? {} : { signal: exec.signal }) }
+  const cellOptions = exec.signal === undefined ? {} : { signal: exec.signal }
   for (const benchmarkCase of frozenCases) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
       evaluations.push(await runCellEvaluation(ctx, {

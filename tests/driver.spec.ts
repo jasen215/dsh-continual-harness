@@ -90,6 +90,8 @@ function makeHangingLlm(): FakeLlm {
   let calls = 0
   return {
     get callCount() { return calls },
+    // Deliberately never yields: the gate must hang on this stream forever.
+    // oxlint-disable-next-line require-yield
     async *stream() {
       calls += 1
       await new Promise(() => {})

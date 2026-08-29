@@ -59,6 +59,7 @@ const secretDetector: Detector = {
 }
 
 /** Zero-width, RTL/LTR override, invisible bidi marks, and other hidden control characters (spec §2). */
+// oxlint-disable-next-line no-control-regex -- matching control characters is this pattern's purpose
 const HIDDEN_CONTROL_PATTERN = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u200E\u200F\u061C\u2066-\u2069\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
 
 const hiddenControlDetector: Detector = {
@@ -160,9 +161,8 @@ export const securityProvider: DiagnosticProvider<SecurityIssue> = {
       const entry = request.entries[skillId]
       if (entry === undefined) continue
       try {
-        issues.push(...scanSkillBundle(skillId, entry, {
-          ...(request.signal === undefined ? {} : { signal: request.signal }),
-        }))
+        const scanOptions = request.signal === undefined ? {} : { signal: request.signal }
+        issues.push(...scanSkillBundle(skillId, entry, scanOptions))
       } catch (error) {
         if (error instanceof ScanTruncatedError) {
           issues.push(...error.issues)

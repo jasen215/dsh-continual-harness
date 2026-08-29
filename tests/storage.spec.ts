@@ -20,7 +20,7 @@ import {
   saveHarnessState,
 } from '../src/storage.ts'
 import { USAGE_ARCHIVE_PREFIX, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import type { HarnessState, RefinementResult } from '../src/types.ts'
+import type { RefinementResult } from '../src/types.ts'
 
 const tempDirs: string[] = []
 
