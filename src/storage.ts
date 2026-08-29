@@ -6,7 +6,7 @@
  */
 
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   HARNESS_DIR_NAME,
@@ -90,17 +90,32 @@ export function loadHarnessState(dir: string, onDiagnostics?: (diagnostics: stri
     const backup = backupCorruptStateFile(file)
     onDiagnostics?.([backup === undefined
       ? `corrupt harness state file could not be backed up: ${file}`
-      : `corrupt harness state file backed up to ${backup}`])
+      : backup.reused
+        ? `corrupt harness state file already backed up at ${backup.path}`
+        : `corrupt harness state file backed up to ${backup.path}`])
     return emptyHarnessState()
   }
 }
 
-/** Best-effort copy of a corrupt/future-version state file; never throws. */
-function backupCorruptStateFile(file: string): string | undefined {
+/**
+ * Best-effort copy of a corrupt/future-version state file; never throws.
+ * Idempotent per file: an existing `<file>.corrupt-*.bak` sibling is reused
+ * instead of accumulating one file-sized copy per failed load.
+ */
+function backupCorruptStateFile(file: string): { path: string; reused: boolean } | undefined {
+  try {
+    const base = basename(file)
+    const existing = readdirSync(dirname(file)).find(
+      name => name.startsWith(`${base}.corrupt-`) && name.endsWith('.bak'),
+    )
+    if (existing) return { path: join(dirname(file), existing), reused: true }
+  } catch {
+    // unreadable directory → fall through to the copy attempt
+  }
   const backup = `${file}.corrupt-${Date.now()}.bak`
   try {
     copyFileSync(file, backup)
-    return backup
+    return { path: backup, reused: false }
   } catch {
     return undefined
   }

@@ -219,6 +219,30 @@ describe('failure conversion', () => {
     expect(cell.score).toBeNull()
   })
 
+  it('marks evidence beyond the total byte cap as a failed cell with evidence-overflow', async () => {
+    // executor 回复携带 1 个超过 MAX_EVIDENCE_TOTAL_BYTES（256 KiB）的 artifact
+    const oversizedArtifacts = [{ name: 'big.txt', content: 'x'.repeat(256 * 1024 + 1) }]
+    const ctx = new Context()
+    ctx.provide('llm', {
+      async *stream() {
+        yield { type: 'text-delta', text: JSON.stringify({ completed: true, summary: 's', actions: [], observations: [], artifacts: oversizedArtifacts }) }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    } as never)
+    const cell = await runCellEvaluation(ctx, {
+      runId: 'run-overflow',
+      side: 'reference',
+      iteration: 1,
+      benchmarkCase: FROZEN_CASE,
+      snapshot: buildSnapshot(baseState(), 'ref-1'),
+      provider: 'test-provider',
+      model: 'test-model',
+    }, {})
+    expect(cell.status).toBe('failed')
+    expect(cell.failureReason).toBe('evidence-overflow')
+    expect(cell.score).toBeNull()
+  })
+
   it('fails the cell on malformed reviewer JSON', async () => {
     const result = await runCellEvaluation(fakeContext([], [VALID_EVIDENCE, 'reviewer prose']), input())
     expect(result.status).toBe('failed')

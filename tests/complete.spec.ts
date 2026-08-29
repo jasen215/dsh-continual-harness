@@ -19,6 +19,21 @@ describe('completeViaModel deadline', () => {
     const complete = completeViaModel(ctx, 'prov', 'model', 1000, { deadlineMs: 20 })
     await expect(complete('system', 'user')).rejects.toThrow(/timed out after 20ms/)
   })
+
+  it('aborts the underlying stream when the deadline fires', async () => {
+    let observed: AbortSignal | undefined
+    const ctx = ctxWith({
+      async *stream(request: { signal?: AbortSignal }) {
+        observed = request?.signal
+        await new Promise(() => {}) // never settles
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+    const complete = completeViaModel(ctx, 'prov', 'model', 1000, { deadlineMs: 20 })
+    await expect(complete('system', 'user')).rejects.toThrow(/timed out after 20ms/)
+    // the deadline must cancel the stream, not merely abandon it
+    expect(observed?.aborted).toBe(true)
+  })
 })
 
 describe('completeViaModel finish handling', () => {
