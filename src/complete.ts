@@ -8,13 +8,19 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { EvaluationAbortError, EvaluationTimeoutError, raceWithTimeout } from './async-safe.ts'
 import { PLUGIN_NAME } from './domain.ts'
 import type { Complete } from './planner.ts'
 
 /** Default planning output budget for the refiner. */
 export const DEFAULT_PLANNER_MAX_TOKENS = 32_000
 
-/** One `ctx.llm.stream` call collected to text, non-reasoning. */
+/** Default deadline for one planning/review completion call (spec 项 3). */
+export const DEFAULT_COMPLETE_DEADLINE_MS = 120_000
+
+/** One `ctx.llm.stream` call collected to text, non-reasoning, raced against
+ * the caller's abort signal and a per-call deadline: a timeout or an
+ * `aborted` finish both fail instead of returning a partial reply. */
 async function streamToText(
   ctx: Context,
   params: {
@@ -24,6 +30,7 @@ async function streamToText(
     user: string
     maxTokens: number
     signal: AbortSignal | undefined
+    deadlineMs: number
     errorPrefix: string
   },
 ): Promise<string> {
@@ -31,24 +38,51 @@ async function streamToText(
   if (!llm) {
     throw new Error(`${params.errorPrefix} requires the llm service on the context`)
   }
-  let text = ''
-  let failed = false
-  for await (const chunk of llm.stream({
-    provider: params.provider,
-    model: params.model,
-    system: params.system,
-    maxTokens: params.maxTokens,
-    messages: [createUserMessage({
-      source: { kind: 'plugin', plugin: PLUGIN_NAME },
-      content: [{ type: 'text', text: params.user }],
-    })],
-    ...(params.signal === undefined ? {} : { signal: params.signal }),
-  })) {
-    if (chunk.type === 'text-delta') text += chunk.text
-    else if (chunk.type === 'finish' && chunk.reason.kind === 'error') failed = true
+  const controller = new AbortController()
+  const signal = params.signal
+  if (signal !== undefined) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', () => controller.abort(), { once: true })
   }
-  if (failed) throw new Error(`${params.errorPrefix} failed: model request failed`)
-  return text
+  const work = (async (): Promise<string> => {
+    let text = ''
+    let failure: 'error' | 'aborted' | undefined
+    for await (const chunk of llm.stream({
+      provider: params.provider,
+      model: params.model,
+      system: params.system,
+      maxTokens: params.maxTokens,
+      messages: [createUserMessage({
+        source: { kind: 'plugin', plugin: PLUGIN_NAME },
+        content: [{ type: 'text', text: params.user }],
+      })],
+      signal: controller.signal,
+    })) {
+      if (chunk.type === 'text-delta') text += chunk.text
+      else if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
+        failure = chunk.reason.kind
+      }
+    }
+    if (failure === 'aborted') throw new Error(`${params.errorPrefix} aborted: model request aborted`)
+    if (failure === 'error') throw new Error(`${params.errorPrefix} failed: model request failed`)
+    return text
+  })()
+  try {
+    // Race against the CALLER's signal (mirroring evaluate.ts): racing against
+    // `controller.signal` here would let the deadline's own `controller.abort()`
+    // in `onTimeout` win the race as an `EvaluationAbortError`, masking the
+    // deadline as an abort. The deadline must still cancel the underlying
+    // stream, hence the internal-controller abort.
+    return await raceWithTimeout(work, params.deadlineMs, signal, () => controller.abort())
+  } catch (error) {
+    if (error instanceof EvaluationTimeoutError) {
+      throw new Error(`${params.errorPrefix} timed out after ${params.deadlineMs}ms`)
+    }
+    if (error instanceof EvaluationAbortError) {
+      throw new Error(`${params.errorPrefix} aborted`)
+    }
+    throw error
+  }
 }
 
 /**
@@ -57,9 +91,15 @@ async function streamToText(
  * @param ctx - context carrying the llm service.
  * @param agent - the live agent whose model plans the refinement.
  * @param maxTokens - output budget for the planning call.
+ * @param options - deadline override for the planning call.
  * @returns the seam.
  */
-export function completeViaAgent(ctx: Context, agent: Agent, maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS): Complete {
+export function completeViaAgent(
+  ctx: Context,
+  agent: Agent,
+  maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS,
+  options: { deadlineMs?: number } = {},
+): Complete {
   return async (system, user, signal) => {
     const provider = agent.options.provider
     const model = agent.options.model
@@ -73,6 +113,7 @@ export function completeViaAgent(ctx: Context, agent: Agent, maxTokens: number =
       user,
       maxTokens: Math.min(maxTokens, agent.options.maxTokens ?? maxTokens),
       signal,
+      deadlineMs: options.deadlineMs ?? DEFAULT_COMPLETE_DEADLINE_MS,
       errorPrefix: 'harness refinement planning',
     })
   }
@@ -86,6 +127,7 @@ export function completeViaAgent(ctx: Context, agent: Agent, maxTokens: number =
  * @param provider - the provider to route the evaluation calls to.
  * @param model - the model to route the evaluation calls to.
  * @param maxTokens - output budget for one evaluator call.
+ * @param options - deadline override for the evaluation calls.
  * @returns the seam.
  */
 export function completeViaModel(
@@ -93,6 +135,7 @@ export function completeViaModel(
   provider: string,
   model: string,
   maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS,
+  options: { deadlineMs?: number } = {},
 ): Complete {
   return async (system, user, signal) => streamToText(ctx, {
     provider,
@@ -101,6 +144,7 @@ export function completeViaModel(
     user,
     maxTokens,
     signal,
+    deadlineMs: options.deadlineMs ?? DEFAULT_COMPLETE_DEADLINE_MS,
     errorPrefix: 'harness benchmark evaluation',
   })
 }

@@ -15,6 +15,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { EvaluationAbortError, EvaluationTimeoutError, raceWithTimeout } from './async-safe.ts'
 import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
 import { hashBenchmarkCase } from './benchmark.ts'
 import { completeViaModel } from './complete.ts'
@@ -262,16 +263,6 @@ export async function runCellEvaluation(
   }
 }
 
-/** Marker error for a phase that exceeded its timeout budget. */
-class EvaluationTimeoutError extends Error {
-  override name = 'EvaluationTimeoutError'
-}
-
-/** Marker error for a phase cancelled by the caller's abort signal. */
-class EvaluationAbortError extends Error {
-  override name = 'EvaluationAbortError'
-}
-
 /** Reviewer output problem carrying its stable failure reason. */
 class ReviewerParseError extends Error {
   constructor(
@@ -291,58 +282,6 @@ function failureReasonFor(error: unknown, signal: AbortSignal | undefined): Eval
   if (error instanceof Error && error.name === 'AbortError') return 'aborted'
   if (signal?.aborted) return 'aborted'
   return 'provider-error'
-}
-
-/** Race a promise against a per-phase timeout and the caller's abort signal.
- * When the timeout wins, `onTimeout` (if given) fires first so the caller can
- * cancel the underlying work before the rejection is observed. */
-function raceWithTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-  onTimeout?: () => void,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let settled = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const onAbort = (): void => settle(() => reject(new EvaluationAbortError()))
-    const fireTimeout = (): void => {
-      onTimeout?.()
-      settle(() => reject(new EvaluationTimeoutError()))
-    }
-    const cleanup = (): void => {
-      if (timer !== undefined) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    const settle = (fail: () => void): void => {
-      if (settled) return
-      settled = true
-      cleanup()
-      fail()
-    }
-    if (signal !== undefined) {
-      if (signal.aborted) {
-        onAbort()
-        return
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-    timer = setTimeout(fireTimeout, timeoutMs)
-    promise.then(
-      value => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolve(value)
-      },
-      error => {
-        if (settled) return
-        settled = true
-        cleanup()
-        reject(error)
-      },
-    )
-  })
 }
 
 /** Build a failed cell: score null, stable reason, timing stamped. */
