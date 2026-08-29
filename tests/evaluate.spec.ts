@@ -195,6 +195,30 @@ describe('failure conversion', () => {
     expect(result.failureReason).toBe('malformed-executor-json')
   })
 
+  it('marks evidence beyond the artifact caps as a failed cell with evidence-overflow', async () => {
+    // executor 回复携带 21 个 artifacts（MAX_EVIDENCE_ARTIFACTS = 20）
+    const bigArtifacts = Array.from({ length: 21 }, (_, index) => ({ name: `f${index}.txt`, content: 'x' }))
+    const ctx = new Context()
+    ctx.provide('llm', {
+      async *stream() {
+        yield { type: 'text-delta', text: JSON.stringify({ completed: true, summary: 's', actions: [], observations: [], artifacts: bigArtifacts }) }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    } as never)
+    const cell = await runCellEvaluation(ctx, {
+      runId: 'run-overflow',
+      side: 'reference',
+      iteration: 1,
+      benchmarkCase: FROZEN_CASE,
+      snapshot: buildSnapshot(baseState(), 'ref-1'),
+      provider: 'test-provider',
+      model: 'test-model',
+    }, {})
+    expect(cell.status).toBe('failed')
+    expect(cell.failureReason).toBe('evidence-overflow')
+    expect(cell.score).toBeNull()
+  })
+
   it('fails the cell on malformed reviewer JSON', async () => {
     const result = await runCellEvaluation(fakeContext([], [VALID_EVIDENCE, 'reviewer prose']), input())
     expect(result.status).toBe('failed')

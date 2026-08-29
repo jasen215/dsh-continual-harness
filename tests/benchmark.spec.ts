@@ -98,6 +98,11 @@ describe('BenchmarkCase', () => {
     }
   })
 
+  it('rejects case material beyond the field caps', () => {
+    expect(() => createBenchmarkCase({ id: 'big', title: 't', statement: 'x'.repeat(20_001), rubric: 'r' }))
+      .toThrow(/statement exceeds 20000 chars/)
+  })
+
   it('rejects duplicate ids against existing cases', () => {
     const existing = new Set(['case-1'])
     expect(() => createBenchmarkCase({ id: 'case-1', title: 'Task', statement: 'Do X', rubric: 'X is correct' }, existing)).toThrow(/duplicate/i)

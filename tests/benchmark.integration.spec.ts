@@ -29,6 +29,7 @@ import * as plugin from '../src/index.ts'
 import { appendReview } from '../src/audit.ts'
 import type { ExecutorEvidence } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
+import { REVIEWER_SYSTEM_PROMPT } from '../src/evaluate.ts'
 import { getGlobalHarnessStateDir, getLocalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
 import { HarnessStore } from '../src/store.ts'
 import type { HarnessState } from '../src/types.ts'
@@ -121,17 +122,24 @@ function errorMessage(result: ToolExecutionResult): string {
   return result.error.message
 }
 
-/** Llm stand-in recording provider/model and user prompts, yielding canned replies. */
+/** Llm stand-in recording provider/model and user prompts, yielding canned replies.
+ *  Replies are per-cell `[executor, reviewer]` pairs in serial cell order; under
+ *  pair-parallel evaluation the k-th executor call and the k-th reviewer call
+ *  (both sides still arrive reference-first) map back onto that order. */
 function makeFakeLlm(
   replies: ReadonlyArray<Record<string, unknown>>,
   requests: Array<{ provider: string; model: string }> = [],
 ) {
-  let calls = 0
+  let executorCalls = 0
+  let reviewerCalls = 0
   return {
-    get callCount() { return calls },
-    async *stream(request: { provider: string; model: string }) {
-      const reply = replies[Math.min(calls, replies.length - 1)]
-      calls += 1
+    get callCount() { return executorCalls + reviewerCalls },
+    async *stream(request: { provider: string; model: string; system: string }) {
+      const reviewer = request.system === REVIEWER_SYSTEM_PROMPT
+      const index = reviewer ? 2 * reviewerCalls + 1 : 2 * executorCalls
+      const reply = replies[Math.min(index, replies.length - 1)]
+      if (reviewer) reviewerCalls += 1
+      else executorCalls += 1
       requests.push({ provider: request.provider, model: request.model })
       yield { type: 'text-delta' as const, text: JSON.stringify(reply) }
       yield { type: 'finish' as const, reason: { kind: 'success' as const } }

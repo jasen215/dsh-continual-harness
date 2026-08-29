@@ -31,6 +31,15 @@ export const DEFAULT_EVALUATION_TIMEOUT_MS = 60_000
 /** The documented executor evidence fields; anything else is rejected. */
 const EXECUTOR_EVIDENCE_FIELDS: readonly string[] = ['completed', 'summary', 'actions', 'observations', 'artifacts']
 
+/** Hard caps on executor evidence size (spec 项 7): bounds run memory and runs.jsonl growth. */
+export const MAX_EVIDENCE_ARTIFACTS = 20
+export const MAX_EVIDENCE_TOTAL_BYTES = 256 * 1024
+
+/** Marker error: executor evidence exceeded the hard caps. */
+export class EvidenceOverflowError extends Error {
+  override name = 'EvidenceOverflowError'
+}
+
 /**
  * Stable evaluation failure vocabulary. These describe failures that happen
  * while producing or parsing a cell — distinct from the domain
@@ -46,6 +55,7 @@ export type EvaluationFailureReason =
   | 'malformed-reviewer-json'
   | 'invalid-reviewer-score'
   | 'empty-reviewer-feedback'
+  | 'evidence-overflow'
 
 /** Per-cell evaluation input: the run identity plus one frozen case/snapshot pair. */
 export interface CellEvaluationInput {
@@ -160,6 +170,14 @@ export function parseExecutorEvidence(text: string): ExecutorEvidence {
       throw new Error('executor evidence artifacts must be an array of {name, content}')
     }
   }
+  const artifacts = object.artifacts ?? []
+  if (artifacts.length > MAX_EVIDENCE_ARTIFACTS) {
+    throw new EvidenceOverflowError(`executor evidence artifacts exceed ${MAX_EVIDENCE_ARTIFACTS}`)
+  }
+  const totalBytes = artifacts.reduce((sum, artifact) => sum + Buffer.byteLength(artifact.content, 'utf8'), 0)
+  if (totalBytes > MAX_EVIDENCE_TOTAL_BYTES) {
+    throw new EvidenceOverflowError(`executor evidence exceeds ${MAX_EVIDENCE_TOTAL_BYTES} bytes`)
+  }
   return {
     completed: object.completed,
     summary: object.summary,
@@ -229,8 +247,10 @@ export async function runCellEvaluation(
   let evidence: ExecutorEvidence
   try {
     evidence = parseExecutorEvidence(executorText)
-  } catch {
-    return failedCell(base, null, 'malformed-executor-json', startedAt)
+  } catch (error) {
+    // EvidenceOverflowError carries its own structured reason (via
+    // failureReasonFor); every other parser throw is malformed executor output.
+    return failedCell(base, null, error instanceof EvidenceOverflowError ? failureReasonFor(error, callerSignal) : 'malformed-executor-json', startedAt)
   }
 
   let reviewerText: string
@@ -277,6 +297,7 @@ class ReviewerParseError extends Error {
  * error type wins over the signal state: a phase timeout aborts the internal
  * controller (so `signal.aborted` is set) yet must still read as `timeout`. */
 function failureReasonFor(error: unknown, signal: AbortSignal | undefined): EvaluationFailureReason {
+  if (error instanceof EvidenceOverflowError) return 'evidence-overflow'
   if (error instanceof EvaluationTimeoutError) return 'timeout'
   if (error instanceof EvaluationAbortError) return 'aborted'
   if (error instanceof Error && error.name === 'AbortError') return 'aborted'

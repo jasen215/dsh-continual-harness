@@ -117,11 +117,21 @@ export type CellScoreFailureReason = 'score-non-finite' | 'score-out-of-range' |
 /** Structured result of {@link validateCellScore}. */
 export type CellScoreValidationResult = { ok: true } | { ok: false; reason: CellScoreFailureReason }
 
+/** Hard caps guarding model-driven benchmark growth (spec 项 7). */
+export const MAX_BENCH_CASES = 50
+export const MAX_CASE_FIELD_CHARS = 20_000
+
 function validateCaseMaterial(input: BenchmarkCaseInput): void {
   if (input.id.trim() === '') throw new Error('benchmark case id must be non-empty')
   if (input.title.trim() === '') throw new Error('benchmark case title must be non-empty')
   if (input.statement.trim() === '') throw new Error('benchmark case statement must be non-empty')
   if (input.rubric.trim() === '') throw new Error('benchmark case rubric must be non-empty')
+  if (input.statement.length > MAX_CASE_FIELD_CHARS) {
+    throw new Error(`benchmark case statement exceeds ${MAX_CASE_FIELD_CHARS} chars`)
+  }
+  if (input.rubric.length > MAX_CASE_FIELD_CHARS) {
+    throw new Error(`benchmark case rubric exceeds ${MAX_CASE_FIELD_CHARS} chars`)
+  }
 }
 
 /** Create a mutable draft case; rejects empty material and duplicate ids. */

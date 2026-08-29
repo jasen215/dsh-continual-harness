@@ -23,6 +23,7 @@ import {
   freezeBenchmarkCase,
   loadBenchmark,
   loadReferenceSnapshot,
+  MAX_BENCH_CASES,
   saveBenchmarkCases,
   scopeLayerPair,
   validateCandidateDelta,
@@ -502,6 +503,9 @@ function actionAddCase(store: HarnessStore, args: Record<string, unknown>): { ac
     throw benchmarkError('add-case:missing-argument', 'add-case requires case_id, title, statement, and rubric')
   }
   const existing = loadBenchmark(store.home)
+  if (existing.length >= MAX_BENCH_CASES) {
+    throw benchmarkError('add-case:case-limit', `benchmark case limit reached (${MAX_BENCH_CASES}); delete or prune cases first`)
+  }
   if (existing.some(benchmarkCase => benchmarkCase.id === caseId)) {
     throw benchmarkError('add-case:duplicate-id', `benchmark case id already exists: ${caseId}`)
   }
@@ -654,24 +658,27 @@ async function actionRun(
   }
   for (const benchmarkCase of frozenCases) {
     for (let iteration = 1; iteration <= runs; iteration += 1) {
-      evaluations.push(await runCellEvaluation(ctx, {
-        runId,
-        side: 'reference',
-        iteration,
-        benchmarkCase,
-        snapshot: reference,
-        provider,
-        model,
-      }, cellOptions))
-      evaluations.push(await runCellEvaluation(ctx, {
-        runId,
-        side: 'candidate',
-        iteration,
-        benchmarkCase,
-        snapshot: candidate,
-        provider,
-        model,
-      }, cellOptions))
+      const [refCell, candCell] = await Promise.all([
+        runCellEvaluation(ctx, {
+          runId,
+          side: 'reference' as const,
+          iteration,
+          benchmarkCase,
+          snapshot: reference,
+          provider,
+          model,
+        }, cellOptions),
+        runCellEvaluation(ctx, {
+          runId,
+          side: 'candidate' as const,
+          iteration,
+          benchmarkCase,
+          snapshot: candidate,
+          provider,
+          model,
+        }, cellOptions),
+      ])
+      evaluations.push(refCell, candCell)
     }
   }
 
