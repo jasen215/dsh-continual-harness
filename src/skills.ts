@@ -137,6 +137,18 @@ export function isSafeBundleRelative(rel: string): boolean {
   return rel.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
 }
 
+/**
+ * Why a materialization target is unwritable, or undefined when it is safe:
+ * the path must stay inside the bundle root AND live under scripts/ or
+ * references/ (the same prefix rule `validateBundleFiles` enforces on the
+ * edit path — the write loop re-checks because store state may predate it).
+ */
+export function unsafeBundleTargetReason(rel: string): string | undefined {
+  if (!isSafeBundleRelative(rel)) return 'escapes the bundle root'
+  if (!/^(scripts|references)\//.test(rel)) return 'must live under scripts/ or references/'
+  return undefined
+}
+
 /** Injectable fs surface so materialization write faults are testable (spec §7.11). */
 export interface SkillFsOps {
   existsSync(path: string): boolean
@@ -318,8 +330,13 @@ export function reconcileSkillFiles(
         continue
       }
       if (targets[item.rel] !== undefined) continue
+      // Deliberately escape-only (not the full write-path rule): stale-file
+      // cleanup must keep removing any regular file inside an owned bundle
+      // (e.g. a leftover extra.md), so the scripts/|references/ prefix rule
+      // does not gate discovery. The message is sourced from the shared
+      // helper so the two loops' unsafe-path texts cannot drift apart.
       if (!isSafeBundleRelative(item.rel)) {
-        recordError(result, join(bundle, item.rel), 'unsafe-path', false, `"${item.rel}" escapes the bundle root; skipped`)
+        recordError(result, join(bundle, item.rel), 'unsafe-path', false, `"${item.rel}" ${unsafeBundleTargetReason(item.rel)}; skipped`)
         continue
       }
       const file = join(bundle, item.rel)
@@ -332,6 +349,15 @@ export function reconcileSkillFiles(
       }
     }
     for (const [rel, content] of Object.entries(targets)) {
+      // The generated SKILL.md has a fixed, harness-controlled name and is
+      // exempt; every other target comes from entry.files and is re-checked
+      // here because store state may predate the edit-path validation that
+      // validateBundleFiles enforces.
+      const reason = rel === 'SKILL.md' ? undefined : unsafeBundleTargetReason(rel)
+      if (reason !== undefined) {
+        recordError(result, join(bundle, rel), 'unsafe-path', false, `"${rel}" ${reason}; skipped`)
+        continue
+      }
       const file = join(bundle, rel)
       if (fsOps.existsSync(file) && fsOps.readFileSync(file, 'utf8') === content) {
         result.unchanged.push(file)

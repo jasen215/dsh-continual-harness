@@ -389,6 +389,22 @@ describe('reconcileSkillFiles (bundle files, ownership, stale, faults)', () => {
     expect(result.removed).toEqual([join(dir, 'oq', 'extra.md')])
     expect(result.status).toBe('partial')
   })
+
+  it('refuses to write hostile files-map keys outside the bundle', () => {
+    const dir = tempDir()
+    const hostile = entry('hostile-skill', {
+      '../evil.txt': 'nope',
+      'a/../../b.txt': 'nope',
+      'other/x.txt': 'nope',
+    })
+    const result = reconcileSkillFiles(dir, { 'hostile-skill': hostile }, ['hostile-skill'])
+    expect(existsSync(join(dir, 'evil.txt'))).toBe(false)
+    expect(existsSync(join(dir, 'b.txt'))).toBe(false)
+    expect(existsSync(join(dir, 'hostile-skill', 'other'))).toBe(false)
+    expect(result.errors.filter((error) => error.code === 'unsafe-path')).toHaveLength(3)
+    expect(result.written.some((path) => path.endsWith('SKILL.md'))).toBe(true)
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 describe('parseFrontmatterName / path helpers', () => {
