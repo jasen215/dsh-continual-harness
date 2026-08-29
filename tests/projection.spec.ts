@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
@@ -79,5 +79,40 @@ describe('projection telemetry', () => {
     expect(second.kind).toBe('enter')
     const after = readFileSync(file, 'utf8').trim().split('\n').filter(Boolean)
     expect(after).toHaveLength(1)
+  })
+
+  it('render returns the merged state alongside the overview', () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    const agent = stubAgent('p3')
+    store.applyRefinement(agent, {
+      id: 'r1', summary: 'seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'pin versions' }],
+    }, {})
+    expect(store.render(agent).state).toEqual(store.state(agent))
+  })
+
+  it('projection performs exactly one local and one global state read per pre-step', async () => {
+    const ctx = new Context()
+    const home = tempHome()
+    const store = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    const agent = stubAgent('p4')
+    store.applyRefinement(agent, {
+      id: 'r1', summary: 'seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'pin versions' }],
+    }, {})
+    registerHarnessProjection(ctx, store)
+    const localSpy = vi.spyOn(store as unknown as { localState: (a: Agent) => unknown }, 'localState')
+    const globalSpy = vi.spyOn(store as unknown as { globalState: () => unknown }, 'globalState')
+    const signal = new AbortController().signal
+    const claimed = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prompt' }] })]
+    await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed, turn: 1, step: 2, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed }),
+    )
+    expect(localSpy).toHaveBeenCalledTimes(1)
+    expect(globalSpy).toHaveBeenCalledTimes(1)
   })
 })

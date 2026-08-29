@@ -70,10 +70,10 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
   ): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    const state = store.state(agent)
-    const hasContent = Object.values(state.entries).some(records => Object.keys(records).length > 0)
-      || state.refinements.length > 0
-    const { overview, injectedKeys } = store.render(agent)
+    const rendered = store.render(agent)
+    const hasContent = Object.values(rendered.state.entries).some(records => Object.keys(records).length > 0)
+      || rendered.state.refinements.length > 0
+    const { overview, injectedKeys } = rendered
     const digest = digestOf(overview)
     const lastDigest = injectedDigests.get(agent)
     if (digest === lastDigest || (!hasContent && lastDigest === undefined)) return decision

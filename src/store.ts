@@ -150,15 +150,16 @@ export class HarnessStore {
     return `skill directory "${id}" exists and is not harness-owned; pick another id`
   }
 
-  /** Structured overview + injected keys for prompt injection. */
-  render(agent: Agent): { overview: string; injectedKeys: string[] } {
+  /** Structured overview + injected keys + the merged state behind them, so one read serves both. */
+  render(agent: Agent): { overview: string; injectedKeys: string[]; state: HarnessState } {
     const local = this.localState(agent)
     const state = mergeHarnessStates(this.globalState(), local)
-    return formatHarnessStateForPromptStructured(state, buildQueryFromSession(agent.session), {
+    const rendered = formatHarnessStateForPromptStructured(state, buildQueryFromSession(agent.session), {
       maxPerKind: this.maxInjectedEntriesPerKind,
       sessionId: String(agent.session.id),
       isLocal: (kind, id) => local.entries[kind][id] !== undefined,
     })
+    return { ...rendered, state }
   }
 
   /** Lazy-load injection telemetry into memory. */
