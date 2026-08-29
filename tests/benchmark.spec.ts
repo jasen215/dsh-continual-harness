@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -407,7 +407,7 @@ describe('benchmark persistence', () => {
     saveBenchmarkCases(home, [first])
     saveBenchmarkCases(home, [first, second])
     expect(loadBenchmark(home)).toEqual([first, second])
-    expect(existsSync(join(home, 'benchmark', 'cases.json.tmp'))).toBe(false)
+    expect(readdirSync(join(home, 'benchmark')).filter((name) => name.endsWith('.tmp'))).toEqual([])
     const raw = JSON.parse(readFileSync(join(home, 'benchmark', 'cases.json'), 'utf8')) as { cases: unknown[] }
     expect(raw.cases).toHaveLength(2)
   })
@@ -465,7 +465,7 @@ describe('benchmark persistence', () => {
     const snapshot = buildSnapshot(baseState(), 'ref-1')
     captureReferenceSnapshot(home, snapshot)
     expect(existsSync(join(home, 'benchmark', 'snapshots', 'ref-1.json'))).toBe(true)
-    expect(existsSync(join(home, 'benchmark', 'snapshots', 'ref-1.json.tmp'))).toBe(false)
+    expect(readdirSync(join(home, 'benchmark', 'snapshots')).filter((name) => name.endsWith('.tmp'))).toEqual([])
     expect(loadReferenceSnapshot(home, 'ref-1')).toEqual(snapshot)
   })
 

@@ -17,6 +17,7 @@ import {
   USAGE_ARCHIVE_PREFIX,
   USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
+import { uniqueTmpPath } from './fs-safe.ts'
 import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
 
 const EMPTY_ENTRIES: HarnessState['entries'] = {
@@ -136,7 +137,7 @@ export function mergeHarnessStates(global: HarnessState, local: HarnessState): H
 export function saveHarnessState(dir: string, state: HarnessState): void {
   mkdirSync(dir, { recursive: true })
   const file = join(dir, HARNESS_STATE_FILE_NAME)
-  const tmp = `${file}.tmp`
+  const tmp = uniqueTmpPath(file)
   writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8')
   renameSync(tmp, file)
 }

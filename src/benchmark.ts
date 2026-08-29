@@ -20,6 +20,7 @@ import {
   BENCHMARK_SNAPSHOTS_DIR_NAME,
   REFINEMENT_KINDS,
 } from './domain.ts'
+import { uniqueTmpPath } from './fs-safe.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { AppliedRefinementEdit, HarnessEntry, HarnessState, RefinementKind, RefinementResult } from './types.ts'
 
@@ -585,7 +586,7 @@ function benchmarkSnapshotFile(home: string, snapshotId: string): string {
 /** Atomic JSON write: sibling `.tmp` file, then rename, mirroring storage.ts. */
 function atomicWriteJson(file: string, value: unknown): void {
   mkdirSync(dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
+  const tmp = uniqueTmpPath(file)
   writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8')
   renameSync(tmp, file)
 }

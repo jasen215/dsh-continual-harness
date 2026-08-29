@@ -10,6 +10,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { KEBAB_CASE_PATTERN } from './domain.ts'
+import { uniqueTmpPath } from './fs-safe.ts'
 import type { HarnessEntry, MaterializationErrorCode, MaterializationResult } from './types.ts'
 
 /** Length cap for the single-line frontmatter description. */
@@ -363,15 +364,15 @@ export function reconcileSkillFiles(
         result.unchanged.push(file)
         continue
       }
+      const tmp = uniqueTmpPath(file)
       try {
         fsOps.mkdirSync(join(bundle, dirname(rel)), { recursive: true })
-        const tmp = `${file}.tmp`
         fsOps.writeFileSync(tmp, content, 'utf8')
         fsOps.renameSync(tmp, file)
         result.written.push(file)
       } catch (error) {
         try {
-          fsOps.rmSync(`${file}.tmp`, { force: true })
+          fsOps.rmSync(tmp, { force: true })
         } catch {
           // best-effort cleanup; the original write error is the finding
         }
