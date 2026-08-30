@@ -8,8 +8,10 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { foldRequestHeader } from '@deepseek-ai/dsh-session'
 import { planRefinement, scopeInstruction } from './planner.ts'
 import type { Complete } from './planner.ts'
+import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } from './cache-detect.ts'
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
@@ -96,6 +98,10 @@ export interface RefineCoordinatorOptions {
   requireGlobalApproval?: (agent: Agent, signal: AbortSignal | undefined, summary: string) => Promise<void>
   requireGlobalApprovalForTool?: boolean
   diagnostics?: DiagnosticRunner
+  /** Planner prefix-cache routing: auto-detect, force session prefix, or off. */
+  plannerPrefixCache?: PlannerPrefixCacheMode
+  /** Optional plugin logger for route-selection observability. */
+  logger?: { info(message: string): void; warn(message: string): void }
 }
 
 /** One-line summary for a refinement result; shared by the tool and command renderers. */
@@ -286,19 +292,38 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const baseline = request.scope === 'global' ? globalState : localState
       const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
       const historyText = historyForPrompt(options.store.history(request.agent))
-      const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
 
       if (request.signal?.aborted) return errorResult('planning', 'aborted', 'refinement request aborted')
+      const route: PlannerRoute = detectPlannerRoute(request.agent, options.plannerPrefixCache ?? 'auto')
+      options.logger?.info(`harness refine planning route: ${route}`)
       let proposal: { id: string; summary: string; edits: unknown[] }
       try {
-        const planned = await planRefinement({
-          stateOverview,
-          historyText,
-          trajectoryText,
-          scopeInstruction: scopeInstruction(request.scope === 'global'),
-          ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
-        }, options.completeFor(request.agent), request.signal)
-        proposal = planned
+        if (route === 'A') {
+          // Route A (spec §2.2): the session's own system prompt is the system slot
+          // (byte-identical to the host loop request → warm prefix), and the
+          // REFINEMENT_SYSTEM_PROMPT rules are moved INTO the trailing user message
+          // so no planning rule is lost.
+          const header = foldRequestHeader(request.agent.session.events)
+          const history = request.agent.session.deriveMessages()
+          // Task 4 caps this prefix: wrap `history` through the `prefixCap`
+          // truncation (tail-biased) defined in Task 4 Step 4 before passing it.
+          proposal = await planRefinement({
+            stateOverview,
+            historyText,
+            trajectoryText: '', // Route A: the session prefix already carries the context
+            scopeInstruction: scopeInstruction(request.scope === 'global'),
+            ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
+          }, options.completeFor(request.agent), request.signal, history, header?.system)
+        } else {
+          const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
+          proposal = await planRefinement({
+            stateOverview,
+            historyText,
+            trajectoryText,
+            scopeInstruction: scopeInstruction(request.scope === 'global'),
+            ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
+          }, options.completeFor(request.agent), request.signal)
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         const code = message === 'malformed refinement proposal' || message.includes('Unexpected token') || message.includes('Unexpected end')

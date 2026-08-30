@@ -90,15 +90,22 @@ export async function planRefinement(
   input: RefinementPlanInput,
   complete: Complete,
   signal?: AbortSignal,
+  prefix?: readonly Message[],
+  system?: string,
 ): Promise<RefinementProposal> {
   const user = [
+    // Route A: the planning rules move into the trailing user message so the
+    // system slot can carry the session's own system prompt (byte-identical to
+    // the host loop request → warm prefix). Route B keeps them in the system slot.
+    prefix !== undefined || system !== undefined ? REFINEMENT_SYSTEM_PROMPT : '',
     `# Store scope\n${input.scopeInstruction}`,
     input.stateOverview,
     input.historyText,
-    `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
+    // Route A omits the trajectory block; the session prefix carries the context.
+    input.trajectoryText === '' ? '' : `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
     input.instructions ? `# Focus instructions\n${input.instructions}` : '',
   ].filter(Boolean).join('\n\n')
-  return parseProposal(await complete(REFINEMENT_SYSTEM_PROMPT, user, signal))
+  return parseProposal(await complete(system ?? REFINEMENT_SYSTEM_PROMPT, user, signal, prefix))
 }
 
 /** Run the automatic refinement review gate through the injected seam. */

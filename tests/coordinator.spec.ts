@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Complete } from '../src/planner.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
@@ -550,5 +551,40 @@ describe('createRefineCoordinator', () => {
       expect(result.commitStatus).toBe('committed')
       expect(run).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('route A planning input', () => {
+  it('passes derived session messages as prefix and drops the trajectory block', async () => {
+    const seen: { system?: string; user?: string; prefix?: unknown[] } = {}
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      seen.system = system
+      seen.user = user
+      seen.prefix = prefix ? [...prefix] : undefined
+      return '{"id":"refine_a","summary":"a","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') }
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    })
+    // Seed one cached assistant/message so the detector routes A.
+    const liveAgent = agent('route-a-agent')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    expect(seen.prefix?.length).toBeGreaterThan(0)
+    // Route A moves the planning rules into the trailing user message and
+    // omits the trajectory block; the session prefix carries the context.
+    expect(seen.user).toContain('continual harness refiner')
+    expect(store.trajectory).not.toHaveBeenCalled()
   })
 })
