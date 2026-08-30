@@ -39,6 +39,12 @@ import type { HarnessState, MaterializationResult, RefinementKind, RefinementPro
 /** Default tail-biased trajectory window for planning (spec §2.3: 12k). */
 export const DEFAULT_TRAJECTORY_MAX_CHARS = 12_000
 
+/** Default fraction of the trajectory budget kept verbatim (spec §2.3). */
+export const DEFAULT_TRAJECTORY_SIGNAL_RATIO = 0.5
+
+/** Per-role char caps shared by the trajectory digest and signal layers. */
+export const TRAJECTORY_ROLE_CAPS = { user: 300, assistant: 200 } as const
+
 /** Options for a store commit. */
 export interface CommitOptions {
   /** Commit to the cross-session global store instead of the session store. */
@@ -202,7 +208,7 @@ export class HarnessStore {
   }
 
   /** Tail-biased trajectory serialization for the planner. */
-  trajectory(agent: Agent, maxChars: number = DEFAULT_TRAJECTORY_MAX_CHARS, signalRatio = 0.5): string {
+  trajectory(agent: Agent, maxChars: number = DEFAULT_TRAJECTORY_MAX_CHARS, signalRatio = DEFAULT_TRAJECTORY_SIGNAL_RATIO): string {
     return serializeTrajectory(agent.session, maxChars, signalRatio)
   }
 
@@ -326,16 +332,13 @@ export class HarnessStore {
   }
 }
 
-// messageText() is defined in Task 4 Step 4 (exported, shared with the
-// coordinator's prefix truncation). Reuse it here — do not define a second
-// textOf.
-
-function digestOf(role: 'user' | 'assistant', blocks: ReadonlyArray<{ type: string; text?: unknown; name?: unknown }>): string {
-  const text = messageText({ role, content: blocks } as Message)
+function digestOf(role: 'user' | 'assistant', blocks: Message['content']): string {
+  const text = messageText({ content: blocks })
   const toolNames = blocks
-    .filter(block => block.type === 'tool-call' && typeof block.name === 'string')
-    .map(block => block.name as string)
-  const limit = role === 'user' ? 300 : 200
+    .filter((block): block is Extract<Message['content'][number], { type: 'tool-call' }> =>
+      block.type === 'tool-call')
+    .map(block => block.name)
+  const limit = TRAJECTORY_ROLE_CAPS[role]
   const cut = text.length > limit ? `${text.slice(0, limit)}…` : text
   const tools = toolNames.length > 0 ? ` [tools: ${[...new Set(toolNames)].join(', ')}]` : ''
   return `[${role}] ${cut}${tools}`
@@ -353,7 +356,7 @@ function digestOf(role: 'user' | 'assistant', blocks: ReadonlyArray<{ type: stri
  * existing store.spec assertions keep passing; the digest layer uses the
  * shorter `[user]` / `[assistant]` tags.
  */
-export function serializeTrajectory(session: Session, maxChars: number, signalRatio = 0.5): string {
+export function serializeTrajectory(session: Session, maxChars: number, signalRatio = DEFAULT_TRAJECTORY_SIGNAL_RATIO): string {
   if (maxChars <= 0) return ''
   const messages = session.deriveMessages()
   const signalBudget = Math.floor(maxChars * Math.min(1, Math.max(0, signalRatio)))
@@ -374,7 +377,7 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
     if (message.content[0]?.type === 'tool-result') continue
     const text = messageText(message)
     if (!text.trim()) continue
-    const cap = message.role === 'assistant' ? 200 : 300
+    const cap = TRAJECTORY_ROLE_CAPS[message.role === 'assistant' ? 'assistant' : 'user']
     if (text.length > cap) break
     const tag = message.role === 'assistant' ? 'assistant/message' : 'user/message'
     const line = `[${tag}] ${text}`
@@ -383,12 +386,15 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
     signalUsed += line.length
     split = i
   }
-  // tool/result messages (role 'user', first block 'tool-result') carry no
-  // planner text — messageText yields '' — so their `[user] ` digest lines
-  // are dropped rather than kept as empty noise.
-  const digestLines = messages.slice(0, split)
-    .map(m => digestOf(m.role as 'user' | 'assistant', m.content))
-    .filter(line => line.trim() !== '')
+  // The digest layer mirrors the signal layer: tool/result messages carry no
+  // planner text (messageText yields ''), so they are skipped rather than
+  // emitted as bare `[user]` tag lines.
+  const digestLines: string[] = []
+  for (let i = 0; i < split; i++) {
+    const message = messages[i]!
+    if (message.content[0]?.type === 'tool-result') continue
+    digestLines.push(digestOf(message.role === 'assistant' ? 'assistant' : 'user', message.content))
+  }
   let digest = digestLines.join('\n')
   if (digest.length > digestBudget) {
     // Reserve the cut marker (and its newline separator) before slicing the
@@ -409,7 +415,7 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
 }
 
 /** Serialized text of one derived message (text blocks only; skips tool-result). */
-export function messageText(message: Message): string {
+export function messageText(message: Pick<Message, 'content'>): string {
   if (message.content[0]?.type === 'tool-result') return ''
   return message.content
     // explicit predicate: the `typeof` guard survives the merge-extensible

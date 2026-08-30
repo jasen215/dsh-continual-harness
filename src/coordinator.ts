@@ -9,13 +9,13 @@
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { foldRequestHeader } from '@deepseek-ai/dsh-session'
-import { planRefinement, scopeInstruction, TRUNCATED_JSON_ERROR } from './planner.ts'
+import { isTruncatedReply, planRefinement, scopeInstruction } from './planner.ts'
 import type { Complete } from './planner.ts'
 import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } from './cache-detect.ts'
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
-import { DEFAULT_TRAJECTORY_MAX_CHARS, sanitizePrefix, truncatePrefix } from './store.ts'
+import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO, sanitizePrefix, truncatePrefix } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { DiagnosticRunner } from './diagnostics.ts'
@@ -299,8 +299,23 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const historyText = historyForPrompt(options.store.history(request.agent))
 
       if (request.signal?.aborted) return errorResult('planning', 'aborted', 'refinement request aborted')
-      const route: PlannerRoute = detectPlannerRoute(request.agent, options.plannerPrefixCache ?? 'auto')
+      const route: PlannerRoute = detectPlannerRoute(request.agent.session.events, options.plannerPrefixCache ?? 'auto')
       options.logger?.info(`harness refine planning route: ${route}`)
+      const complete = options.completeFor(request.agent)
+      const trajectorySignalRatio = options.trajectorySignalRatio ?? DEFAULT_TRAJECTORY_SIGNAL_RATIO
+      const instructionOpts = request.instructions === undefined ? {} : { instructions: request.instructions }
+      const planInput = (trajectoryText: string) => ({
+        stateOverview,
+        historyText,
+        trajectoryText,
+        scopeInstruction: scopeInstruction(request.scope === 'global'),
+        ...instructionOpts,
+      })
+      const planWithTrajectory = () => planRefinement(
+        planInput(options.store.trajectory(request.agent, maxTrajectoryChars, trajectorySignalRatio)),
+        complete,
+        request.signal,
+      )
       let proposal: { id: string; summary: string; edits: unknown[] }
       try {
         if (route === 'A') {
@@ -309,61 +324,36 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           // REFINEMENT_SYSTEM_PROMPT rules are moved INTO the trailing user message
           // so no planning rule is lost.
           const header = foldRequestHeader(request.agent.session.events)
-          // Task 4: cap the Route A session prefix tail-biased so a long session
-          // cannot blow the planning context (spec §2.2). `plannerPrefixMaxChars`
-          // is a resolved number — `apply()` already applied the
-          // DEFAULT_TRAJECTORY_MAX_CHARS fallback; the local default only
-          // covers direct coordinator construction (tests).
+          // Cap the Route A session prefix tail-biased so a long session cannot
+          // blow the planning context (spec §2.2). `plannerPrefixMaxChars` is a
+          // resolved number — `apply()` already applied the default fallback; the
+          // local default only covers direct coordinator construction (tests).
           const prefixCap = options.plannerPrefixMaxChars ?? DEFAULT_TRAJECTORY_MAX_CHARS
           const history = sanitizePrefix(truncatePrefix(request.agent.session.deriveMessages(), prefixCap))
           try {
-            proposal = await planRefinement({
-              stateOverview,
-              historyText,
-              trajectoryText: '', // Route A: the session prefix already carries the context
-              scopeInstruction: scopeInstruction(request.scope === 'global'),
-              ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
-            }, options.completeFor(request.agent), request.signal, history, header?.system)
+            proposal = await planRefinement(
+              planInput(''), // Route A: the session prefix already carries the context
+              complete,
+              request.signal,
+              history,
+              header?.system,
+            )
           } catch (error) {
             // Live evidence (2026-08-30): even sanitized, the Route A warm prefix
             // lets the model drift into "continue the conversation" narration
             // often enough to fail (~40-70% per probe), so a truncated Route A
             // reply falls back to Route B (no prefix, trajectory summary) instead
             // of failing the refinement outright. Route B measured stable (6/6).
-            if (!(error instanceof Error) || error.message !== TRUNCATED_JSON_ERROR) throw error
+            if (!(error instanceof Error) || !isTruncatedReply(error.message)) throw error
             options.logger?.info('harness refine planning route: A -> B (Route A reply truncated; falling back)')
-            const trajectoryText = options.store.trajectory(
-              request.agent,
-              maxTrajectoryChars,
-              options.trajectorySignalRatio ?? 0.5,
-            )
-            proposal = await planRefinement({
-              stateOverview,
-              historyText,
-              trajectoryText,
-              scopeInstruction: scopeInstruction(request.scope === 'global'),
-              ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
-            }, options.completeFor(request.agent), request.signal)
+            proposal = await planWithTrajectory()
           }
         } else {
-          const trajectoryText = options.store.trajectory(
-            request.agent,
-            maxTrajectoryChars,
-            options.trajectorySignalRatio ?? 0.5,
-          )
-          proposal = await planRefinement({
-            stateOverview,
-            historyText,
-            trajectoryText,
-            scopeInstruction: scopeInstruction(request.scope === 'global'),
-            ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
-          }, options.completeFor(request.agent), request.signal)
+          proposal = await planWithTrajectory()
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        const code = message === 'malformed refinement proposal' || message.includes('Unexpected token') || message.includes('Unexpected end')
-          ? 'invalid-proposal'
-          : 'planning-failed'
+        const code = isTruncatedReply(message) ? 'invalid-proposal' : 'planning-failed'
         return errorResult('planning', code, message)
       }
       if (!isProposal(proposal)) return errorResult('planning', 'invalid-proposal', 'malformed refinement proposal')

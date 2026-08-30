@@ -554,7 +554,7 @@ describe('createRefineCoordinator', () => {
   })
 })
 
-describe('route A planning input', () => {
+describe('Route A planning input', () => {
   it('passes derived session messages as prefix and drops the trajectory block', async () => {
     const logger = { info: vi.fn(), warn: vi.fn() }
     const seen: { system?: string | undefined; user?: string | undefined; prefix?: unknown[] | undefined } = {}
@@ -707,5 +707,39 @@ describe('route A planning input', () => {
     expect(result.failedAt).toBe('planning')
     expect(result.error?.code).toBe('planning-failed')
     expect(store.trajectory).not.toHaveBeenCalled()
+  })
+
+  it('falls back to Route B for a malformed (not just truncated) Route A reply', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user, prefix: prefix ? [...prefix] : undefined })
+      if (prefix !== undefined) throw new Error('malformed refinement proposal')
+      return '{"id":"refine_mal","summary":"recovered","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'MALFORMED FALLBACK') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-malformed')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // The malformed Route A reply is treated as an unusable reply: Route B
+    // recovers the plan instead of failing the refinement outright.
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.route).toBe('A')
+    expect(calls[1]?.route).toBe('B')
+    expect(calls[1]?.user).toContain('MALFORMED FALLBACK')
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
   })
 })

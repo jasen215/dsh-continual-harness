@@ -25,7 +25,7 @@ import { DEFAULT_COOLDOWN_MS, DEFAULT_TURN_INTERVAL } from './driver.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { HARNESS_REFINEMENT_EVENT, registerSessionEventType } from './domain.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
-import { DEFAULT_TRAJECTORY_MAX_CHARS } from './store.ts'
+import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { HarnessStore } from './store.ts'
@@ -164,7 +164,7 @@ export const Config: z<Config> = z.object({
   // object fields are optional unless `.required()` (schemastery v3 has no
   // `.optional()` combinator); absent stays absent → `apply()` applies the cap
   plannerPrefixMaxChars: z.number().step(1).min(1),
-  trajectorySignalRatio: z.number().min(0).max(1).default(0.5),
+  trajectorySignalRatio: z.number().min(0).max(1).default(DEFAULT_TRAJECTORY_SIGNAL_RATIO),
   autoRefine: z.object({
     enabled: z.boolean().default(true),
     turnInterval: z.number().step(1).min(1).default(DEFAULT_TURN_INTERVAL),
@@ -299,7 +299,7 @@ export function apply(ctx: Context, config: Config): void {
     compact: autoRefine.compact,
     plannerMaxTokens: config.plannerMaxTokens,
     maxTrajectoryChars: config.maxTrajectoryChars,
-    trajectorySignalRatio: config.trajectorySignalRatio ?? 0.5,
+    trajectorySignalRatio: config.trajectorySignalRatio ?? DEFAULT_TRAJECTORY_SIGNAL_RATIO,
     auditReviews: config.auditReviews,
   })
   if (config.logToFile) {

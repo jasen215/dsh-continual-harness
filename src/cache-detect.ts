@@ -1,5 +1,11 @@
-// src/cache-detect.ts
-import type { Agent } from '@deepseek-ai/dsh-agent'
+/**
+ * Planner route detection for warm-cache planning (spec §2.1): read the
+ * session's usage records to decide whether the provider can serve a warm
+ * prefix (Route A) or whether the deterministic trajectory summary must be
+ * used instead (Route B).
+ *
+ * @module dsh-continual-harness
+ */
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 /** Which planning input shape to use: A = warm-cache session prefix, B = layered summary. */
@@ -28,8 +34,8 @@ export function hasCacheEvidence(events: readonly SessionEvent[]): boolean {
 }
 
 /** Pick the planning route per spec §2.1 lifecycle table. */
-export function detectPlannerRoute(agent: Agent, mode: PlannerPrefixCacheMode): PlannerRoute {
+export function detectPlannerRoute(events: readonly SessionEvent[], mode: PlannerPrefixCacheMode): PlannerRoute {
   if (mode === 'session') return 'A'
   if (mode === 'off') return 'B'
-  return hasCacheEvidence(agent.session.events) ? 'A' : 'B'
+  return hasCacheEvidence(events) ? 'A' : 'B'
 }

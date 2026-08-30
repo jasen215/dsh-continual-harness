@@ -761,7 +761,7 @@ describe('truncatePrefix', () => {
     expect(truncatePrefix([tool, user], 5)).toEqual([tool, user])
   })
 
-  // Spec §四.2: the Route A prefix must be byte-stable — two assemblies of the
+  // Spec §2.2: the Route A prefix must be byte-stable — two assemblies of the
   // same session must produce identical output, so the provider's prefix cache
   // keeps hitting between plan calls.
   it('assembles the identical prefix on repeated calls for the same session', () => {
@@ -782,7 +782,7 @@ describe('truncatePrefix', () => {
     expect(twice).toEqual(once)
   })
 
-  // Spec §四.3: a truncated prefix must stay stable across consecutive plan
+  // Spec §2.3: a truncated prefix must stay stable across consecutive plan
   // calls (first truncation is a cold read; later calls keep hitting), so the
   // truncation point must not drift when the same session is re-assembled.
   it('keeps the truncation point stable across repeated assembly of an over-cap session', () => {

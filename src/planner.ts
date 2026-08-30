@@ -17,11 +17,31 @@ export type Complete = (
   system: string,
   user: string,
   signal?: AbortSignal,
+  /** Route A: warm session messages prepended before the trailing user message. */
   prefix?: readonly Message[],
 ) => Promise<string>
 
 /** Raised when the model reply is truncated before its JSON object completes. */
 export const TRUNCATED_JSON_ERROR = 'the model stopped before completing its JSON object; the reply was truncated or empty'
+
+/** Raised when the model reply parses but is not a valid proposal shape. */
+export const MALFORMED_PROPOSAL_ERROR = 'malformed refinement proposal'
+
+/** Raised when the model reply parses but is not a valid review shape. */
+export const MALFORMED_REVIEW_ERROR = 'malformed auto-refine review'
+
+/**
+ * True when a planner failure message means the reply was truncated or
+ * malformed rather than a transport/planning failure: the same shapes the
+ * coordinator classifies as `invalid-proposal` and the Route A→B fallback
+ * retries as a truncated reply.
+ */
+export function isTruncatedReply(message: string): boolean {
+  return message === TRUNCATED_JSON_ERROR
+    || message === MALFORMED_PROPOSAL_ERROR
+    || message.includes('Unexpected token')
+    || message.includes('Unexpected end')
+}
 
 /** System prompt for refinement planning. */
 export const REFINEMENT_SYSTEM_PROMPT = `You are the continual harness refiner of an agent loop. The agent learns by persisting small, reusable, evidence-backed entries — prompt notes, memories, skill contracts, or subagent specs — and by pruning stale ones.
@@ -71,7 +91,7 @@ export function extractJsonObject(text: string): string {
 export function parseProposal(text: string): RefinementProposal {
   const object = JSON.parse(extractJsonObject(text)) as RefinementProposal
   if (typeof object.id !== 'string' || !Array.isArray(object.edits)) {
-    throw new Error('malformed refinement proposal')
+    throw new Error(MALFORMED_PROPOSAL_ERROR)
   }
   return object
 }
@@ -80,7 +100,7 @@ export function parseProposal(text: string): RefinementProposal {
 export function parseAutoRefineReview(text: string): AutoRefineReview {
   const object = JSON.parse(extractJsonObject(text)) as AutoRefineReview
   if (typeof object.approved !== 'boolean' || typeof object.rationale !== 'string') {
-    throw new Error('malformed auto-refine review')
+    throw new Error(MALFORMED_REVIEW_ERROR)
   }
   return object
 }

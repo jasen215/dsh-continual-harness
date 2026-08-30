@@ -1,25 +1,8 @@
 // tests/cache-detect.spec.ts
 import { describe, expect, it } from 'vitest'
-import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
-import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { detectPlannerRoute, hasCacheEvidence } from '../src/cache-detect.ts'
-
-function stubAgent(session: Session): Agent {
-  const status: AgentStatus = 'running'
-  return {
-    id: session.id,
-    options: { provider: 'p', model: 'm' },
-    session,
-    inbox: undefined as never,
-    get status() { return status },
-    ctx: new Context(),
-    send: () => {}, followup: () => {}, steer: () => ({ outcome: Promise.resolve({ status: 'rejected' as const }) }),
-    inject: () => {}, cancel() {}, runMaintenance: task => task(new AbortController().signal),
-    whenIdle() { return Promise.resolve() },
-  }
-}
 
 /** A session whose most recent assistant/message carries cacheReadTokens > 0. */
 function cachedSession(): Session {
@@ -70,18 +53,18 @@ describe('hasCacheEvidence', () => {
 
 describe('detectPlannerRoute', () => {
   it('routes auto mode to A when the session has cache evidence', () => {
-    expect(detectPlannerRoute(stubAgent(cachedSession()), 'auto')).toBe('A')
+    expect(detectPlannerRoute(cachedSession().events, 'auto')).toBe('A')
   })
   it('routes auto mode to B when the session lacks cache evidence', () => {
-    expect(detectPlannerRoute(stubAgent(uncachedSession()), 'auto')).toBe('B')
+    expect(detectPlannerRoute(uncachedSession().events, 'auto')).toBe('B')
   })
   it('routes auto mode to B for a fresh session with no history', () => {
-    expect(detectPlannerRoute(stubAgent(Session.create(SessionId('fresh'))), 'auto')).toBe('B')
+    expect(detectPlannerRoute(Session.create(SessionId('fresh')).events, 'auto')).toBe('B')
   })
   it('force-routes session mode to A regardless of evidence', () => {
-    expect(detectPlannerRoute(stubAgent(Session.create(SessionId('forced'))), 'session')).toBe('A')
+    expect(detectPlannerRoute(Session.create(SessionId('forced')).events, 'session')).toBe('A')
   })
   it('force-routes off mode to B regardless of evidence', () => {
-    expect(detectPlannerRoute(stubAgent(cachedSession()), 'off')).toBe('B')
+    expect(detectPlannerRoute(cachedSession().events, 'off')).toBe('B')
   })
 })
