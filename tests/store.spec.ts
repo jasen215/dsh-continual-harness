@@ -4,9 +4,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { HarnessStore, serializeTrajectory } from '../src/store.ts'
+import { HarnessStore, serializeTrajectory, truncatePrefix } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import { getGlobalHarnessStateDir, getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from '../src/storage.ts'
 import type { RefinementProposal } from '../src/types.ts'
@@ -671,5 +671,26 @@ describe('serializeTrajectory', () => {
     expect(text).toContain('(truncated')
     expect(text).toContain(long.slice(-100))
     expect(text).not.toContain('[user/message]')
+  })
+})
+
+describe('truncatePrefix', () => {
+  it('keeps the newest messages whose text fits the cap', () => {
+    const old = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'a'.repeat(100) }] })
+    const recent = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'b'.repeat(50) }] })
+    const out = truncatePrefix([old, recent], 80)
+    expect(out).toEqual([recent]) // old (100 chars) would overflow; newest kept
+  })
+
+  it('always keeps the newest message even when it exceeds the cap', () => {
+    const big = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'x'.repeat(500) }] })
+    expect(truncatePrefix([big], 10)).toEqual([big])
+  })
+
+  it('drops tool-result messages from the prefix text budget', () => {
+    const tool = createToolResultMessage({ callId: 'c1', content: [{ type: 'text', text: 'result' }] })
+    const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] })
+    // tool-result text is '' → zero budget; both fit under any cap ≥ 2
+    expect(truncatePrefix([tool, user], 5)).toEqual([tool, user])
   })
 })

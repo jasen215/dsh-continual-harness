@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import type { Message } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
@@ -351,4 +352,34 @@ function textOf(blocks: ReadonlyArray<{ type: string; text?: unknown }>): string
     .filter(block => block.type === 'text' && typeof block.text === 'string')
     .map(block => block.text as string)
     .join('\n')
+}
+
+/** Serialized text of one derived message (text blocks only; skips tool-result). */
+export function messageText(message: Message): string {
+  if (message.content[0]?.type === 'tool-result') return ''
+  return message.content
+    // explicit predicate: the `typeof` guard survives the merge-extensible
+    // ContentBlock union (a plugin-added 'text' block may carry non-string text)
+    .filter((block): block is { type: 'text'; text: string } =>
+      block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+}
+
+/**
+ * Tail-biased prefix truncation: keep the most recent messages whose
+ * serialized text fits under `maxChars`. Walk from the end summing
+ * `messageText` lengths; drop older messages until the running total fits.
+ * The newest message is always kept even when it alone exceeds the cap.
+ */
+export function truncatePrefix(messages: readonly Message[], maxChars: number): Message[] {
+  const prefix: Message[] = []
+  let used = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const text = messageText(messages[i]!)
+    if (prefix.length > 0 && used + text.length > maxChars) break
+    prefix.unshift(messages[i]!)
+    used += text.length
+  }
+  return prefix
 }

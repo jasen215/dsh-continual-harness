@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { requireGlobalApproval } from './approval.ts'
 import { completeViaAgent, DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
+import type { PlannerPrefixCacheMode } from './cache-detect.ts'
 import { createRefineCoordinator } from './coordinator.ts'
 import { registerRefineCommand } from './command.ts'
 import type { CommandsCapability } from './command.ts'
@@ -82,6 +83,18 @@ export interface Config {
   maxTrajectoryChars: number
   /** Output budget for the planning call. */
   plannerMaxTokens: number
+  /** Planner prefix-cache routing: auto-detect, force session prefix, or off. */
+  plannerPrefixCache?: PlannerPrefixCacheMode
+  /**
+   * Max characters for the Route A session prefix. Defaults to
+   * DEFAULT_TRAJECTORY_MAX_CHARS (12_000); overrides are explicit only.
+   * No per-call resolveModel: AgentOptions carries no contextWindow, and the
+   * async adapter lookup would add a failure branch to every plan. The 12k
+   * default plus the agent's own maxTokens output cap bound the worst case.
+   */
+  plannerPrefixMaxChars?: number
+  /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
+  trajectorySignalRatio?: number
   /** Automatic refinement gate settings. */
   autoRefine?: AutoRefineConfig
   /** Require explicit human approval before a global refinement commits. */
@@ -145,6 +158,13 @@ export const Config: z<Config> = z.object({
   defaultGlobal: z.boolean().required(),
   maxTrajectoryChars: z.number().step(1).min(1).default(DEFAULT_TRAJECTORY_MAX_CHARS),
   plannerMaxTokens: z.number().step(1).min(1).default(DEFAULT_PLANNER_MAX_TOKENS),
+  // schemastery v3 has no `enum`; the union-of-literals idiom matches
+  // `protectedKinds` below and validates identically.
+  plannerPrefixCache: z.union(['auto', 'session', 'off']).default('auto'),
+  // object fields are optional unless `.required()` (schemastery v3 has no
+  // `.optional()` combinator); absent stays absent → `apply()` applies the cap
+  plannerPrefixMaxChars: z.number().step(1).min(1),
+  trajectorySignalRatio: z.number().min(0).max(1).default(0.5),
   autoRefine: z.object({
     enabled: z.boolean().default(true),
     turnInterval: z.number().step(1).min(1).default(DEFAULT_TURN_INTERVAL),
@@ -208,6 +228,10 @@ export function apply(ctx: Context, config: Config): void {
     store,
     completeFor: agent => completeViaAgent(ctx, agent, config.plannerMaxTokens),
     maxTrajectoryChars: config.maxTrajectoryChars,
+    // exactOptionalPropertyTypes: only present the optional fields when set.
+    ...(config.plannerPrefixCache === undefined ? {} : { plannerPrefixCache: config.plannerPrefixCache }),
+    plannerPrefixMaxChars: config.plannerPrefixMaxChars ?? DEFAULT_TRAJECTORY_MAX_CHARS,
+    ...(config.trajectorySignalRatio === undefined ? {} : { trajectorySignalRatio: config.trajectorySignalRatio }),
     ...(config.diagnosticsEnabled
       ? {
         diagnostics: createDiagnosticRunner({

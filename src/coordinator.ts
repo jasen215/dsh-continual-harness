@@ -15,6 +15,7 @@ import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } fr
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
+import { truncatePrefix } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { DiagnosticRunner } from './diagnostics.ts'
@@ -100,6 +101,10 @@ export interface RefineCoordinatorOptions {
   diagnostics?: DiagnosticRunner
   /** Planner prefix-cache routing: auto-detect, force session prefix, or off. */
   plannerPrefixCache?: PlannerPrefixCacheMode
+  /** Route A session-prefix char cap; already defaulted upstream in `apply()`. */
+  plannerPrefixMaxChars?: number
+  /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
+  trajectorySignalRatio?: number
   /** Optional plugin logger for route-selection observability. */
   logger?: { info(message: string): void; warn(message: string): void }
 }
@@ -304,9 +309,13 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           // REFINEMENT_SYSTEM_PROMPT rules are moved INTO the trailing user message
           // so no planning rule is lost.
           const header = foldRequestHeader(request.agent.session.events)
-          const history = request.agent.session.deriveMessages()
-          // Task 4 caps this prefix: wrap `history` through the `prefixCap`
-          // truncation (tail-biased) defined in Task 4 Step 4 before passing it.
+          // Task 4: cap the Route A session prefix tail-biased so a long session
+          // cannot blow the planning context (spec §2.2). `plannerPrefixMaxChars`
+          // is a resolved number — `apply()` already applied the
+          // DEFAULT_TRAJECTORY_MAX_CHARS fallback; the 12k local default only
+          // covers direct coordinator construction (tests).
+          const prefixCap = options.plannerPrefixMaxChars ?? 12_000
+          const history = truncatePrefix(request.agent.session.deriveMessages(), prefixCap)
           proposal = await planRefinement({
             stateOverview,
             historyText,
