@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { CallId, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Complete } from '../src/planner.ts'
+import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
 import type { PlanRequest } from '../src/coordinator.ts'
@@ -145,6 +146,40 @@ function delayedStore(): HarnessStore & {
   store.plannerEnd = () => { activePlanner -= 1 }
   store.commitOverlap = () => maxCommit
   return store
+}
+
+function agentWithHeader(id = 'coordinator-agent'): Agent {
+  const a = agent(id)
+  a.session.append('request/header', {
+    header: {
+      config: { provider: 'test-provider', model: 'test-model' },
+      system: 'session system prompt',
+      tools: [{ name: 'read' }],
+    },
+    reason: 'initial',
+  } as never)
+  a.session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+  } as never, { surfaceOp: 'append' })
+  return a
+}
+
+function snapshotRegistry(session: Session): { registry: HostRequestRegistry } {
+  const snapshot: HostRequestSnapshot = {
+    provider: 'test-provider',
+    model: 'test-model',
+    system: 'session system prompt',
+    tools: [{ name: 'read' }],
+    messages: session.deriveMessages(),
+    sessionId: session.id,
+  }
+  return {
+    registry: {
+      latestFor: (id: SessionId) => String(id) === String(session.id) ? snapshot : undefined,
+    },
+  }
 }
 
 describe('createRefineCoordinator', () => {
@@ -592,52 +627,31 @@ describe('Route A planning input', () => {
     expect(store.trajectory).not.toHaveBeenCalled()
   })
 
-  it('sanitizes assistant narration out of the Route A prefix', async () => {
+  it('reuses the host-loop prefix verbatim (no sanitize)', async () => {
     const logger = { info: vi.fn(), warn: vi.fn() }
-    const seen: { prefix?: unknown[] | undefined } = {}
-    const complete = async (_system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+    const seen: { system?: unknown; prefix?: unknown[] | undefined; context?: unknown } = {}
+    const complete = async (system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[], context?: unknown) => {
+      seen.system = system
       seen.prefix = prefix ? [...prefix] : undefined
-      return '{"id":"refine_san","summary":"sanitized","edits":[]}'
+      seen.context = context
+      return '{"id":"refine_snap","summary":"snapshot","edits":[{"action":"create","kind":"memory","id":"snap","content":"x"}]}'
     }
+    const liveAgent = agentWithHeader('route-a-verbatim')
+    const { registry } = snapshotRegistry(liveAgent.session)
     const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') } as unknown as HarnessStore
     const coordinator = createRefineCoordinator({
       store,
       completeFor: () => complete as unknown as Complete,
       maxTrajectoryChars: 12_000,
+      hostRequests: registry,
+      plannerPrefixCache: 'session',
       logger,
     })
-    // Seed user context plus one cached assistant/message that narrates its
-    // last tool call (text + reasoning) so the detector routes A and the
-    // prefix would otherwise echo that narration back to the planner.
-    const liveAgent = agent('route-a-sanitize')
-    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
-    liveAgent.session.append('assistant/message', {
-      turn: 1, step: 1,
-      message: createAssistantMessage({
-        source: { provider: 'p', model: 'm' },
-        content: [
-          { type: 'reasoning', text: 'thinking' },
-          { type: 'text', text: 'narration' },
-          { type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{}' },
-        ],
-      }),
-      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
-    } as never, { surfaceOp: 'append' })
-
     const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
-    expect(result.commitStatus).toBe('not-committed')
-    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
-    expect(seen.prefix?.length).toBeGreaterThan(0)
-    // Ruling 11: the planner must not receive the model's own recent narration.
-    const messages = seen.prefix as { role?: string; content?: { type: string }[] }[]
-    expect(messages.flatMap(message => message.content ?? []).filter(block => block.type === 'reasoning')).toEqual([])
-    expect(messages.filter(message => message.role === 'assistant')
-      .flatMap(message => message.content ?? []).filter(block => block.type === 'text')).toEqual([])
-    // Context survives: user text and the assistant tool-call block are preserved.
-    expect(messages.some(message => message.role === 'user'
-      && message.content?.some(block => block.type === 'text'))).toBe(true)
-    expect(messages.filter(message => message.role === 'assistant')
-      .flatMap(message => message.content ?? []).some(block => block.type === 'tool-call')).toBe(true)
+    expect(result.commitStatus).toBe('committed')
+    expect(seen.system).toBe('session system prompt')
+    expect(seen.prefix).toEqual(liveAgent.session.deriveMessages()) // verbatim, includes assistant text
+    expect(seen.context).toMatchObject({ tools: [{ name: 'read' }], sessionId: liveAgent.session.id })
     expect(store.trajectory).not.toHaveBeenCalled()
   })
 
@@ -677,8 +691,9 @@ describe('Route A planning input', () => {
     expect(calls[1]?.user).toContain('FALLBACK TRAJECTORY')
     expect(calls[1]?.system).toContain('continual harness refiner')
     expect(store.trajectory).toHaveBeenCalledTimes(1)
-    // The fallback transition is observable (spec §2.4).
-    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A -> B (Route A reply truncated; falling back)')
+    // The fallback transition is silent (spec §2.2): only the initial route
+    // info line is logged, never an 'A -> B' fallback line.
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('A -> B'))
   })
 
   it('does not fall back for non-truncation Route A failures', async () => {
@@ -741,5 +756,42 @@ describe('Route A planning input', () => {
     expect(calls[1]?.route).toBe('B')
     expect(calls[1]?.user).toContain('MALFORMED FALLBACK')
     expect(store.trajectory).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips Route A straight to Route B when the remaining output budget is too small', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user, prefix: prefix ? [...prefix] : undefined })
+      return '{"id":"refine_budget","summary":"budgeted","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'BUDGET B TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      resolveContextWindow: async () => 1024,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A.
+    const liveAgent = agent('route-a-budget-skip')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // Route A is detected but infeasible: the 1024-token window leaves less
+    // than MIN_PLANNER_OUTPUT_TOKENS of output budget, so Route B is used
+    // directly with no Route A call made.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.route).toBe('B')
+    expect(calls[0]?.prefix).toBeUndefined()
+    expect(calls[0]?.user).toContain('BUDGET B TRAJECTORY')
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
   })
 })

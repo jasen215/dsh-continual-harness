@@ -8,14 +8,21 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { foldRequestHeader } from '@deepseek-ai/dsh-session'
-import { isTruncatedReply, planRefinement, scopeInstruction } from './planner.ts'
-import type { Complete } from './planner.ts'
+import { isTruncatedReply, planRefinement, REFINEMENT_SYSTEM_PROMPT, scopeInstruction } from './planner.ts'
+import type { Complete, CompleteContext } from './planner.ts'
+import {
+  DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS,
+  DEFAULT_TOKEN_PER_CHAR_RATIO,
+  MIN_PLANNER_OUTPUT_TOKENS,
+  plannerOutputBudget,
+} from './budget.ts'
+import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
+import type { HostRequestRegistry } from './request-snapshot.ts'
 import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } from './cache-detect.ts'
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
-import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO, sanitizePrefix, truncatePrefix } from './store.ts'
+import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { DiagnosticRunner } from './diagnostics.ts'
@@ -107,6 +114,18 @@ export interface RefineCoordinatorOptions {
   trajectorySignalRatio?: number
   /** Optional plugin logger for route-selection observability. */
   logger?: { info(message: string): void; warn(message: string): void }
+  /** Route A: per-session host-loop request snapshots captured from `llm/stream`. */
+  hostRequests?: HostRequestRegistry
+  /** Resolve the model context window (tokens) for the output budget; absent → no dynamic cap. */
+  resolveContextWindow?: (provider: string, model: string, signal?: AbortSignal) => Promise<number | undefined>
+  /** Shared char→token estimate ratio for A and B. */
+  plannerTokenPerCharRatio?: number
+  /** Tokens reserved inside the context window for safety. */
+  plannerSafetyReserveTokens?: number
+  /** Minimum output tokens a planner route must be able to produce. */
+  minPlannerOutputTokens?: number
+  /** Configured planner output cap; used as the budget's upper bound. */
+  plannerMaxTokens?: number
 }
 
 /** One-line summary for a refinement result; shared by the tool and command renderers. */
@@ -258,6 +277,24 @@ async function attachDiagnostics(
 export function createRefineCoordinator(options: RefineCoordinatorOptions): RefineCoordinator {
   const maxTrajectoryChars = options.maxTrajectoryChars ?? DEFAULT_TRAJECTORY_MAX_CHARS
   const mutex = new KeyedMutex()
+  const plannerMaxTokens = options.plannerMaxTokens ?? DEFAULT_PLANNER_MAX_TOKENS
+  const tokenPerCharRatio = options.plannerTokenPerCharRatio ?? DEFAULT_TOKEN_PER_CHAR_RATIO
+  const safetyReserveTokens = options.plannerSafetyReserveTokens ?? DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS
+  const minPlannerOutputTokens = options.minPlannerOutputTokens ?? MIN_PLANNER_OUTPUT_TOKENS
+
+  /** Remaining output budget for a planner call, or undefined when no window is resolvable. */
+  async function outputBudgetFor(inputChars: number, provider: string, model: string, signal: AbortSignal | undefined): Promise<number | undefined> {
+    if (options.resolveContextWindow === undefined) return undefined
+    const contextWindow = await options.resolveContextWindow(provider, model, signal)
+    if (contextWindow === undefined) return undefined
+    return plannerOutputBudget({
+      contextWindow,
+      inputChars,
+      tokenPerCharRatio,
+      configuredMaxTokens: plannerMaxTokens,
+      safetyReserveTokens,
+    })
+  }
   return {
     async execute(request) {
       const validationError = validateRequest(request)
@@ -311,41 +348,70 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         scopeInstruction: scopeInstruction(request.scope === 'global'),
         ...instructionOpts,
       })
-      const planWithTrajectory = () => planRefinement(
-        planInput(options.store.trajectory(request.agent, maxTrajectoryChars, trajectorySignalRatio)),
-        complete,
-        request.signal,
-      )
+      const planWithTrajectory = async (): Promise<{ id: string; summary: string; edits: unknown[] }> => {
+        const input = planInput(options.store.trajectory(request.agent, maxTrajectoryChars, trajectorySignalRatio))
+        const inputChars = [
+          `# Store scope\n${input.scopeInstruction}`,
+          input.stateOverview,
+          input.historyText,
+          input.trajectoryText,
+          input.instructions ?? '',
+        ].filter(Boolean).join('\n\n').length
+        const provider = request.agent.options.provider ?? ''
+        const model = request.agent.options.model ?? ''
+        const outputBudget = await outputBudgetFor(inputChars, provider, model, request.signal)
+        const maxTokens = outputBudget === undefined ? undefined : Math.max(outputBudget, 0)
+        const context: CompleteContext = maxTokens === undefined ? {} : { maxTokens }
+        return planRefinement(input, complete, request.signal, undefined, undefined, context)
+      }
       let proposal: { id: string; summary: string; edits: unknown[] }
       try {
         if (route === 'A') {
-          // Route A (spec §2.2): the session's own system prompt is the system slot
-          // (byte-identical to the host loop request → warm prefix), and the
-          // REFINEMENT_SYSTEM_PROMPT rules are moved INTO the trailing user message
-          // so no planning rule is lost.
-          const header = foldRequestHeader(request.agent.session.events)
-          // Cap the Route A session prefix tail-biased so a long session cannot
-          // blow the planning context (spec §2.2). `plannerPrefixMaxChars` is a
-          // resolved number — `apply()` already applied the default fallback; the
-          // local default only covers direct coordinator construction (tests).
-          const prefixCap = options.plannerPrefixMaxChars ?? DEFAULT_TRAJECTORY_MAX_CHARS
-          const history = sanitizePrefix(truncatePrefix(request.agent.session.deriveMessages(), prefixCap))
-          try {
-            proposal = await planRefinement(
-              planInput(''), // Route A: the session prefix already carries the context
-              complete,
-              request.signal,
-              history,
-              header?.system,
-            )
-          } catch (error) {
-            // Live evidence (2026-08-30): even sanitized, the Route A warm prefix
-            // lets the model drift into "continue the conversation" narration
-            // often enough to fail (~40-70% per probe), so a truncated Route A
-            // reply falls back to Route B (no prefix, trajectory summary) instead
-            // of failing the refinement outright. Route B measured stable (6/6).
-            if (!(error instanceof Error) || !isTruncatedReply(error.message)) throw error
-            options.logger?.info('harness refine planning route: A -> B (Route A reply truncated; falling back)')
+          // Route A (spec §2.2): reuse the actual host-loop request snapshot verbatim
+          // (system/tools/messages/sessionId) so the provider can serve the warm
+          // prefix; no sanitize, no truncate, no reorder — any rewrite would break
+          // the cache key. Falls back to the official reconstruction path
+          // (requestHeader + deriveMessages) when no snapshot was captured yet.
+          const session = request.agent.session
+          const snapshot = options.hostRequests?.latestFor(session.id)
+          const header = session.requestHeader()
+          const prefix = snapshot?.messages ?? session.deriveMessages()
+          const system = snapshot?.system ?? header?.system
+          const tools = snapshot?.tools ?? header?.tools
+          const sessionId = snapshot?.sessionId ?? session.id
+
+          // Only the NEW planner content is budgeted; the cached prefix is never
+          // trimmed to fit. The total window still bounds the output budget.
+          const newInputChars = [
+            REFINEMENT_SYSTEM_PROMPT, // rules move into the trailing user message
+            `# Store scope\n${planInput('').scopeInstruction}`,
+            planInput('').stateOverview,
+            planInput('').historyText,
+            planInput('').instructions ?? '',
+          ].filter(Boolean).join('\n\n').length
+          const provider = snapshot?.provider ?? request.agent.options.provider ?? ''
+          const model = snapshot?.model ?? request.agent.options.model ?? ''
+          const outputBudget = await outputBudgetFor(newInputChars, provider, model, request.signal)
+          const maxTokens = outputBudget === undefined ? undefined : Math.max(outputBudget, 0)
+
+          // The cached prefix is allowed to consume the window; only a zero/too-small
+          // remaining output budget makes Route A infeasible.
+          const feasible = outputBudget === undefined || outputBudget >= minPlannerOutputTokens
+          if (feasible) {
+            try {
+              const context: CompleteContext = {
+                ...(tools === undefined ? {} : { tools }),
+                ...(sessionId === undefined ? {} : { sessionId }),
+                ...(maxTokens === undefined ? {} : { maxTokens }),
+              }
+              proposal = await planRefinement(planInput(''), complete, request.signal, prefix, system, context)
+            } catch (error) {
+              // Silent fallback: an unusable Route A reply retries via Route B
+              // (trajectory summary) without logging a fallback line (spec §2.2).
+              if (!(error instanceof Error) || !isTruncatedReply(error.message)) throw error
+              proposal = await planWithTrajectory()
+            }
+          } else {
             proposal = await planWithTrajectory()
           }
         } else {
