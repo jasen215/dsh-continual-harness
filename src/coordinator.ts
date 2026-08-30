@@ -8,11 +8,23 @@
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { planRefinement, scopeInstruction } from './planner.ts'
-import type { Complete } from './planner.ts'
+import { isTruncatedReply, planRefinement, REFINEMENT_SYSTEM_PROMPT, scopeInstruction } from './planner.ts'
+import type { Complete, CompleteContext } from './planner.ts'
+import {
+  DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS,
+  DEFAULT_TOKEN_PER_CHAR_RATIO,
+  estimateCharsTokens,
+  estimateMessagesChars,
+  MIN_PLANNER_OUTPUT_TOKENS,
+  plannerOutputBudget,
+} from './budget.ts'
+import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
+import type { HostRequestRegistry } from './request-snapshot.ts'
+import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } from './cache-detect.ts'
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
+import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { DiagnosticRunner } from './diagnostics.ts'
@@ -96,6 +108,24 @@ export interface RefineCoordinatorOptions {
   requireGlobalApproval?: (agent: Agent, signal: AbortSignal | undefined, summary: string) => Promise<void>
   requireGlobalApprovalForTool?: boolean
   diagnostics?: DiagnosticRunner
+  /** Planner prefix-cache routing: auto-detect, force session prefix, or off. */
+  plannerPrefixCache?: PlannerPrefixCacheMode
+  /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
+  trajectorySignalRatio?: number
+  /** Optional plugin logger for route-selection observability. */
+  logger?: { info(message: string): void; warn(message: string): void }
+  /** Route A: per-session host-loop request snapshots captured from `llm/stream`. */
+  hostRequests?: HostRequestRegistry
+  /** Resolve the model context window (tokens) for the output budget; absent → no dynamic cap. */
+  resolveContextWindow?: (provider: string, model: string, signal?: AbortSignal) => Promise<number | undefined>
+  /** Shared char→token estimate ratio for A and B. */
+  plannerTokenPerCharRatio?: number
+  /** Tokens reserved inside the context window for safety. */
+  plannerSafetyReserveTokens?: number
+  /** Minimum output tokens a planner route must be able to produce. */
+  minPlannerOutputTokens?: number
+  /** Configured planner output cap; used as the budget's upper bound. */
+  plannerMaxTokens?: number
 }
 
 /** One-line summary for a refinement result; shared by the tool and command renderers. */
@@ -245,8 +275,33 @@ async function attachDiagnostics(
 }
 
 export function createRefineCoordinator(options: RefineCoordinatorOptions): RefineCoordinator {
-  const maxTrajectoryChars = options.maxTrajectoryChars ?? 12_000
+  const maxTrajectoryChars = options.maxTrajectoryChars ?? DEFAULT_TRAJECTORY_MAX_CHARS
   const mutex = new KeyedMutex()
+  const plannerMaxTokens = options.plannerMaxTokens ?? DEFAULT_PLANNER_MAX_TOKENS
+  const tokenPerCharRatio = options.plannerTokenPerCharRatio ?? DEFAULT_TOKEN_PER_CHAR_RATIO
+  const safetyReserveTokens = options.plannerSafetyReserveTokens ?? DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS
+  const minPlannerOutputTokens = options.minPlannerOutputTokens ?? MIN_PLANNER_OUTPUT_TOKENS
+
+  /**
+   * Output budget for a planner call plus the resolved context window; both
+   * undefined when no window is resolvable. The window is surfaced so Route A
+   * can run its prefix-inclusive feasibility check on the same resolution.
+   */
+  async function outputBudgetFor(inputChars: number, provider: string, model: string, signal: AbortSignal | undefined): Promise<{ outputBudget: number | undefined; contextWindow: number | undefined }> {
+    if (options.resolveContextWindow === undefined) return { outputBudget: undefined, contextWindow: undefined }
+    const contextWindow = await options.resolveContextWindow(provider, model, signal)
+    if (contextWindow === undefined) return { outputBudget: undefined, contextWindow: undefined }
+    return {
+      contextWindow,
+      outputBudget: plannerOutputBudget({
+        contextWindow,
+        inputChars,
+        tokenPerCharRatio,
+        configuredMaxTokens: plannerMaxTokens,
+        safetyReserveTokens,
+      }),
+    }
+  }
   return {
     async execute(request) {
       const validationError = validateRequest(request)
@@ -286,24 +341,111 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const baseline = request.scope === 'global' ? globalState : localState
       const stateOverview = overviewForPrompt(mergeHarnessStates(globalState, localState))
       const historyText = historyForPrompt(options.store.history(request.agent))
-      const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
 
       if (request.signal?.aborted) return errorResult('planning', 'aborted', 'refinement request aborted')
+      const route: PlannerRoute = detectPlannerRoute(request.agent.session.events, options.plannerPrefixCache ?? 'auto')
+      options.logger?.info(`harness refine planning route: ${route}`)
+      const complete = options.completeFor(request.agent)
+      const trajectorySignalRatio = options.trajectorySignalRatio ?? DEFAULT_TRAJECTORY_SIGNAL_RATIO
+      const instructionOpts = request.instructions === undefined ? {} : { instructions: request.instructions }
+      const planInput = (trajectoryText: string) => ({
+        stateOverview,
+        historyText,
+        trajectoryText,
+        scopeInstruction: scopeInstruction(request.scope === 'global'),
+        ...instructionOpts,
+      })
+      const planWithTrajectory = async (): Promise<{ id: string; summary: string; edits: unknown[] }> => {
+        const input = planInput(options.store.trajectory(request.agent, maxTrajectoryChars, trajectorySignalRatio))
+        // The rules ride Route B's system slot (planRefinement falls back to
+        // REFINEMENT_SYSTEM_PROMPT); count them so B treats the rules block
+        // exactly like Route A does. Elements mirror the user-string shapes
+        // planRefinement actually builds.
+        const inputChars = [
+          REFINEMENT_SYSTEM_PROMPT,
+          `# Store scope\n${input.scopeInstruction}`,
+          input.stateOverview,
+          input.historyText,
+          input.trajectoryText === '' ? '' : `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
+          input.instructions ? `# Focus instructions\n${input.instructions}` : '',
+        ].filter(Boolean).join('\n\n').length
+        const provider = request.agent.options.provider ?? ''
+        const model = request.agent.options.model ?? ''
+        const { outputBudget } = await outputBudgetFor(inputChars, provider, model, request.signal)
+        // Minimum-output feasibility gate (spec §2.3.5): an infeasible request
+        // is never sent — the throw lands in the outer catch and maps to
+        // planning-failed instead of issuing a call that cannot fit.
+        if (outputBudget !== undefined && outputBudget < minPlannerOutputTokens) {
+          throw new Error('planner output budget below minimum viable proposal size')
+        }
+        const maxTokens = outputBudget
+        const context: CompleteContext = maxTokens === undefined ? {} : { maxTokens }
+        return planRefinement(input, complete, request.signal, undefined, undefined, context)
+      }
       let proposal: { id: string; summary: string; edits: unknown[] }
       try {
-        const planned = await planRefinement({
-          stateOverview,
-          historyText,
-          trajectoryText,
-          scopeInstruction: scopeInstruction(request.scope === 'global'),
-          ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
-        }, options.completeFor(request.agent), request.signal)
-        proposal = planned
+        if (route === 'A') {
+          // Route A (spec §2.2): reuse the actual host-loop request snapshot verbatim
+          // (system/tools/messages/sessionId) so the provider can serve the warm
+          // prefix; no sanitize, no truncate, no reorder — any rewrite would break
+          // the cache key. Falls back to the official reconstruction path
+          // (requestHeader + deriveMessages) when no snapshot was captured yet.
+          const session = request.agent.session
+          const snapshot = options.hostRequests?.latestFor(session.id)
+          const header = session.requestHeader()
+          const prefix = snapshot?.messages ?? session.deriveMessages()
+          const system = snapshot?.system ?? header?.system
+          const tools = snapshot?.tools ?? header?.tools
+          const sessionId = snapshot?.sessionId ?? session.id
+
+          // Only the NEW planner content is budgeted; the cached prefix is never
+          // trimmed to fit (a prefix never reduces maxTokens). The total window
+          // still bounds feasibility: the prefix-inclusive check below makes an
+          // over-window prefix infeasible for Route A (→ B), never smaller output.
+          const planInputContext = planInput('')
+          const newInputChars = [
+            REFINEMENT_SYSTEM_PROMPT, // rules move into the trailing user message
+            `# Store scope\n${planInputContext.scopeInstruction}`,
+            planInputContext.stateOverview,
+            planInputContext.historyText,
+            planInputContext.instructions ? `# Focus instructions\n${planInputContext.instructions}` : '',
+          ].filter(Boolean).join('\n\n').length
+          const provider = snapshot?.provider ?? request.agent.options.provider ?? ''
+          const model = snapshot?.model ?? request.agent.options.model ?? ''
+          const { outputBudget, contextWindow } = await outputBudgetFor(newInputChars, provider, model, request.signal)
+          const maxTokens = outputBudget
+
+          // Feasibility-only gate: Route A must leave at least
+          // minPlannerOutputTokens of room for the planner output after the FULL
+          // request — cached prefix (messages + system) plus new planner content
+          // plus the safety reserve. The prefix is never shrunk to fit; an
+          // over-window prefix makes A infeasible and we fall through to B.
+          const prefixTokens = estimateCharsTokens(estimateMessagesChars(prefix) + (system?.length ?? 0), tokenPerCharRatio)
+          const newInputTokens = estimateCharsTokens(newInputChars, tokenPerCharRatio)
+          const feasible = outputBudget === undefined || (contextWindow !== undefined && contextWindow - prefixTokens - newInputTokens - safetyReserveTokens >= minPlannerOutputTokens)
+          if (feasible) {
+            try {
+              const context: CompleteContext = {
+                ...(tools === undefined ? {} : { tools }),
+                ...(sessionId === undefined ? {} : { sessionId }),
+                ...(maxTokens === undefined ? {} : { maxTokens }),
+              }
+              proposal = await planRefinement(planInputContext, complete, request.signal, prefix, system, context)
+            } catch (error) {
+              // Silent fallback: an unusable Route A reply retries via Route B
+              // (trajectory summary) without logging a fallback line (spec §2.2).
+              if (!(error instanceof Error) || !isTruncatedReply(error.message)) throw error
+              proposal = await planWithTrajectory()
+            }
+          } else {
+            proposal = await planWithTrajectory()
+          }
+        } else {
+          proposal = await planWithTrajectory()
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        const code = message === 'malformed refinement proposal' || message.includes('Unexpected token') || message.includes('Unexpected end')
-          ? 'invalid-proposal'
-          : 'planning-failed'
+        const code = isTruncatedReply(message) ? 'invalid-proposal' : 'planning-failed'
         return errorResult('planning', code, message)
       }
       if (!isProposal(proposal)) return errorResult('planning', 'invalid-proposal', 'malformed refinement proposal')

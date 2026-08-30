@@ -158,6 +158,7 @@ function driverOptions(overrides: Partial<DriverOptions> = {}): DriverOptions {
     compact: true,
     plannerMaxTokens: 1000,
     maxTrajectoryChars: 500,
+    trajectorySignalRatio: 0.5,
     auditReviews: false,
     ...overrides,
   }

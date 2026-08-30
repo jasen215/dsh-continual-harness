@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Complete } from '../src/planner.ts'
+import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
 import type { PlanRequest } from '../src/coordinator.ts'
@@ -144,6 +146,46 @@ function delayedStore(): HarnessStore & {
   store.plannerEnd = () => { activePlanner -= 1 }
   store.commitOverlap = () => maxCommit
   return store
+}
+
+function agentWithHeader(id = 'coordinator-agent'): Agent {
+  const a = agent(id)
+  a.session.append('request/header', {
+    header: {
+      config: { provider: 'test-provider', model: 'test-model' },
+      system: 'session system prompt',
+      tools: [{ name: 'read' }],
+    },
+    reason: 'initial',
+  } as never)
+  a.session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+    usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+  } as never, { surfaceOp: 'append' })
+  return a
+}
+
+function snapshotRegistry(session: Session): { registry: HostRequestRegistry } {
+  // Deliberately DIFFERENT from the requestHeader/deriveMessages fallback: the
+  // snapshot carries its own system prompt and an extra synthetic message, so
+  // the tests prove the snapshot branch wins over the fallback (I-3).
+  const snapshot: HostRequestSnapshot = {
+    provider: 'test-provider',
+    model: 'test-model',
+    system: 'snapshot system prompt',
+    tools: [{ name: 'read' }],
+    messages: [
+      ...session.deriveMessages(),
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'snapshot-only' }] }),
+    ],
+    sessionId: session.id,
+  }
+  return {
+    registry: {
+      latestFor: (id: SessionId) => String(id) === String(session.id) ? snapshot : undefined,
+    },
+  }
 }
 
 describe('createRefineCoordinator', () => {
@@ -550,5 +592,258 @@ describe('createRefineCoordinator', () => {
       expect(result.commitStatus).toBe('committed')
       expect(run).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('Route A planning input', () => {
+  it('passes derived session messages as prefix and drops the trajectory block', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const seen: { system?: string | undefined; user?: string | undefined; prefix?: unknown[] | undefined } = {}
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      seen.system = system
+      seen.user = user
+      seen.prefix = prefix ? [...prefix] : undefined
+      return '{"id":"refine_a","summary":"a","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A.
+    const liveAgent = agent('route-a-agent')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // Route-selection observability (spec §2.4): the coordinator logs which
+    // planning route was chosen via the injected logger.
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
+    expect(seen.prefix?.length).toBeGreaterThan(0)
+    // Route A moves the planning rules into the trailing user message and
+    // omits the trajectory block; the session prefix carries the context.
+    expect(seen.user).toContain('continual harness refiner')
+    expect(store.trajectory).not.toHaveBeenCalled()
+  })
+
+  it('reuses the host-loop prefix verbatim (no sanitize)', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const seen: { system?: unknown; prefix?: unknown[] | undefined; context?: unknown } = {}
+    const complete = async (system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[], context?: unknown) => {
+      seen.system = system
+      seen.prefix = prefix ? [...prefix] : undefined
+      seen.context = context
+      return '{"id":"refine_snap","summary":"snapshot","edits":[{"action":"create","kind":"memory","id":"snap","content":"x"}]}'
+    }
+    const liveAgent = agentWithHeader('route-a-verbatim')
+    const { registry } = snapshotRegistry(liveAgent.session)
+    const snapshotMessages = registry.latestFor(liveAgent.session.id)?.messages ?? []
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      hostRequests: registry,
+      plannerPrefixCache: 'session',
+      logger,
+    })
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('committed')
+    // The snapshot branch wins over the requestHeader/deriveMessages fallback:
+    // the prefix is the SNAPSHOT's messages verbatim — the derived list plus
+    // the synthetic 'snapshot-only' message — and the system prompt is the
+    // snapshot's, not the header's 'session system prompt'.
+    expect(seen.system).toBe('snapshot system prompt')
+    expect(seen.prefix).toEqual(snapshotMessages) // verbatim, includes assistant text + snapshot-only
+    expect(seen.prefix).toHaveLength(liveAgent.session.deriveMessages().length + 1)
+    expect(JSON.stringify(seen.prefix)).toContain('snapshot-only')
+    expect(seen.context).toMatchObject({ tools: [{ name: 'read' }], sessionId: liveAgent.session.id })
+    expect(store.trajectory).not.toHaveBeenCalled()
+  })
+
+  it('falls back to Route B when the Route A reply is truncated', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; system?: string | undefined; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', system, user, prefix: prefix ? [...prefix] : undefined })
+      if (prefix !== undefined) throw new Error('the model stopped before completing its JSON object; the reply was truncated or empty')
+      return '{"id":"refine_fb","summary":"fallback","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'FALLBACK TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A.
+    const liveAgent = agent('route-a-fallback')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // Route A attempted first (with the session prefix), then Route B (no prefix).
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.route).toBe('A')
+    expect(calls[1]?.route).toBe('B')
+    expect(calls[1]?.prefix).toBeUndefined()
+    // Route B restores the trajectory block; the planning rules ride the
+    // default REFINEMENT_SYSTEM_PROMPT system slot (no explicit system passed).
+    expect(calls[1]?.user).toContain('FALLBACK TRAJECTORY')
+    expect(calls[1]?.system).toContain('continual harness refiner')
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+    // The fallback transition is silent (spec §2.2): only the initial route
+    // info line is logged, never an 'A -> B' fallback line.
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('A -> B'))
+  })
+
+  it('does not fall back for non-truncation Route A failures', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const complete = async (_system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      if (prefix !== undefined) throw new Error('harness refinement planning failed: model request failed')
+      throw new Error('should not reach Route B')
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'NOPE') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-hardfail')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    expect(result.failedAt).toBe('planning')
+    expect(result.error?.code).toBe('planning-failed')
+    expect(store.trajectory).not.toHaveBeenCalled()
+  })
+
+  it('falls back to Route B for a malformed (not just truncated) Route A reply', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user, prefix: prefix ? [...prefix] : undefined })
+      if (prefix !== undefined) throw new Error('malformed refinement proposal')
+      return '{"id":"refine_mal","summary":"recovered","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'MALFORMED FALLBACK') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-malformed')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // The malformed Route A reply is treated as an unusable reply: Route B
+    // recovers the plan instead of failing the refinement outright.
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.route).toBe('A')
+    expect(calls[1]?.route).toBe('B')
+    expect(calls[1]?.user).toContain('MALFORMED FALLBACK')
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+  })
+
+  it('never sends an infeasible request: Route A skipped, then the Route B minimum-output gate throws', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user, prefix: prefix ? [...prefix] : undefined })
+      return '{"id":"refine_budget","summary":"budgeted","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'BUDGET B TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      resolveContextWindow: async () => 1024,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A.
+    const liveAgent = agent('route-a-budget-skip')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    // The 1024-token window cannot fit even the new planner content: Route A's
+    // total-window check fails, and Route B's minimum-output gate (spec §2.3.5)
+    // throws instead of issuing a call that cannot fit. The throw lands in the
+    // outer catch → planning-failed; NO planner call is ever made.
+    expect(result.failedAt).toBe('planning')
+    expect(result.error?.code).toBe('planning-failed')
+    expect(result.error?.message).toBe('planner output budget below minimum viable proposal size')
+    expect(calls).toHaveLength(0)
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
+  })
+
+  it('skips Route A when the cached prefix alone overflows the window, letting Route B use the full budget', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user, prefix: prefix ? [...prefix] : undefined })
+      return '{"id":"refine_budget","summary":"budgeted","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'BUDGET B TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      resolveContextWindow: async () => 20_000,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A, plus a huge
+    // user message so the cached prefix alone (~15k tokens) overflows the window.
+    const liveAgent = agent('route-a-prefix-overflow')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'x'.repeat(30_000) }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // Route A is detected but infeasible: the 20k window minus the ~15k-token
+    // cached prefix leaves less than MIN_PLANNER_OUTPUT_TOKENS, so Route A is
+    // skipped (the prefix is never shrunk to fit — no A call, no trimmed A).
+    // Route B (trajectory summary, no prefix) still fits, so it is used directly.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.route).toBe('B')
+    expect(calls[0]?.prefix).toBeUndefined()
+    expect(calls[0]?.user).toContain('BUDGET B TRAJECTORY')
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
   })
 })

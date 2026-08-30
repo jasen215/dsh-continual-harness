@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import type { Message } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
@@ -35,8 +36,14 @@ import {
 import { aggregateUsage } from './usage.ts'
 import type { HarnessState, MaterializationResult, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
-/** Default tail-biased trajectory window for planning. */
-export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
+/** Default tail-biased trajectory window for planning (spec §2.3: 12k). */
+export const DEFAULT_TRAJECTORY_MAX_CHARS = 12_000
+
+/** Default fraction of the trajectory budget kept verbatim (spec §2.3). */
+export const DEFAULT_TRAJECTORY_SIGNAL_RATIO = 0.5
+
+/** Per-role char caps shared by the trajectory digest and signal layers. */
+export const TRAJECTORY_ROLE_CAPS = { user: 300, assistant: 200 } as const
 
 /** Options for a store commit. */
 export interface CommitOptions {
@@ -201,8 +208,8 @@ export class HarnessStore {
   }
 
   /** Tail-biased trajectory serialization for the planner. */
-  trajectory(agent: Agent, maxChars: number = DEFAULT_TRAJECTORY_MAX_CHARS): string {
-    return serializeTrajectory(agent.session, maxChars)
+  trajectory(agent: Agent, maxChars: number = DEFAULT_TRAJECTORY_MAX_CHARS, signalRatio = DEFAULT_TRAJECTORY_SIGNAL_RATIO): string {
+    return serializeTrajectory(agent.session, maxChars, signalRatio)
   }
 
   /**
@@ -325,30 +332,96 @@ export class HarnessStore {
   }
 }
 
-/** Serialize a session's user/assistant text turns, tail-biased. */
-export function serializeTrajectory(session: Session, maxChars: number): string {
-  const lines: string[] = []
-  for (const event of session.events) {
-    let text = ''
-    if (event.type === 'user/message') {
-      text = textOf(event.data.content)
-    } else if (event.type === 'assistant/message') {
-      text = textOf(event.data.message.content)
-    } else {
-      continue
-    }
-    if (!text.trim()) continue
-    lines.push(`[${event.type}] ${text}`)
-  }
-  const joined = lines.join('\n\n')
-  if (joined.length <= maxChars) return joined
-  const cut = joined.slice(-maxChars)
-  return `… (truncated, showing the last ${maxChars} characters of ${joined.length})\n\n${cut}`
+function digestOf(role: 'user' | 'assistant', blocks: Message['content']): string {
+  const text = messageText({ content: blocks })
+  const toolNames = blocks
+    .filter((block): block is Extract<Message['content'][number], { type: 'tool-call' }> =>
+      block.type === 'tool-call')
+    .map(block => block.name)
+  const limit = TRAJECTORY_ROLE_CAPS[role]
+  const cut = text.length > limit ? `${text.slice(0, limit)}…` : text
+  const tools = toolNames.length > 0 ? ` [tools: ${[...new Set(toolNames)].join(', ')}]` : ''
+  return `[${role}] ${cut}${tools}`
 }
 
-function textOf(blocks: ReadonlyArray<{ type: string; text?: unknown }>): string {
-  return blocks
-    .filter(block => block.type === 'text' && typeof block.text === 'string')
-    .map(block => block.text as string)
+/**
+ * Two-layer tail-biased trajectory (spec §2.3): the signal layer keeps the
+ * most recent messages verbatim up to `maxChars * signalRatio`; the digest
+ * layer truncates everything older (user 300 / assistant 200 chars + tool
+ * names). Input is the surface-ordered derived history — the same messages
+ * the host loop already sent — so no event-structure re-parsing is needed.
+ *
+ * Compatibility: the signal layer labels lines `[user/message]` /
+ * `[assistant/message]` exactly like the pre-refactor serializer, so the
+ * existing store.spec assertions keep passing; the digest layer uses the
+ * shorter `[user]` / `[assistant]` tags.
+ */
+export function serializeTrajectory(session: Session, maxChars: number, signalRatio = DEFAULT_TRAJECTORY_SIGNAL_RATIO): string {
+  if (maxChars <= 0) return ''
+  const messages = session.deriveMessages()
+  const signalBudget = Math.floor(maxChars * Math.min(1, Math.max(0, signalRatio)))
+  const digestBudget = maxChars - signalBudget
+
+  // Signal layer: verbatim tail, newest last, labelled with the legacy
+  // event-style tags so existing tests and downstream consumers are stable.
+  // tool/result messages (role 'user', first block 'tool-result') carry no
+  // planner-relevant text — skip them entirely instead of calling messageText.
+  // A message longer than the digest's per-role cap is digested instead of
+  // kept verbatim: it would burn the signal budget without adding readable
+  // context, and the digest already carries its truncated form.
+  const signalLines: string[] = []
+  let signalUsed = 0
+  let split = messages.length
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!
+    if (message.content[0]?.type === 'tool-result') continue
+    const text = messageText(message)
+    if (!text.trim()) continue
+    const cap = TRAJECTORY_ROLE_CAPS[message.role === 'assistant' ? 'assistant' : 'user']
+    if (text.length > cap) break
+    const tag = message.role === 'assistant' ? 'assistant/message' : 'user/message'
+    const line = `[${tag}] ${text}`
+    if (signalUsed + line.length > signalBudget) break
+    signalLines.unshift(line)
+    signalUsed += line.length
+    split = i
+  }
+  // The digest layer mirrors the signal layer: tool/result messages carry no
+  // planner text (messageText yields ''), so they are skipped rather than
+  // emitted as bare `[user]` tag lines.
+  const digestLines: string[] = []
+  for (let i = 0; i < split; i++) {
+    const message = messages[i]!
+    if (message.content[0]?.type === 'tool-result') continue
+    digestLines.push(digestOf(message.role === 'assistant' ? 'assistant' : 'user', message.content))
+  }
+  let digest = digestLines.join('\n')
+  if (digest.length > digestBudget) {
+    // Reserve the cut marker (and its newline separator) before slicing the
+    // body, so the digest layer stays within digestBudget and the spec's
+    // "total ≤ maxChars" guarantee holds even when the signal layer uses its
+    // full share (spec §2.3). `markerFor(digestBudget)` has the longest digit
+    // count the body can take, so one refinement pass bounds the marker.
+    const total = digest.length
+    const markerFor = (body: number) => `… (truncated, showing the first ${body} characters of ${total})`
+    const body = Math.max(0, digestBudget - markerFor(digestBudget).length - 2)
+    digest = body > 0
+      ? `${markerFor(body)}\n\n${digest.slice(0, body)}`
+      : markerFor(0).length <= digestBudget ? markerFor(0) : ''
+  }
+  const signal = signalLines.join('\n\n')
+  if (!signal) return digest
+  return digest ? `${digest}\n\n${signal}` : signal
+}
+
+/** Serialized text of one derived message (text blocks only; skips tool-result). */
+export function messageText(message: Pick<Message, 'content'>): string {
+  if (message.content[0]?.type === 'tool-result') return ''
+  return message.content
+    // explicit predicate: the `typeof` guard survives the merge-extensible
+    // ContentBlock union (a plugin-added 'text' block may carry non-string text)
+    .filter((block): block is { type: 'text'; text: string } =>
+      block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
     .join('\n')
 }

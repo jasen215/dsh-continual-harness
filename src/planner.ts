@@ -4,6 +4,8 @@
  * @module dsh-continual-harness
  */
 
+import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   AutoRefineReview,
   AutoRefineReviewContext,
@@ -11,11 +13,48 @@ import type {
   RefinementProposal,
 } from './types.ts'
 
+/** Optional request-level context forwarded to the completion seam (Route A). */
+export interface CompleteContext {
+  /** Route A: host-loop tool schemas — reproduce the loop's cache key. */
+  tools?: readonly ToolSchema[]
+  /** Route A: session identity stamped on the request. */
+  sessionId?: SessionId
+  /** Output budget override derived from the remaining context window. */
+  maxTokens?: number
+}
+
 /** One non-reasoning LLM call: system + user prompt in, plain text out. */
-export type Complete = (system: string, user: string, signal?: AbortSignal) => Promise<string>
+export type Complete = (
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+  /** Route A: warm session messages prepended before the trailing user message. */
+  prefix?: readonly Message[],
+  /** Request-level context (tools/sessionId/output budget) for Route A. */
+  context?: CompleteContext,
+) => Promise<string>
 
 /** Raised when the model reply is truncated before its JSON object completes. */
 export const TRUNCATED_JSON_ERROR = 'the model stopped before completing its JSON object; the reply was truncated or empty'
+
+/** Raised when the model reply parses but is not a valid proposal shape. */
+export const MALFORMED_PROPOSAL_ERROR = 'malformed refinement proposal'
+
+/** Raised when the model reply parses but is not a valid review shape. */
+export const MALFORMED_REVIEW_ERROR = 'malformed auto-refine review'
+
+/**
+ * True when a planner failure message means the reply was truncated or
+ * malformed rather than a transport/planning failure: the same shapes the
+ * coordinator classifies as `invalid-proposal` and the Route A→B fallback
+ * retries as a truncated reply.
+ */
+export function isTruncatedReply(message: string): boolean {
+  return message === TRUNCATED_JSON_ERROR
+    || message === MALFORMED_PROPOSAL_ERROR
+    || message.includes('Unexpected token')
+    || message.includes('Unexpected end')
+}
 
 /** System prompt for refinement planning. */
 export const REFINEMENT_SYSTEM_PROMPT = `You are the continual harness refiner of an agent loop. The agent learns by persisting small, reusable, evidence-backed entries — prompt notes, memories, skill contracts, or subagent specs — and by pruning stale ones.
@@ -65,7 +104,7 @@ export function extractJsonObject(text: string): string {
 export function parseProposal(text: string): RefinementProposal {
   const object = JSON.parse(extractJsonObject(text)) as RefinementProposal
   if (typeof object.id !== 'string' || !Array.isArray(object.edits)) {
-    throw new Error('malformed refinement proposal')
+    throw new Error(MALFORMED_PROPOSAL_ERROR)
   }
   return object
 }
@@ -74,7 +113,7 @@ export function parseProposal(text: string): RefinementProposal {
 export function parseAutoRefineReview(text: string): AutoRefineReview {
   const object = JSON.parse(extractJsonObject(text)) as AutoRefineReview
   if (typeof object.approved !== 'boolean' || typeof object.rationale !== 'string') {
-    throw new Error('malformed auto-refine review')
+    throw new Error(MALFORMED_REVIEW_ERROR)
   }
   return object
 }
@@ -84,15 +123,23 @@ export async function planRefinement(
   input: RefinementPlanInput,
   complete: Complete,
   signal?: AbortSignal,
+  prefix?: readonly Message[],
+  system?: string,
+  context?: CompleteContext,
 ): Promise<RefinementProposal> {
   const user = [
+    // Route A: the planning rules move into the trailing user message so the
+    // system slot can carry the session's own system prompt (byte-identical to
+    // the host loop request → warm prefix). Route B keeps them in the system slot.
+    prefix !== undefined || system !== undefined ? REFINEMENT_SYSTEM_PROMPT : '',
     `# Store scope\n${input.scopeInstruction}`,
     input.stateOverview,
     input.historyText,
-    `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
+    // Route A omits the trajectory block; the session prefix carries the context.
+    input.trajectoryText === '' ? '' : `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
     input.instructions ? `# Focus instructions\n${input.instructions}` : '',
   ].filter(Boolean).join('\n\n')
-  return parseProposal(await complete(REFINEMENT_SYSTEM_PROMPT, user, signal))
+  return parseProposal(await complete(system ?? REFINEMENT_SYSTEM_PROMPT, user, signal, prefix, context))
 }
 
 /** Run the automatic refinement review gate through the injected seam. */
