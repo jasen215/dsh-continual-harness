@@ -373,6 +373,7 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
     const message = messages[i]!
     if (message.content[0]?.type === 'tool-result') continue
     const text = messageText(message)
+    if (!text.trim()) continue
     const cap = message.role === 'assistant' ? 200 : 300
     if (text.length > cap) break
     const tag = message.role === 'assistant' ? 'assistant/message' : 'user/message'
@@ -390,7 +391,17 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
     .filter(line => line.trim() !== '')
   let digest = digestLines.join('\n')
   if (digest.length > digestBudget) {
-    digest = `… (truncated, showing the first ${digestBudget} characters of ${digest.length})\n\n${digest.slice(0, digestBudget)}`
+    // Reserve the cut marker (and its newline separator) before slicing the
+    // body, so the digest layer stays within digestBudget and the spec's
+    // "total ≤ maxChars" guarantee holds even when the signal layer uses its
+    // full share (spec §2.3). `markerFor(digestBudget)` has the longest digit
+    // count the body can take, so one refinement pass bounds the marker.
+    const total = digest.length
+    const markerFor = (body: number) => `… (truncated, showing the first ${body} characters of ${total})`
+    const body = Math.max(0, digestBudget - markerFor(digestBudget).length - 2)
+    digest = body > 0
+      ? `${markerFor(body)}\n\n${digest.slice(0, body)}`
+      : markerFor(0).length <= digestBudget ? markerFor(0) : ''
   }
   const signal = signalLines.join('\n\n')
   if (!signal) return digest

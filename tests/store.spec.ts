@@ -668,10 +668,13 @@ describe('serializeTrajectory', () => {
       content: [{ type: 'text', text: `second prompt ${long}` }],
     }), { surfaceOp: 'append' })
     const text = serializeTrajectory(session, 300)
-    // The digest layer truncates the oversized message and marks the cut.
+    // The digest layer truncates the oversized message and marks the cut,
+    // and the marker itself is reserved inside the digest budget, so the
+    // total output never exceeds maxChars.
     expect(text).toContain('(truncated')
     expect(text).toContain('second prompt')
     expect(text).toContain('[user]')
+    expect(text.length).toBeLessThanOrEqual(300)
   })
 
   it('keeps the verbatim signal layer for recent messages and digests older ones', () => {
@@ -706,6 +709,35 @@ describe('serializeTrajectory', () => {
     } as never, { surfaceOp: 'append' })
     const text = serializeTrajectory(session, 12_000, 0.5)
     expect(text).toContain('[tools: bash]')
+  })
+
+  it('clamps the signal ratio into [0,1]', () => {
+    const session = Session.create(SessionId('traj-6'))
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'a'.repeat(100) }] }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'recent' }] }), { surfaceOp: 'append' })
+    // ratio >1 clamps to 1: everything fits the verbatim signal layer.
+    const high = serializeTrajectory(session, 1_000, 2)
+    expect(high).toContain('[user/message]')
+    expect(high).not.toContain('[user]')
+    // ratio <0 clamps to 0: nothing is kept verbatim, all digested.
+    const low = serializeTrajectory(session, 1_000, -1)
+    expect(low).toContain('[user]')
+    expect(low).not.toContain('[user/message]')
+  })
+
+  it('keeps the total trajectory within maxChars when both layers overflow', () => {
+    // A signal layer near its full share (ratio 0.9) plus a digest that
+    // overflows its budget: the total must still respect maxChars, with the
+    // cut marker reserved inside the digest budget rather than added on top.
+    const session = Session.create(SessionId('traj-7'))
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'old-1 ' + 'a'.repeat(250) }] }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'old-2 ' + 'b'.repeat(250) }] }), { surfaceOp: 'append' })
+    for (let i = 0; i < 9; i++) {
+      session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: `m${i} ` + 'c'.repeat(95) }] }), { surfaceOp: 'append' })
+    }
+    const text = serializeTrajectory(session, 1_000, 0.9)
+    expect(text).toContain('(truncated') // the digest overflow is actually exercised
+    expect(text.length).toBeLessThanOrEqual(1_000)
   })
 })
 
