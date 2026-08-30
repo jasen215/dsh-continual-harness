@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
-import { createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { HarnessStore, serializeTrajectory, truncatePrefix } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
@@ -668,9 +668,44 @@ describe('serializeTrajectory', () => {
       content: [{ type: 'text', text: `second prompt ${long}` }],
     }), { surfaceOp: 'append' })
     const text = serializeTrajectory(session, 300)
+    // The digest layer truncates the oversized message and marks the cut.
     expect(text).toContain('(truncated')
-    expect(text).toContain(long.slice(-100))
-    expect(text).not.toContain('[user/message]')
+    expect(text).toContain('second prompt')
+    expect(text).toContain('[user]')
+  })
+
+  it('keeps the verbatim signal layer for recent messages and digests older ones', () => {
+    const session = Session.create(SessionId('traj-3'))
+    const old = 'old-' + 'x'.repeat(2000)
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: old }] }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'recent prompt' }] }), { surfaceOp: 'append' })
+    const text = serializeTrajectory(session, 12_000, 0.5)
+    expect(text).toContain('recent prompt')     // signal layer verbatim
+    expect(text).toContain(old.slice(0, 300))   // digest layer truncated to 300
+    expect(text).not.toContain(old.slice(300))  // truncated away
+  })
+
+  it('returns empty string for a non-positive budget', () => {
+    const session = Session.create(SessionId('traj-4'))
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] }), { surfaceOp: 'append' })
+    expect(serializeTrajectory(session, 0)).toBe('')
+    expect(serializeTrajectory(session, -5)).toBe('')
+  })
+
+  it('annotates assistant tool calls in the digest layer with tool names', () => {
+    const session = Session.create(SessionId('traj-5'))
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({
+        source: { kind: 'model', provider: 'p' },
+        content: [
+          { type: 'text', text: 'summary ' + 'y'.repeat(300) },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      }),
+    } as never, { surfaceOp: 'append' })
+    const text = serializeTrajectory(session, 12_000, 0.5)
+    expect(text).toContain('[tools: bash]')
   })
 })
 

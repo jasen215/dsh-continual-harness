@@ -324,7 +324,11 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
             ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
           }, options.completeFor(request.agent), request.signal, history, header?.system)
         } else {
-          const trajectoryText = options.store.trajectory(request.agent, maxTrajectoryChars)
+          const trajectoryText = options.store.trajectory(
+            request.agent,
+            maxTrajectoryChars,
+            options.trajectorySignalRatio ?? 0.5,
+          )
           proposal = await planRefinement({
             stateOverview,
             historyText,

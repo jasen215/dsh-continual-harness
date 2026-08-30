@@ -36,8 +36,8 @@ import {
 import { aggregateUsage } from './usage.ts'
 import type { HarnessState, MaterializationResult, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
-/** Default tail-biased trajectory window for planning. */
-export const DEFAULT_TRAJECTORY_MAX_CHARS = 80_000
+/** Default tail-biased trajectory window for planning (spec §2.3: 12k). */
+export const DEFAULT_TRAJECTORY_MAX_CHARS = 12_000
 
 /** Options for a store commit. */
 export interface CommitOptions {
@@ -202,8 +202,8 @@ export class HarnessStore {
   }
 
   /** Tail-biased trajectory serialization for the planner. */
-  trajectory(agent: Agent, maxChars: number = DEFAULT_TRAJECTORY_MAX_CHARS): string {
-    return serializeTrajectory(agent.session, maxChars)
+  trajectory(agent: Agent, maxChars: number = DEFAULT_TRAJECTORY_MAX_CHARS, signalRatio = 0.5): string {
+    return serializeTrajectory(agent.session, maxChars, signalRatio)
   }
 
   /**
@@ -326,32 +326,75 @@ export class HarnessStore {
   }
 }
 
-/** Serialize a session's user/assistant text turns, tail-biased. */
-export function serializeTrajectory(session: Session, maxChars: number): string {
-  const lines: string[] = []
-  for (const event of session.events) {
-    let text = ''
-    if (event.type === 'user/message') {
-      text = textOf(event.data.content)
-    } else if (event.type === 'assistant/message') {
-      text = textOf(event.data.message.content)
-    } else {
-      continue
-    }
-    if (!text.trim()) continue
-    lines.push(`[${event.type}] ${text}`)
-  }
-  const joined = lines.join('\n\n')
-  if (joined.length <= maxChars) return joined
-  const cut = joined.slice(-maxChars)
-  return `… (truncated, showing the last ${maxChars} characters of ${joined.length})\n\n${cut}`
+// messageText() is defined in Task 4 Step 4 (exported, shared with the
+// coordinator's prefix truncation). Reuse it here — do not define a second
+// textOf.
+
+function digestOf(role: 'user' | 'assistant', blocks: ReadonlyArray<{ type: string; text?: unknown; name?: unknown }>): string {
+  const text = messageText({ role, content: blocks } as Message)
+  const toolNames = blocks
+    .filter(block => block.type === 'tool-call' && typeof block.name === 'string')
+    .map(block => block.name as string)
+  const limit = role === 'user' ? 300 : 200
+  const cut = text.length > limit ? `${text.slice(0, limit)}…` : text
+  const tools = toolNames.length > 0 ? ` [tools: ${[...new Set(toolNames)].join(', ')}]` : ''
+  return `[${role}] ${cut}${tools}`
 }
 
-function textOf(blocks: ReadonlyArray<{ type: string; text?: unknown }>): string {
-  return blocks
-    .filter(block => block.type === 'text' && typeof block.text === 'string')
-    .map(block => block.text as string)
-    .join('\n')
+/**
+ * Two-layer tail-biased trajectory (spec §2.3): the signal layer keeps the
+ * most recent messages verbatim up to `maxChars * signalRatio`; the digest
+ * layer truncates everything older (user 300 / assistant 200 chars + tool
+ * names). Input is the surface-ordered derived history — the same messages
+ * the host loop already sent — so no event-structure re-parsing is needed.
+ *
+ * Compatibility: the signal layer labels lines `[user/message]` /
+ * `[assistant/message]` exactly like the pre-refactor serializer, so the
+ * existing store.spec assertions keep passing; the digest layer uses the
+ * shorter `[user]` / `[assistant]` tags.
+ */
+export function serializeTrajectory(session: Session, maxChars: number, signalRatio = 0.5): string {
+  if (maxChars <= 0) return ''
+  const messages = session.deriveMessages()
+  const signalBudget = Math.floor(maxChars * Math.min(1, Math.max(0, signalRatio)))
+  const digestBudget = maxChars - signalBudget
+
+  // Signal layer: verbatim tail, newest last, labelled with the legacy
+  // event-style tags so existing tests and downstream consumers are stable.
+  // tool/result messages (role 'user', first block 'tool-result') carry no
+  // planner-relevant text — skip them entirely instead of calling messageText.
+  // A message longer than the digest's per-role cap is digested instead of
+  // kept verbatim: it would burn the signal budget without adding readable
+  // context, and the digest already carries its truncated form.
+  const signalLines: string[] = []
+  let signalUsed = 0
+  let split = messages.length
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!
+    if (message.content[0]?.type === 'tool-result') continue
+    const text = messageText(message)
+    const cap = message.role === 'assistant' ? 200 : 300
+    if (text.length > cap) break
+    const tag = message.role === 'assistant' ? 'assistant/message' : 'user/message'
+    const line = `[${tag}] ${text}`
+    if (signalUsed + line.length > signalBudget) break
+    signalLines.unshift(line)
+    signalUsed += line.length
+    split = i
+  }
+  // tool/result messages (role 'user', first block 'tool-result') carry no
+  // planner text — messageText yields '' — so their `[user] ` digest lines
+  // are dropped rather than kept as empty noise.
+  const digestLines = messages.slice(0, split)
+    .map(m => digestOf(m.role as 'user' | 'assistant', m.content))
+    .filter(line => line.trim() !== '')
+  let digest = digestLines.join('\n')
+  if (digest.length > digestBudget) {
+    digest = `… (truncated, showing the first ${digestBudget} characters of ${digest.length})\n\n${digest.slice(0, digestBudget)}`
+  }
+  const signal = signalLines.join('\n\n')
+  if (!signal) return digest
+  return digest ? `${digest}\n\n${signal}` : signal
 }
 
 /** Serialized text of one derived message (text blocks only; skips tool-result). */
