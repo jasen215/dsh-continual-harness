@@ -9,7 +9,7 @@
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { foldRequestHeader } from '@deepseek-ai/dsh-session'
-import { planRefinement, scopeInstruction } from './planner.ts'
+import { planRefinement, scopeInstruction, TRUNCATED_JSON_ERROR } from './planner.ts'
 import type { Complete } from './planner.ts'
 import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } from './cache-detect.ts'
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
@@ -316,13 +316,35 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           // covers direct coordinator construction (tests).
           const prefixCap = options.plannerPrefixMaxChars ?? 12_000
           const history = sanitizePrefix(truncatePrefix(request.agent.session.deriveMessages(), prefixCap))
-          proposal = await planRefinement({
-            stateOverview,
-            historyText,
-            trajectoryText: '', // Route A: the session prefix already carries the context
-            scopeInstruction: scopeInstruction(request.scope === 'global'),
-            ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
-          }, options.completeFor(request.agent), request.signal, history, header?.system)
+          try {
+            proposal = await planRefinement({
+              stateOverview,
+              historyText,
+              trajectoryText: '', // Route A: the session prefix already carries the context
+              scopeInstruction: scopeInstruction(request.scope === 'global'),
+              ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
+            }, options.completeFor(request.agent), request.signal, history, header?.system)
+          } catch (error) {
+            // Live evidence (2026-08-30): even sanitized, the Route A warm prefix
+            // lets the model drift into "continue the conversation" narration
+            // often enough to fail (~40-70% per probe), so a truncated Route A
+            // reply falls back to Route B (no prefix, trajectory summary) instead
+            // of failing the refinement outright. Route B measured stable (6/6).
+            if (!(error instanceof Error) || error.message !== TRUNCATED_JSON_ERROR) throw error
+            options.logger?.info('harness refine planning route: A -> B (Route A reply truncated; falling back)')
+            const trajectoryText = options.store.trajectory(
+              request.agent,
+              maxTrajectoryChars,
+              options.trajectorySignalRatio ?? 0.5,
+            )
+            proposal = await planRefinement({
+              stateOverview,
+              historyText,
+              trajectoryText,
+              scopeInstruction: scopeInstruction(request.scope === 'global'),
+              ...(request.instructions === undefined ? {} : { instructions: request.instructions }),
+            }, options.completeFor(request.agent), request.signal)
+          }
         } else {
           const trajectoryText = options.store.trajectory(
             request.agent,

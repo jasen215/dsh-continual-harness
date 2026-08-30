@@ -640,4 +640,72 @@ describe('route A planning input', () => {
       .flatMap(message => message.content ?? []).some(block => block.type === 'tool-call')).toBe(true)
     expect(store.trajectory).not.toHaveBeenCalled()
   })
+
+  it('falls back to Route B when the Route A reply is truncated', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; system?: string; user: string; prefix?: readonly unknown[] }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', system, user, prefix: prefix ? [...prefix] : undefined })
+      if (prefix !== undefined) throw new Error('the model stopped before completing its JSON object; the reply was truncated or empty')
+      return '{"id":"refine_fb","summary":"fallback","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'FALLBACK TRAJECTORY') }
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A.
+    const liveAgent = agent('route-a-fallback')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    // Route A attempted first (with the session prefix), then Route B (no prefix).
+    expect(calls).toHaveLength(2)
+    expect(calls[0].route).toBe('A')
+    expect(calls[1].route).toBe('B')
+    expect(calls[1].prefix).toBeUndefined()
+    // Route B restores the trajectory block; the planning rules ride the
+    // default REFINEMENT_SYSTEM_PROMPT system slot (no explicit system passed).
+    expect(calls[1].user).toContain('FALLBACK TRAJECTORY')
+    expect(calls[1].system).toContain('continual harness refiner')
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+    // The fallback transition is observable (spec §2.4).
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A -> B (Route A reply truncated; falling back)')
+  })
+
+  it('does not fall back for non-truncation Route A failures', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const complete = async (_system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      if (prefix !== undefined) throw new Error('harness refinement planning failed: model request failed')
+      throw new Error('should not reach Route B')
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'NOPE') }
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-hardfail')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    expect(result.failedAt).toBe('planning')
+    expect(result.error?.code).toBe('planning-failed')
+    expect(store.trajectory).not.toHaveBeenCalled()
+  })
 })
