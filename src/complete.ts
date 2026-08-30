@@ -7,7 +7,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
 import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
 import { PLUGIN_NAME } from './domain.ts'
 import type { Complete } from './planner.ts'
@@ -28,6 +28,7 @@ async function streamToText(
     model: string
     system: string
     user: string
+    prefix: readonly Message[] | undefined
     maxTokens: number
     signal: AbortSignal | undefined
     deadlineMs: number
@@ -49,10 +50,13 @@ async function streamToText(
       model: params.model,
       system: params.system,
       maxTokens: params.maxTokens,
-      messages: [createUserMessage({
-        source: { kind: 'plugin', plugin: PLUGIN_NAME },
-        content: [{ type: 'text', text: params.user }],
-      })],
+      messages: [
+        ...(params.prefix ?? []),
+        createUserMessage({
+          source: { kind: 'plugin', plugin: PLUGIN_NAME },
+          content: [{ type: 'text', text: params.user }],
+        }),
+      ],
       signal: controller.signal,
     })) {
       if (chunk.type === 'text-delta') text += chunk.text
@@ -99,7 +103,7 @@ export function completeViaAgent(
   maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS,
   options: { deadlineMs?: number } = {},
 ): Complete {
-  return async (system, user, signal) => {
+  return async (system, user, signal, prefix) => {
     const provider = agent.options.provider
     const model = agent.options.model
     if (!provider || !model) {
@@ -110,6 +114,7 @@ export function completeViaAgent(
       model,
       system,
       user,
+      prefix,
       maxTokens: Math.min(maxTokens, agent.options.maxTokens ?? maxTokens),
       signal,
       deadlineMs: options.deadlineMs ?? DEFAULT_COMPLETE_DEADLINE_MS,
@@ -136,11 +141,12 @@ export function completeViaModel(
   maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS,
   options: { deadlineMs?: number } = {},
 ): Complete {
-  return async (system, user, signal) => streamToText(ctx, {
+  return async (system, user, signal, prefix) => streamToText(ctx, {
     provider,
     model,
     system,
     user,
+    prefix,
     maxTokens,
     signal,
     deadlineMs: options.deadlineMs ?? DEFAULT_COMPLETE_DEADLINE_MS,

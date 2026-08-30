@@ -4,6 +4,7 @@
  * @module dsh-continual-harness
  */
 
+import type { Message } from '@deepseek-ai/dsh-llm'
 import type {
   AutoRefineReview,
   AutoRefineReviewContext,
@@ -12,7 +13,12 @@ import type {
 } from './types.ts'
 
 /** One non-reasoning LLM call: system + user prompt in, plain text out. */
-export type Complete = (system: string, user: string, signal?: AbortSignal) => Promise<string>
+export type Complete = (
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+  prefix?: readonly Message[],
+) => Promise<string>
 
 /** Raised when the model reply is truncated before its JSON object completes. */
 export const TRUNCATED_JSON_ERROR = 'the model stopped before completing its JSON object; the reply was truncated or empty'

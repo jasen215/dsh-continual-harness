@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { completeViaModel } from '../src/complete.ts'
 
@@ -57,5 +58,38 @@ describe('completeViaModel finish handling', () => {
     })
     const complete = completeViaModel(ctx, 'prov', 'model')
     await expect(complete('system', 'user')).resolves.toBe('{"ok":true}')
+  })
+})
+
+describe('completeViaModel prefix messages', () => {
+  it('places prefix messages before the trailing user message', async () => {
+    let seen: unknown[] | undefined
+    const ctx = ctxWith({
+      async *stream(request: { messages?: unknown[] }) {
+        seen = request.messages
+        yield { type: 'text-delta', text: '{"ok":true}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+    const prefix = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'old turn' }] })]
+    const complete = completeViaModel(ctx, 'prov', 'model')
+    await complete('system', 'plan now', undefined, prefix)
+    expect(seen).toHaveLength(2)
+    expect(seen?.[0]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'old turn' }] })
+    expect(seen?.[1]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'plan now' }] })
+  })
+
+  it('omits prefix when not provided (legacy behavior unchanged)', async () => {
+    let seen: unknown[] | undefined
+    const ctx = ctxWith({
+      async *stream(request: { messages?: unknown[] }) {
+        seen = request.messages
+        yield { type: 'text-delta', text: '{"ok":true}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    })
+    const complete = completeViaModel(ctx, 'prov', 'model')
+    await complete('system', 'user only')
+    expect(seen).toHaveLength(1)
   })
 })
