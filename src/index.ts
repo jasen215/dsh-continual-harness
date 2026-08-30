@@ -226,6 +226,7 @@ export function apply(ctx: Context, config: Config): void {
   // and automatic gate all see one report per commit.
   const coordinator = createRefineCoordinator({
     store,
+    logger: ctx.logger('harness'),
     completeFor: agent => completeViaAgent(ctx, agent, config.plannerMaxTokens),
     maxTrajectoryChars: config.maxTrajectoryChars,
     // exactOptionalPropertyTypes: only present the optional fields when set.

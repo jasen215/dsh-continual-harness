@@ -556,6 +556,7 @@ describe('createRefineCoordinator', () => {
 
 describe('route A planning input', () => {
   it('passes derived session messages as prefix and drops the trajectory block', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
     const seen: { system?: string; user?: string; prefix?: unknown[] } = {}
     const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
       seen.system = system
@@ -568,7 +569,7 @@ describe('route A planning input', () => {
       store,
       completeFor: () => complete as unknown as Complete,
       maxTrajectoryChars: 12_000,
-      logger: { info: vi.fn(), warn: vi.fn() },
+      logger,
     })
     // Seed one cached assistant/message so the detector routes A.
     const liveAgent = agent('route-a-agent')
@@ -581,6 +582,9 @@ describe('route A planning input', () => {
 
     const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
     expect(result.commitStatus).toBe('not-committed')
+    // Route-selection observability (spec §2.4): the coordinator logs which
+    // planning route was chosen via the injected logger.
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
     expect(seen.prefix?.length).toBeGreaterThan(0)
     // Route A moves the planning rules into the trailing user message and
     // omits the trajectory block; the session prefix carries the context.
