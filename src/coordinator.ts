@@ -15,7 +15,7 @@ import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } fr
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
-import { truncatePrefix } from './store.ts'
+import { sanitizePrefix, truncatePrefix } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { DiagnosticRunner } from './diagnostics.ts'
@@ -315,7 +315,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           // DEFAULT_TRAJECTORY_MAX_CHARS fallback; the 12k local default only
           // covers direct coordinator construction (tests).
           const prefixCap = options.plannerPrefixMaxChars ?? 12_000
-          const history = truncatePrefix(request.agent.session.deriveMessages(), prefixCap)
+          const history = sanitizePrefix(truncatePrefix(request.agent.session.deriveMessages(), prefixCap))
           proposal = await planRefinement({
             stateOverview,
             historyText,

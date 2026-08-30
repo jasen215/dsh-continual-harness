@@ -591,4 +591,53 @@ describe('route A planning input', () => {
     expect(seen.user).toContain('continual harness refiner')
     expect(store.trajectory).not.toHaveBeenCalled()
   })
+
+  it('sanitizes assistant narration out of the Route A prefix', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const seen: { prefix?: unknown[] } = {}
+    const complete = async (_system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      seen.prefix = prefix ? [...prefix] : undefined
+      return '{"id":"refine_san","summary":"sanitized","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') }
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    // Seed user context plus one cached assistant/message that narrates its
+    // last tool call (text + reasoning) so the detector routes A and the
+    // prefix would otherwise echo that narration back to the planner.
+    const liveAgent = agent('route-a-sanitize')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({
+        source: { kind: 'model', provider: 'p' },
+        content: [
+          { type: 'reasoning', text: 'thinking' },
+          { type: 'text', text: 'narration' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        ],
+      }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
+    expect(seen.prefix?.length).toBeGreaterThan(0)
+    // Ruling 11: the planner must not receive the model's own recent narration.
+    const messages = seen.prefix as { role?: string; content?: { type: string }[] }[]
+    expect(messages.flatMap(message => message.content ?? []).filter(block => block.type === 'reasoning')).toEqual([])
+    expect(messages.filter(message => message.role === 'assistant')
+      .flatMap(message => message.content ?? []).filter(block => block.type === 'text')).toEqual([])
+    // Context survives: user text and the assistant tool-call block are preserved.
+    expect(messages.some(message => message.role === 'user'
+      && message.content?.some(block => block.type === 'text'))).toBe(true)
+    expect(messages.filter(message => message.role === 'assistant')
+      .flatMap(message => message.content ?? []).some(block => block.type === 'tool-call')).toBe(true)
+    expect(store.trajectory).not.toHaveBeenCalled()
+  })
 })

@@ -437,3 +437,25 @@ export function truncatePrefix(messages: readonly Message[], maxChars: number): 
   }
   return prefix
 }
+
+/**
+ * Route A prefix sanitization: strip assistant narration (text/reasoning
+ * blocks) from derived session messages so the planning model does not treat
+ * the call as a conversation continuation and echo its own recent tool-call
+ * narration (see Ruling 11). User text, tool-call and tool-result blocks are
+ * preserved — the prefix keeps its context and cache value.
+ */
+export function sanitizePrefix(messages: readonly Message[]): Message[] {
+  return messages
+    .map(message => {
+      const content = message.content.flatMap(block => {
+        if (block.type === 'reasoning') return []
+        if (message.role === 'assistant' && block.type === 'text') return []
+        return [block]
+      })
+      return content.length === message.content.length
+        ? message
+        : { ...message, content }
+    })
+    .filter(message => message.content.length > 0)
+}

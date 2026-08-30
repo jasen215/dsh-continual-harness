@@ -6,7 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { HarnessStore, serializeTrajectory, truncatePrefix } from '../src/store.ts'
+import { HarnessStore, sanitizePrefix, serializeTrajectory, truncatePrefix } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import { getGlobalHarnessStateDir, getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from '../src/storage.ts'
 import type { RefinementProposal } from '../src/types.ts'
@@ -759,5 +759,74 @@ describe('truncatePrefix', () => {
     const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] })
     // tool-result text is '' → zero budget; both fit under any cap ≥ 2
     expect(truncatePrefix([tool, user], 5)).toEqual([tool, user])
+  })
+})
+
+describe('sanitizePrefix', () => {
+  it('keeps user text and tool-result blocks intact', () => {
+    const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] })
+    const toolResult = createToolResultMessage({ callId: 'c1', content: [{ type: 'text', text: 'result' }], isError: false })
+    const out = sanitizePrefix([user, toolResult])
+    expect(out).toEqual([user, toolResult])
+  })
+
+  it('strips assistant text and reasoning blocks, keeping tool-call blocks', () => {
+    const assistant = createAssistantMessage({
+      source: { provider: 'p', model: 'm' },
+      content: [
+        { type: 'reasoning', text: 'thinking' },
+        { type: 'text', text: 'narration' },
+        { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+      ],
+    })
+    const [out] = sanitizePrefix([assistant])
+    expect(out?.content).toEqual([{ type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' }])
+  })
+
+  it('strips reasoning blocks from user messages too', () => {
+    const user = createUserMessage({
+      source: { kind: 'user' },
+      content: [{ type: 'reasoning', text: 'internal' }, { type: 'text', text: 'ask' }],
+    })
+    const [out] = sanitizePrefix([user])
+    expect(out?.content).toEqual([{ type: 'text', text: 'ask' }])
+  })
+
+  it('returns the same message identity when there is nothing to strip', () => {
+    const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] })
+    const [out] = sanitizePrefix([user])
+    expect(out).toBe(user)
+  })
+
+  it('does not mutate the input messages', () => {
+    const assistant = createAssistantMessage({
+      source: { provider: 'p', model: 'm' },
+      content: [{ type: 'reasoning', text: 'thinking' }, { type: 'text', text: 'narration' }],
+    })
+    const out = sanitizePrefix([assistant])
+    // Input (frozen by the dsh-llm helper) still carries both blocks afterwards.
+    expect(assistant.content.map(block => block.type)).toEqual(['reasoning', 'text'])
+    // The sanitized result is a fresh object — never the input — and since all
+    // content was stripped, the emptied message is dropped rather than kept.
+    expect(out).not.toContain(assistant)
+    expect(out).toEqual([])
+  })
+
+  it('drops a message whose content becomes empty after stripping', () => {
+    const narrationOnly = createAssistantMessage({
+      source: { provider: 'p', model: 'm' },
+      content: [{ type: 'text', text: 'final narration with no tool call' }],
+    })
+    const reasoningOnly = createAssistantMessage({
+      source: { provider: 'p', model: 'm' },
+      content: [{ type: 'reasoning', text: 'thinking' }],
+    })
+    const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] })
+    const out = sanitizePrefix([narrationOnly, reasoningOnly, user])
+    // Emptied assistant turns are dropped, never kept as content: [].
+    expect(out).not.toContain(narrationOnly)
+    expect(out).not.toContain(reasoningOnly)
+    expect(out).toHaveLength(1)
+    expect(out).toEqual([user])
   })
 })
