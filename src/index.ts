@@ -14,6 +14,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { requireGlobalApproval } from './approval.ts'
+import {
+  DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS, DEFAULT_TOKEN_PER_CHAR_RATIO, MIN_PLANNER_OUTPUT_TOKENS,
+} from './budget.ts'
 import { completeViaAgent, DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import type { PlannerPrefixCacheMode } from './cache-detect.ts'
 import { createRefineCoordinator } from './coordinator.ts'
@@ -28,6 +31,7 @@ import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
+import { installHostRequestSnapshot } from './request-snapshot.ts'
 import { HarnessStore } from './store.ts'
 import { registerBenchmarkTool, registerHarnessTool, registerHarnessWrapup } from './tool.ts'
 import type { RefinementKind } from './types.ts'
@@ -95,6 +99,12 @@ export interface Config {
   plannerPrefixMaxChars?: number
   /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
   trajectorySignalRatio?: number
+  /** Shared char→token estimate ratio for planner budget control (A and B). */
+  plannerTokenPerCharRatio?: number
+  /** Tokens reserved inside the context window for safety. */
+  plannerSafetyReserveTokens?: number
+  /** Minimum output tokens a planner route must be able to produce. */
+  minPlannerOutputTokens?: number
   /** Automatic refinement gate settings. */
   autoRefine?: AutoRefineConfig
   /** Require explicit human approval before a global refinement commits. */
@@ -165,6 +175,9 @@ export const Config: z<Config> = z.object({
   // `.optional()` combinator); absent stays absent → `apply()` applies the cap
   plannerPrefixMaxChars: z.number().step(1).min(1),
   trajectorySignalRatio: z.number().min(0).max(1).default(DEFAULT_TRAJECTORY_SIGNAL_RATIO),
+  plannerTokenPerCharRatio: z.number().min(0).max(1).default(DEFAULT_TOKEN_PER_CHAR_RATIO),
+  plannerSafetyReserveTokens: z.number().step(1).min(0).default(DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS),
+  minPlannerOutputTokens: z.number().step(1).min(1).default(MIN_PLANNER_OUTPUT_TOKENS),
   autoRefine: z.object({
     enabled: z.boolean().default(true),
     turnInterval: z.number().step(1).min(1).default(DEFAULT_TURN_INTERVAL),
@@ -224,11 +237,26 @@ export function apply(ctx: Context, config: Config): void {
   // projection for both the tool and the automatic driver. The same
   // coordinator carries the post-apply diagnostics runner, so tool, command,
   // and automatic gate all see one report per commit.
+  const hostRequests = installHostRequestSnapshot(ctx)
   const coordinator = createRefineCoordinator({
     store,
     logger: ctx.logger('harness'),
     completeFor: agent => completeViaAgent(ctx, agent, config.plannerMaxTokens),
     maxTrajectoryChars: config.maxTrajectoryChars,
+    hostRequests,
+    resolveContextWindow: async (provider, model, signal) => {
+      try {
+        const info = await ctx.llm.resolveModelInfo(provider, model, signal)
+        return info?.context?.contextWindow
+      } catch {
+        return undefined
+      }
+    },
+    // exactOptionalPropertyTypes: only present the optional fields when set.
+    ...(config.plannerTokenPerCharRatio === undefined ? {} : { plannerTokenPerCharRatio: config.plannerTokenPerCharRatio }),
+    ...(config.plannerSafetyReserveTokens === undefined ? {} : { plannerSafetyReserveTokens: config.plannerSafetyReserveTokens }),
+    ...(config.minPlannerOutputTokens === undefined ? {} : { minPlannerOutputTokens: config.minPlannerOutputTokens }),
+    plannerMaxTokens: config.plannerMaxTokens,
     // exactOptionalPropertyTypes: only present the optional fields when set.
     ...(config.plannerPrefixCache === undefined ? {} : { plannerPrefixCache: config.plannerPrefixCache }),
     plannerPrefixMaxChars: config.plannerPrefixMaxChars ?? DEFAULT_TRAJECTORY_MAX_CHARS,

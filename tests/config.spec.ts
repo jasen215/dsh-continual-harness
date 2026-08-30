@@ -22,4 +22,22 @@ describe('config defaults', () => {
   it('rejects invalid plannerPrefixCache values', () => {
     expect(() => Config({ ...base, plannerPrefixCache: 'invalid' as never } as never)).toThrow()
   })
+  it('defaults plannerTokenPerCharRatio to 0.5', () => {
+    const cfg = Config(base as never)
+    expect(cfg.plannerTokenPerCharRatio).toBe(0.5)
+  })
+  it('defaults plannerSafetyReserveTokens to 1024', () => {
+    const cfg = Config(base as never)
+    expect(cfg.plannerSafetyReserveTokens).toBe(1024)
+  })
+  it('defaults minPlannerOutputTokens to 4096', () => {
+    const cfg = Config(base as never)
+    expect(cfg.minPlannerOutputTokens).toBe(4096)
+  })
+  it('accepts explicit plannerTokenPerCharRatio values', () => {
+    expect(Config({ ...base, plannerTokenPerCharRatio: 0.25 } as never).plannerTokenPerCharRatio).toBe(0.25)
+  })
+  it('rejects out-of-range plannerTokenPerCharRatio values', () => {
+    expect(() => Config({ ...base, plannerTokenPerCharRatio: 1.5 } as never)).toThrow()
+  })
 })
