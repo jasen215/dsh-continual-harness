@@ -13,6 +13,8 @@ import type { Complete, CompleteContext } from './planner.ts'
 import {
   DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS,
   DEFAULT_TOKEN_PER_CHAR_RATIO,
+  estimateCharsTokens,
+  estimateMessagesChars,
   MIN_PLANNER_OUTPUT_TOKENS,
   plannerOutputBudget,
 } from './budget.ts'
@@ -108,8 +110,6 @@ export interface RefineCoordinatorOptions {
   diagnostics?: DiagnosticRunner
   /** Planner prefix-cache routing: auto-detect, force session prefix, or off. */
   plannerPrefixCache?: PlannerPrefixCacheMode
-  /** Route A session-prefix char cap; already defaulted upstream in `apply()`. */
-  plannerPrefixMaxChars?: number
   /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
   trajectorySignalRatio?: number
   /** Optional plugin logger for route-selection observability. */
@@ -282,18 +282,25 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
   const safetyReserveTokens = options.plannerSafetyReserveTokens ?? DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS
   const minPlannerOutputTokens = options.minPlannerOutputTokens ?? MIN_PLANNER_OUTPUT_TOKENS
 
-  /** Remaining output budget for a planner call, or undefined when no window is resolvable. */
-  async function outputBudgetFor(inputChars: number, provider: string, model: string, signal: AbortSignal | undefined): Promise<number | undefined> {
-    if (options.resolveContextWindow === undefined) return undefined
+  /**
+   * Output budget for a planner call plus the resolved context window; both
+   * undefined when no window is resolvable. The window is surfaced so Route A
+   * can run its prefix-inclusive feasibility check on the same resolution.
+   */
+  async function outputBudgetFor(inputChars: number, provider: string, model: string, signal: AbortSignal | undefined): Promise<{ outputBudget: number | undefined; contextWindow: number | undefined }> {
+    if (options.resolveContextWindow === undefined) return { outputBudget: undefined, contextWindow: undefined }
     const contextWindow = await options.resolveContextWindow(provider, model, signal)
-    if (contextWindow === undefined) return undefined
-    return plannerOutputBudget({
+    if (contextWindow === undefined) return { outputBudget: undefined, contextWindow: undefined }
+    return {
       contextWindow,
-      inputChars,
-      tokenPerCharRatio,
-      configuredMaxTokens: plannerMaxTokens,
-      safetyReserveTokens,
-    })
+      outputBudget: plannerOutputBudget({
+        contextWindow,
+        inputChars,
+        tokenPerCharRatio,
+        configuredMaxTokens: plannerMaxTokens,
+        safetyReserveTokens,
+      }),
+    }
   }
   return {
     async execute(request) {
@@ -350,17 +357,28 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       })
       const planWithTrajectory = async (): Promise<{ id: string; summary: string; edits: unknown[] }> => {
         const input = planInput(options.store.trajectory(request.agent, maxTrajectoryChars, trajectorySignalRatio))
+        // The rules ride Route B's system slot (planRefinement falls back to
+        // REFINEMENT_SYSTEM_PROMPT); count them so B treats the rules block
+        // exactly like Route A does. Elements mirror the user-string shapes
+        // planRefinement actually builds.
         const inputChars = [
+          REFINEMENT_SYSTEM_PROMPT,
           `# Store scope\n${input.scopeInstruction}`,
           input.stateOverview,
           input.historyText,
-          input.trajectoryText,
-          input.instructions ?? '',
+          input.trajectoryText === '' ? '' : `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
+          input.instructions ? `# Focus instructions\n${input.instructions}` : '',
         ].filter(Boolean).join('\n\n').length
         const provider = request.agent.options.provider ?? ''
         const model = request.agent.options.model ?? ''
-        const outputBudget = await outputBudgetFor(inputChars, provider, model, request.signal)
-        const maxTokens = outputBudget === undefined ? undefined : Math.max(outputBudget, 0)
+        const { outputBudget } = await outputBudgetFor(inputChars, provider, model, request.signal)
+        // Minimum-output feasibility gate (spec §2.3.5): an infeasible request
+        // is never sent — the throw lands in the outer catch and maps to
+        // planning-failed instead of issuing a call that cannot fit.
+        if (outputBudget !== undefined && outputBudget < minPlannerOutputTokens) {
+          throw new Error('planner output budget below minimum viable proposal size')
+        }
+        const maxTokens = outputBudget
         const context: CompleteContext = maxTokens === undefined ? {} : { maxTokens }
         return planRefinement(input, complete, request.signal, undefined, undefined, context)
       }
@@ -381,22 +399,30 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           const sessionId = snapshot?.sessionId ?? session.id
 
           // Only the NEW planner content is budgeted; the cached prefix is never
-          // trimmed to fit. The total window still bounds the output budget.
+          // trimmed to fit (a prefix never reduces maxTokens). The total window
+          // still bounds feasibility: the prefix-inclusive check below makes an
+          // over-window prefix infeasible for Route A (→ B), never smaller output.
+          const planInputContext = planInput('')
           const newInputChars = [
             REFINEMENT_SYSTEM_PROMPT, // rules move into the trailing user message
-            `# Store scope\n${planInput('').scopeInstruction}`,
-            planInput('').stateOverview,
-            planInput('').historyText,
-            planInput('').instructions ?? '',
+            `# Store scope\n${planInputContext.scopeInstruction}`,
+            planInputContext.stateOverview,
+            planInputContext.historyText,
+            planInputContext.instructions ? `# Focus instructions\n${planInputContext.instructions}` : '',
           ].filter(Boolean).join('\n\n').length
           const provider = snapshot?.provider ?? request.agent.options.provider ?? ''
           const model = snapshot?.model ?? request.agent.options.model ?? ''
-          const outputBudget = await outputBudgetFor(newInputChars, provider, model, request.signal)
-          const maxTokens = outputBudget === undefined ? undefined : Math.max(outputBudget, 0)
+          const { outputBudget, contextWindow } = await outputBudgetFor(newInputChars, provider, model, request.signal)
+          const maxTokens = outputBudget
 
-          // The cached prefix is allowed to consume the window; only a zero/too-small
-          // remaining output budget makes Route A infeasible.
-          const feasible = outputBudget === undefined || outputBudget >= minPlannerOutputTokens
+          // Feasibility-only gate: Route A must leave at least
+          // minPlannerOutputTokens of room for the planner output after the FULL
+          // request — cached prefix (messages + system) plus new planner content
+          // plus the safety reserve. The prefix is never shrunk to fit; an
+          // over-window prefix makes A infeasible and we fall through to B.
+          const prefixTokens = estimateCharsTokens(estimateMessagesChars(prefix) + (system?.length ?? 0), tokenPerCharRatio)
+          const newInputTokens = estimateCharsTokens(newInputChars, tokenPerCharRatio)
+          const feasible = outputBudget === undefined || (contextWindow !== undefined && contextWindow - prefixTokens - newInputTokens - safetyReserveTokens >= minPlannerOutputTokens)
           if (feasible) {
             try {
               const context: CompleteContext = {
@@ -404,7 +430,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
                 ...(sessionId === undefined ? {} : { sessionId }),
                 ...(maxTokens === undefined ? {} : { maxTokens }),
               }
-              proposal = await planRefinement(planInput(''), complete, request.signal, prefix, system, context)
+              proposal = await planRefinement(planInputContext, complete, request.signal, prefix, system, context)
             } catch (error) {
               // Silent fallback: an unusable Route A reply retries via Route B
               // (trajectory summary) without logging a fallback line (spec §2.2).

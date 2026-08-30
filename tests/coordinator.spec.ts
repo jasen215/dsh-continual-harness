@@ -167,12 +167,18 @@ function agentWithHeader(id = 'coordinator-agent'): Agent {
 }
 
 function snapshotRegistry(session: Session): { registry: HostRequestRegistry } {
+  // Deliberately DIFFERENT from the requestHeader/deriveMessages fallback: the
+  // snapshot carries its own system prompt and an extra synthetic message, so
+  // the tests prove the snapshot branch wins over the fallback (I-3).
   const snapshot: HostRequestSnapshot = {
     provider: 'test-provider',
     model: 'test-model',
-    system: 'session system prompt',
+    system: 'snapshot system prompt',
     tools: [{ name: 'read' }],
-    messages: session.deriveMessages(),
+    messages: [
+      ...session.deriveMessages(),
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'snapshot-only' }] }),
+    ],
     sessionId: session.id,
   }
   return {
@@ -638,6 +644,7 @@ describe('Route A planning input', () => {
     }
     const liveAgent = agentWithHeader('route-a-verbatim')
     const { registry } = snapshotRegistry(liveAgent.session)
+    const snapshotMessages = registry.latestFor(liveAgent.session.id)?.messages ?? []
     const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') } as unknown as HarnessStore
     const coordinator = createRefineCoordinator({
       store,
@@ -649,8 +656,14 @@ describe('Route A planning input', () => {
     })
     const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
     expect(result.commitStatus).toBe('committed')
-    expect(seen.system).toBe('session system prompt')
-    expect(seen.prefix).toEqual(liveAgent.session.deriveMessages()) // verbatim, includes assistant text
+    // The snapshot branch wins over the requestHeader/deriveMessages fallback:
+    // the prefix is the SNAPSHOT's messages verbatim — the derived list plus
+    // the synthetic 'snapshot-only' message — and the system prompt is the
+    // snapshot's, not the header's 'session system prompt'.
+    expect(seen.system).toBe('snapshot system prompt')
+    expect(seen.prefix).toEqual(snapshotMessages) // verbatim, includes assistant text + snapshot-only
+    expect(seen.prefix).toHaveLength(liveAgent.session.deriveMessages().length + 1)
+    expect(JSON.stringify(seen.prefix)).toContain('snapshot-only')
     expect(seen.context).toMatchObject({ tools: [{ name: 'read' }], sessionId: liveAgent.session.id })
     expect(store.trajectory).not.toHaveBeenCalled()
   })
@@ -758,7 +771,7 @@ describe('Route A planning input', () => {
     expect(store.trajectory).toHaveBeenCalledTimes(1)
   })
 
-  it('skips Route A straight to Route B when the remaining output budget is too small', async () => {
+  it('never sends an infeasible request: Route A skipped, then the Route B minimum-output gate throws', async () => {
     const logger = { info: vi.fn(), warn: vi.fn() }
     const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
     const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
@@ -783,10 +796,49 @@ describe('Route A planning input', () => {
     } as never, { surfaceOp: 'append' })
 
     const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    // The 1024-token window cannot fit even the new planner content: Route A's
+    // total-window check fails, and Route B's minimum-output gate (spec §2.3.5)
+    // throws instead of issuing a call that cannot fit. The throw lands in the
+    // outer catch → planning-failed; NO planner call is ever made.
+    expect(result.failedAt).toBe('planning')
+    expect(result.error?.code).toBe('planning-failed')
+    expect(result.error?.message).toBe('planner output budget below minimum viable proposal size')
+    expect(calls).toHaveLength(0)
+    expect(store.trajectory).toHaveBeenCalledTimes(1)
+    expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A')
+  })
+
+  it('skips Route A when the cached prefix alone overflows the window, letting Route B use the full budget', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const calls: { route: 'A' | 'B'; user: string; prefix?: readonly unknown[] | undefined }[] = []
+    const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user, prefix: prefix ? [...prefix] : undefined })
+      return '{"id":"refine_budget","summary":"budgeted","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'BUDGET B TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      resolveContextWindow: async () => 20_000,
+      logger,
+    })
+    // Seed one cached assistant/message so the detector routes A, plus a huge
+    // user message so the cached prefix alone (~15k tokens) overflows the window.
+    const liveAgent = agent('route-a-prefix-overflow')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'x'.repeat(30_000) }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
     expect(result.commitStatus).toBe('not-committed')
-    // Route A is detected but infeasible: the 1024-token window leaves less
-    // than MIN_PLANNER_OUTPUT_TOKENS of output budget, so Route B is used
-    // directly with no Route A call made.
+    // Route A is detected but infeasible: the 20k window minus the ~15k-token
+    // cached prefix leaves less than MIN_PLANNER_OUTPUT_TOKENS, so Route A is
+    // skipped (the prefix is never shrunk to fit — no A call, no trimmed A).
+    // Route B (trajectory summary, no prefix) still fits, so it is used directly.
     expect(calls).toHaveLength(1)
     expect(calls[0]?.route).toBe('B')
     expect(calls[0]?.prefix).toBeUndefined()

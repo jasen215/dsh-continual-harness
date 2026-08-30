@@ -90,11 +90,10 @@ export interface Config {
   /** Planner prefix-cache routing: auto-detect, force session prefix, or off. */
   plannerPrefixCache?: PlannerPrefixCacheMode
   /**
-   * Max characters for the Route A session prefix. Defaults to
-   * DEFAULT_TRAJECTORY_MAX_CHARS (12_000); overrides are explicit only.
-   * No per-call resolveModel: AgentOptions carries no contextWindow, and the
-   * async adapter lookup would add a failure branch to every plan. The 12k
-   * default plus the agent's own maxTokens output cap bound the worst case.
+   * Legacy compatibility key retained for schema compatibility only. Route A
+   * no longer truncates or caps the session prefix — it reuses the host-loop
+   * request snapshot verbatim (spec §2.2), so this value bounds nothing and is
+   * not forwarded to the coordinator. Kept so existing configs keep validating.
    */
   plannerPrefixMaxChars?: number
   /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
@@ -172,7 +171,8 @@ export const Config: z<Config> = z.object({
   // `protectedKinds` below and validates identically.
   plannerPrefixCache: z.union(['auto', 'session', 'off']).default('auto'),
   // object fields are optional unless `.required()` (schemastery v3 has no
-  // `.optional()` combinator); absent stays absent → `apply()` applies the cap
+  // `.optional()` combinator); accepted for schema compatibility only — Route A
+  // reuses the host prefix verbatim and never truncates it.
   plannerPrefixMaxChars: z.number().step(1).min(1),
   trajectorySignalRatio: z.number().min(0).max(1).default(DEFAULT_TRAJECTORY_SIGNAL_RATIO),
   plannerTokenPerCharRatio: z.number().min(0).max(1).default(DEFAULT_TOKEN_PER_CHAR_RATIO),
@@ -259,7 +259,6 @@ export function apply(ctx: Context, config: Config): void {
     plannerMaxTokens: config.plannerMaxTokens,
     // exactOptionalPropertyTypes: only present the optional fields when set.
     ...(config.plannerPrefixCache === undefined ? {} : { plannerPrefixCache: config.plannerPrefixCache }),
-    plannerPrefixMaxChars: config.plannerPrefixMaxChars ?? DEFAULT_TRAJECTORY_MAX_CHARS,
     ...(config.trajectorySignalRatio === undefined ? {} : { trajectorySignalRatio: config.trajectorySignalRatio }),
     ...(config.diagnosticsEnabled
       ? {
