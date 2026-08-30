@@ -1,18 +1,19 @@
 // tests/cache-detect.spec.ts
 import { describe, expect, it } from 'vitest'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { detectPlannerRoute, hasCacheEvidence } from '../src/cache-detect.ts'
 
 function stubAgent(session: Session): Agent {
+  const status: AgentStatus = 'running'
   return {
     id: session.id,
     options: { provider: 'p', model: 'm' },
     session,
     inbox: undefined as never,
-    get status() { return 'running' },
+    get status() { return status },
     ctx: new Context(),
     send: () => {}, followup: () => {}, steer: () => ({ outcome: Promise.resolve({ status: 'rejected' as const }) }),
     inject: () => {}, cancel() {}, runMaintenance: task => task(new AbortController().signal),
@@ -26,7 +27,7 @@ function cachedSession(): Session {
   session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
   session.append('assistant/message', {
     turn: 1, step: 1,
-    message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+    message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
     usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 60 },
   } as never, { surfaceOp: 'append' })
   return session
@@ -38,7 +39,7 @@ function uncachedSession(): Session {
   session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
   session.append('assistant/message', {
     turn: 1, step: 1,
-    message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+    message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
     usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 0 },
   } as never, { surfaceOp: 'append' })
   return session

@@ -299,6 +299,7 @@ export function apply(ctx: Context, config: Config): void {
     compact: autoRefine.compact,
     plannerMaxTokens: config.plannerMaxTokens,
     maxTrajectoryChars: config.maxTrajectoryChars,
+    trajectorySignalRatio: config.trajectorySignalRatio ?? 0.5,
     auditReviews: config.auditReviews,
   })
   if (config.logToFile) {

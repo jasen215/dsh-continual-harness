@@ -38,6 +38,8 @@ export interface DriverOptions {
   compact: boolean
   plannerMaxTokens: number
   maxTrajectoryChars: number
+  /** Route B: fraction of the trajectory budget reserved for the verbatim signal layer. */
+  trajectorySignalRatio: number
   /** Persist every gate verdict to `reviews.jsonl` under the harness home. */
   auditReviews: boolean
 }
@@ -229,7 +231,7 @@ export function registerHarnessDriver(
       const localState = store.localState(agent)
       const stateOverview = overviewForPrompt(mergeHarnessStates(store.globalState(), localState))
       const historyText = historyForPrompt(store.history(agent))
-      const trajectoryText = store.trajectory(agent, options.maxTrajectoryChars)
+      const trajectoryText = store.trajectory(agent, options.maxTrajectoryChars, options.trajectorySignalRatio)
       const review = await reviewAutoRefine({
         stateOverview,
         historyText,

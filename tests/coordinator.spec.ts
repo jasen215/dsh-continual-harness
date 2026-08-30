@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Complete } from '../src/planner.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
@@ -557,14 +557,14 @@ describe('createRefineCoordinator', () => {
 describe('route A planning input', () => {
   it('passes derived session messages as prefix and drops the trajectory block', async () => {
     const logger = { info: vi.fn(), warn: vi.fn() }
-    const seen: { system?: string; user?: string; prefix?: unknown[] } = {}
+    const seen: { system?: string | undefined; user?: string | undefined; prefix?: unknown[] | undefined } = {}
     const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
       seen.system = system
       seen.user = user
       seen.prefix = prefix ? [...prefix] : undefined
       return '{"id":"refine_a","summary":"a","edits":[]}'
     }
-    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') } as unknown as HarnessStore
     const coordinator = createRefineCoordinator({
       store,
       completeFor: () => complete as unknown as Complete,
@@ -576,7 +576,7 @@ describe('route A planning input', () => {
     liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
     liveAgent.session.append('assistant/message', {
       turn: 1, step: 1,
-      message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
       usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
     } as never, { surfaceOp: 'append' })
 
@@ -594,12 +594,12 @@ describe('route A planning input', () => {
 
   it('sanitizes assistant narration out of the Route A prefix', async () => {
     const logger = { info: vi.fn(), warn: vi.fn() }
-    const seen: { prefix?: unknown[] } = {}
+    const seen: { prefix?: unknown[] | undefined } = {}
     const complete = async (_system: string, _user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
       seen.prefix = prefix ? [...prefix] : undefined
       return '{"id":"refine_san","summary":"sanitized","edits":[]}'
     }
-    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'SHOULD NOT APPEAR') } as unknown as HarnessStore
     const coordinator = createRefineCoordinator({
       store,
       completeFor: () => complete as unknown as Complete,
@@ -614,11 +614,11 @@ describe('route A planning input', () => {
     liveAgent.session.append('assistant/message', {
       turn: 1, step: 1,
       message: createAssistantMessage({
-        source: { kind: 'model', provider: 'p' },
+        source: { provider: 'p', model: 'm' },
         content: [
           { type: 'reasoning', text: 'thinking' },
           { type: 'text', text: 'narration' },
-          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+          { type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{}' },
         ],
       }),
       usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
@@ -643,13 +643,13 @@ describe('route A planning input', () => {
 
   it('falls back to Route B when the Route A reply is truncated', async () => {
     const logger = { info: vi.fn(), warn: vi.fn() }
-    const calls: { route: 'A' | 'B'; system?: string; user: string; prefix?: readonly unknown[] }[] = []
+    const calls: { route: 'A' | 'B'; system?: string | undefined; user: string; prefix?: readonly unknown[] | undefined }[] = []
     const complete = async (system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
       calls.push({ route: prefix !== undefined ? 'A' : 'B', system, user, prefix: prefix ? [...prefix] : undefined })
       if (prefix !== undefined) throw new Error('the model stopped before completing its JSON object; the reply was truncated or empty')
       return '{"id":"refine_fb","summary":"fallback","edits":[]}'
     }
-    const store = { ...fakeStore(), trajectory: vi.fn(() => 'FALLBACK TRAJECTORY') }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'FALLBACK TRAJECTORY') } as unknown as HarnessStore
     const coordinator = createRefineCoordinator({
       store,
       completeFor: () => complete as unknown as Complete,
@@ -661,7 +661,7 @@ describe('route A planning input', () => {
     liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
     liveAgent.session.append('assistant/message', {
       turn: 1, step: 1,
-      message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
       usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
     } as never, { surfaceOp: 'append' })
 
@@ -669,13 +669,13 @@ describe('route A planning input', () => {
     expect(result.commitStatus).toBe('not-committed')
     // Route A attempted first (with the session prefix), then Route B (no prefix).
     expect(calls).toHaveLength(2)
-    expect(calls[0].route).toBe('A')
-    expect(calls[1].route).toBe('B')
-    expect(calls[1].prefix).toBeUndefined()
+    expect(calls[0]?.route).toBe('A')
+    expect(calls[1]?.route).toBe('B')
+    expect(calls[1]?.prefix).toBeUndefined()
     // Route B restores the trajectory block; the planning rules ride the
     // default REFINEMENT_SYSTEM_PROMPT system slot (no explicit system passed).
-    expect(calls[1].user).toContain('FALLBACK TRAJECTORY')
-    expect(calls[1].system).toContain('continual harness refiner')
+    expect(calls[1]?.user).toContain('FALLBACK TRAJECTORY')
+    expect(calls[1]?.system).toContain('continual harness refiner')
     expect(store.trajectory).toHaveBeenCalledTimes(1)
     // The fallback transition is observable (spec §2.4).
     expect(logger.info).toHaveBeenCalledWith('harness refine planning route: A -> B (Route A reply truncated; falling back)')
@@ -687,7 +687,7 @@ describe('route A planning input', () => {
       if (prefix !== undefined) throw new Error('harness refinement planning failed: model request failed')
       throw new Error('should not reach Route B')
     }
-    const store = { ...fakeStore(), trajectory: vi.fn(() => 'NOPE') }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'NOPE') } as unknown as HarnessStore
     const coordinator = createRefineCoordinator({
       store,
       completeFor: () => complete as unknown as Complete,
@@ -698,7 +698,7 @@ describe('route A planning input', () => {
     liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
     liveAgent.session.append('assistant/message', {
       turn: 1, step: 1,
-      message: createAssistantMessage({ source: { kind: 'model', provider: 'p' }, content: [{ type: 'text', text: 'ok' }] }),
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
       usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
     } as never, { surfaceOp: 'append' })
 

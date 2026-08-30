@@ -15,7 +15,7 @@ import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } fr
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
-import { sanitizePrefix, truncatePrefix } from './store.ts'
+import { DEFAULT_TRAJECTORY_MAX_CHARS, sanitizePrefix, truncatePrefix } from './store.ts'
 import { historyForPrompt, overviewForPrompt } from './render.ts'
 import { mergeHarnessStates } from './storage.ts'
 import type { DiagnosticRunner } from './diagnostics.ts'
@@ -256,7 +256,7 @@ async function attachDiagnostics(
 }
 
 export function createRefineCoordinator(options: RefineCoordinatorOptions): RefineCoordinator {
-  const maxTrajectoryChars = options.maxTrajectoryChars ?? 12_000
+  const maxTrajectoryChars = options.maxTrajectoryChars ?? DEFAULT_TRAJECTORY_MAX_CHARS
   const mutex = new KeyedMutex()
   return {
     async execute(request) {
@@ -312,9 +312,9 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           // Task 4: cap the Route A session prefix tail-biased so a long session
           // cannot blow the planning context (spec §2.2). `plannerPrefixMaxChars`
           // is a resolved number — `apply()` already applied the
-          // DEFAULT_TRAJECTORY_MAX_CHARS fallback; the 12k local default only
+          // DEFAULT_TRAJECTORY_MAX_CHARS fallback; the local default only
           // covers direct coordinator construction (tests).
-          const prefixCap = options.plannerPrefixMaxChars ?? 12_000
+          const prefixCap = options.plannerPrefixMaxChars ?? DEFAULT_TRAJECTORY_MAX_CHARS
           const history = sanitizePrefix(truncatePrefix(request.agent.session.deriveMessages(), prefixCap))
           try {
             proposal = await planRefinement({

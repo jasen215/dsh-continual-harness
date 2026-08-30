@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
-import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { HarnessStore, sanitizePrefix, serializeTrajectory, truncatePrefix } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
@@ -700,10 +700,10 @@ describe('serializeTrajectory', () => {
     session.append('assistant/message', {
       turn: 1, step: 1,
       message: createAssistantMessage({
-        source: { kind: 'model', provider: 'p' },
+        source: { provider: 'p', model: 'm' },
         content: [
           { type: 'text', text: 'summary ' + 'y'.repeat(300) },
-          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+          { type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{}' },
         ],
       }),
     } as never, { surfaceOp: 'append' })
@@ -755,17 +755,53 @@ describe('truncatePrefix', () => {
   })
 
   it('drops tool-result messages from the prefix text budget', () => {
-    const tool = createToolResultMessage({ callId: 'c1', content: [{ type: 'text', text: 'result' }] })
+    const tool = createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'result' }], isError: false })
     const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] })
     // tool-result text is '' → zero budget; both fit under any cap ≥ 2
     expect(truncatePrefix([tool, user], 5)).toEqual([tool, user])
+  })
+
+  // Spec §四.2: the Route A prefix must be byte-stable — two assemblies of the
+  // same session must produce identical output, so the provider's prefix cache
+  // keeps hitting between plan calls.
+  it('assembles the identical prefix on repeated calls for the same session', () => {
+    const messages = [
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'first ' + 'a'.repeat(200) }] }),
+      createAssistantMessage({
+        source: { provider: 'p', model: 'm' },
+        content: [
+          { type: 'reasoning', text: 'think' },
+          { type: 'text', text: 'narration' },
+          { type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{}' },
+        ],
+      }),
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'newest ' + 'b'.repeat(100) }] }),
+    ]
+    const once = sanitizePrefix(truncatePrefix(messages, 500))
+    const twice = sanitizePrefix(truncatePrefix(messages, 500))
+    expect(twice).toEqual(once)
+  })
+
+  // Spec §四.3: a truncated prefix must stay stable across consecutive plan
+  // calls (first truncation is a cold read; later calls keep hitting), so the
+  // truncation point must not drift when the same session is re-assembled.
+  it('keeps the truncation point stable across repeated assembly of an over-cap session', () => {
+    const old = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'old ' + 'a'.repeat(300) }] })
+    const mid = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'mid ' + 'b'.repeat(300) }] })
+    const newest = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'new ' + 'c'.repeat(50) }] })
+    const first = truncatePrefix([old, mid, newest], 120)
+    const second = truncatePrefix([old, mid, newest], 120)
+    expect(second).toEqual(first)
+    // The newest message survives even though the older two overflow the cap.
+    expect(first).toContain(newest)
+    expect(first).not.toContain(old)
   })
 })
 
 describe('sanitizePrefix', () => {
   it('keeps user text and tool-result blocks intact', () => {
     const user = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] })
-    const toolResult = createToolResultMessage({ callId: 'c1', content: [{ type: 'text', text: 'result' }], isError: false })
+    const toolResult = createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'result' }], isError: false })
     const out = sanitizePrefix([user, toolResult])
     expect(out).toEqual([user, toolResult])
   })
@@ -776,7 +812,7 @@ describe('sanitizePrefix', () => {
       content: [
         { type: 'reasoning', text: 'thinking' },
         { type: 'text', text: 'narration' },
-        { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+        { type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{}' },
       ],
     })
     const [out] = sanitizePrefix([assistant])

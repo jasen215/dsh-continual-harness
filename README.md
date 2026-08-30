@@ -127,8 +127,11 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 | `harnessRoot` | dsh data dir `harness/` | State root directory (temporary dir in tests) |
 | `skillsDir` | `$DSH_HOME/skills` | Directory where skill entries materialize as dsh SKILL.md bundles (dsh's user skill root) |
 | `defaultGlobal` | required | Target scope when the tool call omits `global` |
-| `maxTrajectoryChars` | 80000 | Max characters of the review trajectory (tail-biased truncation) |
+| `maxTrajectoryChars` | 12000 | Max characters of the planning trajectory (two-layer signal + digest summary; `plannerPrefixCache`-route dependent) |
 | `plannerMaxTokens` | 32000 | Max tokens for the planner LLM call |
+| `plannerPrefixCache` | `auto` | Planning input route: `auto` (Route A warm session prefix when the session shows `cacheReadTokens > 0`, falling back to Route B on a truncated reply), `session` (always Route A), `off` (always Route B summary) |
+| `plannerPrefixMaxChars` | 12000 | Tail-biased character cap for the Route A session prefix (`deriveMessages` text) |
+| `trajectorySignalRatio` | 0.5 | Fraction of the Route B trajectory budget kept verbatim (signal layer) vs digested |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | Auto-refine: turn-interval gate, compaction-end gate, cooldown, disable switch |
 | `requireGlobalApproval` | `false` | Require explicit human approval before a global write commits (conservative mode) |
 | `maxInjectedEntriesPerKind` | `6` | Positive-integer cap (step 1, minimum 1) for ranked injected entries per kind |
