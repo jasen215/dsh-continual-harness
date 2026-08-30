@@ -4,13 +4,24 @@
  * @module dsh-continual-harness
  */
 
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   AutoRefineReview,
   AutoRefineReviewContext,
   RefinementPlanInput,
   RefinementProposal,
 } from './types.ts'
+
+/** Optional request-level context forwarded to the completion seam (Route A). */
+export interface CompleteContext {
+  /** Route A: host-loop tool schemas — reproduce the loop's cache key. */
+  tools?: readonly ToolSchema[]
+  /** Route A: session identity stamped on the request. */
+  sessionId?: SessionId
+  /** Output budget override derived from the remaining context window. */
+  maxTokens?: number
+}
 
 /** One non-reasoning LLM call: system + user prompt in, plain text out. */
 export type Complete = (
@@ -19,6 +30,8 @@ export type Complete = (
   signal?: AbortSignal,
   /** Route A: warm session messages prepended before the trailing user message. */
   prefix?: readonly Message[],
+  /** Request-level context (tools/sessionId/output budget) for Route A. */
+  context?: CompleteContext,
 ) => Promise<string>
 
 /** Raised when the model reply is truncated before its JSON object completes. */
@@ -112,6 +125,7 @@ export async function planRefinement(
   signal?: AbortSignal,
   prefix?: readonly Message[],
   system?: string,
+  context?: CompleteContext,
 ): Promise<RefinementProposal> {
   const user = [
     // Route A: the planning rules move into the trailing user message so the
@@ -125,7 +139,7 @@ export async function planRefinement(
     input.trajectoryText === '' ? '' : `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
     input.instructions ? `# Focus instructions\n${input.instructions}` : '',
   ].filter(Boolean).join('\n\n')
-  return parseProposal(await complete(system ?? REFINEMENT_SYSTEM_PROMPT, user, signal, prefix))
+  return parseProposal(await complete(system ?? REFINEMENT_SYSTEM_PROMPT, user, signal, prefix, context))
 }
 
 /** Run the automatic refinement review gate through the injected seam. */

@@ -7,7 +7,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type Message, type ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
 import { PLUGIN_NAME } from './domain.ts'
 import type { Complete } from './planner.ts'
@@ -29,6 +30,8 @@ async function streamToText(
     system: string
     user: string
     prefix: readonly Message[] | undefined
+    tools?: readonly ToolSchema[]
+    sessionId?: SessionId
     maxTokens: number
     signal: AbortSignal | undefined
     deadlineMs: number
@@ -50,6 +53,8 @@ async function streamToText(
       model: params.model,
       system: params.system,
       maxTokens: params.maxTokens,
+      ...(params.tools === undefined ? {} : { tools: [...params.tools] }),
+      ...(params.sessionId === undefined ? {} : { sessionId: params.sessionId }),
       messages: [
         ...(params.prefix ?? []),
         createUserMessage({
@@ -103,19 +108,25 @@ export function completeViaAgent(
   maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS,
   options: { deadlineMs?: number } = {},
 ): Complete {
-  return async (system, user, signal, prefix) => {
+  return async (system, user, signal, prefix, context) => {
     const provider = agent.options.provider
     const model = agent.options.model
     if (!provider || !model) {
       throw new Error('harness refinement requires an agent with a configured provider and model')
     }
+    const dynamicMax = context?.maxTokens
+    const effectiveMax = dynamicMax === undefined
+      ? Math.min(maxTokens, agent.options.maxTokens ?? maxTokens)
+      : Math.min(dynamicMax, maxTokens, agent.options.maxTokens ?? maxTokens)
     return streamToText(ctx, {
       provider,
       model,
       system,
       user,
       prefix,
-      maxTokens: Math.min(maxTokens, agent.options.maxTokens ?? maxTokens),
+      ...(context?.tools === undefined ? {} : { tools: context.tools }),
+      ...(context?.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      maxTokens: effectiveMax,
       signal,
       deadlineMs: options.deadlineMs ?? DEFAULT_COMPLETE_DEADLINE_MS,
       errorPrefix: 'harness refinement planning',
@@ -141,13 +152,15 @@ export function completeViaModel(
   maxTokens: number = DEFAULT_PLANNER_MAX_TOKENS,
   options: { deadlineMs?: number } = {},
 ): Complete {
-  return async (system, user, signal, prefix) => streamToText(ctx, {
+  return async (system, user, signal, prefix, context) => streamToText(ctx, {
     provider,
     model,
     system,
     user,
     prefix,
-    maxTokens,
+    ...(context?.tools === undefined ? {} : { tools: context.tools }),
+    ...(context?.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+    maxTokens: context?.maxTokens === undefined ? maxTokens : Math.min(context.maxTokens, maxTokens),
     signal,
     deadlineMs: options.deadlineMs ?? DEFAULT_COMPLETE_DEADLINE_MS,
     errorPrefix: 'harness benchmark evaluation',
