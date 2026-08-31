@@ -8,7 +8,7 @@ tmp/
 *.log
 .npm-cache/
 .pnpm-store/
-# 本地设计文档（brainstorming 产物，不进版本库）
+# Local design docs (brainstorming artifacts, never committed)
 docs/superpowers/
 
 # Subagent-driven development workspace (never commit)
