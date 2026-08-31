@@ -1,0 +1,18 @@
+changelog:
+  categories:
+    - title: "🚀 Features"
+      labels: ["feat"]
+    - title: "🐛 Bug Fixes"
+      labels: ["fix"]
+    - title: "♻️ Refactors"
+      labels: ["refactor"]
+    - title: "⚡ Performance"
+      labels: ["perf"]
+    - title: "📝 Docs"
+      labels: ["docs"]
+    - title: "🧪 Tests"
+      labels: ["test"]
+    - title: "🧰 Maintenance"
+      labels: ["chore", "ci", "build", "deps"]
+    - title: "🎨 Other Changes"
+      labels: ["other", "*"]

@@ -1,0 +1,38 @@
+name: PR Title Check
+
+# pull_request_target runs the default-branch version of this workflow for
+# every PR (fork PRs included), so titles are validated everywhere. The action
+# only reads PR metadata and reports a failed check — it never checks out
+# untrusted code.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate PR Title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        with:
+          # Must stay in sync with section_for() in scripts/release-notes.sh:
+          # every allowed type maps to a release-notes category, so a passing
+          # title guarantees the squash-merged commit gets categorized instead
+          # of landing in "🎨 Other Changes".
+          types: |
+            feat
+            fix
+            refactor
+            perf
+            docs
+            test
+            chore
+            ci
+            build
+            deps
+          requireScope: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

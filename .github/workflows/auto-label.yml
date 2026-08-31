@@ -1,0 +1,48 @@
+name: Auto Label PR
+
+# pull_request_target runs the default-branch version with a write token for
+# all PRs (fork PRs included), so every PR is labeled before merge. Only the
+# label API is used — untrusted PR code is never checked out.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // Must stay in sync with the types in .github/workflows/pr-title.yml
+            // and the categories in .github/release.yml.
+            const AUTO_LABELS = [
+              'feat', 'fix', 'refactor', 'perf', 'docs',
+              'test', 'chore', 'ci', 'build', 'deps', 'other',
+            ];
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const title = context.payload.pull_request.title;
+
+            // Conventional-commit prefix, e.g. "fix(refine): ..." / "feat!: ...".
+            const m = title.match(/^([a-z]+)(?:\([^)]*\))?!?:\s?/);
+            const label = m && AUTO_LABELS.includes(m[1]) ? m[1] : 'other';
+
+            // Drop stale auto labels first so an edited title cannot leave a
+            // second label behind (and thus a second release-notes category).
+            const current = await github.rest.issues.listLabelsOnIssue({
+              owner, repo, issue_number,
+            });
+            for (const l of current.data) {
+              if (l.name !== label && AUTO_LABELS.includes(l.name)) {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number, name: l.name,
+                }).catch(() => {});
+              }
+            }
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number, labels: [label],
+            });
