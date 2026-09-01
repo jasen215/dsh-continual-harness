@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import {
-  createUserMessage, deepFreeze, markAgentLoopRequest,
+  createUserMessage, markAgentLoopRequest,
   type GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { installHostRequestSnapshot } from '../src/request-snapshot.ts'
 
 /** Fire one request through the 'llm/stream' waterfall (probe-verified: a
