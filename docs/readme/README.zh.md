@@ -110,6 +110,10 @@ dsh plugin --profile <name> add dsh-continual-harness
 
 前置要求：`tools`、`agents`、`session`、`llm`、`systemPrompt` 等能力插件先于本插件加载（插件的 `inject` 声明了依赖，未加载时挂载会延迟）。
 
+### dsh 版本兼容
+
+已在 dsh `0.1.2-alpha.3` 上验证；peer 下限保持 `>=0.1.0-rc.6`，旧版 dsh 仍可用。dsh `0.1.2-alpha.3` 不再在 profile bundle 内提供 `@deepseek-ai/dsh-home-paths`，因此插件将其声明为硬依赖；`@deepseek-ai/dsh-invariants` 仅用于类型（开发期），运行时不需要。
+
 ## Config
 
 | 字段 | 默认 | 说明 |

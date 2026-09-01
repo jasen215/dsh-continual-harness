@@ -120,6 +120,10 @@ Manual overlay (before publish, or to pin a local checkout): apply
 
 Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capability plugins must load before this plugin (its `inject` declaration enforces that; mounting is deferred until they load).
 
+### dsh version compatibility
+
+Verified against dsh `0.1.2-alpha.3`; peer floors stay `>=0.1.0-rc.6`, so older dsh releases keep working. Since dsh `0.1.2-alpha.3` no longer provides `@deepseek-ai/dsh-home-paths` inside the profile bundle, the plugin declares it as a hard dependency; `@deepseek-ai/dsh-invariants` is used for types only (dev-time) and is not required at runtime.
+
 ## Config
 
 | Field | Default | Description |

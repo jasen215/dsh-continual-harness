@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -110,7 +110,7 @@ async function mountRefineTool(coordinator: RefineCoordinator, options: ToolOpti
 async function executeTool(ctx: Context, name: string, args: unknown, liveAgent: Agent): Promise<ToolExecutionResult> {
   return ctx.tools.execute({
     signal: testToolSignal,
-    callId: CallId(`call-${Math.random()}`),
+    callId: ToolCallId(`call-${Math.random()}`),
     name,
     arguments: args,
     agent: liveAgent,
@@ -145,7 +145,7 @@ async function execute(
 ): Promise<ToolExecutionResult> {
   return ctx.tools.execute({
     signal: testToolSignal,
-    callId: CallId(`call-${Math.random()}`),
+    callId: ToolCallId(`call-${Math.random()}`),
     name: 'harness_benchmark',
     arguments: args,
     ...(agent === undefined ? {} : { agent }),
@@ -548,7 +548,7 @@ describe('harness_benchmark run', () => {
     } as never)
     const result = await ctx.tools.execute({
       signal: controller.signal,
-      callId: CallId(`call-${Math.random()}`),
+      callId: ToolCallId(`call-${Math.random()}`),
       name: 'harness_benchmark',
       arguments: { action: 'run', reference_snapshot_id: referenceId, refinement_id: refinementId },
       agent,

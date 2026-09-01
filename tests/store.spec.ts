@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
-import { CallId, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { HarnessStore, serializeTrajectory } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
@@ -703,7 +703,7 @@ describe('serializeTrajectory', () => {
         source: { provider: 'p', model: 'm' },
         content: [
           { type: 'text', text: 'summary ' + 'y'.repeat(300) },
-          { type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '{}' },
+          { type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{}' },
         ],
       }),
     } as never, { surfaceOp: 'append' })
