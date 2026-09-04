@@ -124,7 +124,7 @@ describe('HarnessStore', () => {
     // No informational session event is written: an out-of-repo append would
     // make the whole log refuse a cold read (see `registerSessionEventType`
     // in domain.ts); history() reads the on-disk store instead.
-    expect(session.events.some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(false)
+    expect(session.snapshotEvents().some(event => event.type === HARNESS_REFINEMENT_EVENT)).toBe(false)
     expect(store.state(agent).entries.memory['fact']?.content).toBe('durable')
     expect(store.history(agent).map(entry => entry.id)).toEqual(['refine_1'])
   })

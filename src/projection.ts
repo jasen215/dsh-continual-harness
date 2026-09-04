@@ -18,7 +18,7 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
+import { type Session, type SessionSeq, type UserMessage } from '@deepseek-ai/dsh-session'
 import { HARNESS_STATE_SOURCE } from './domain.ts'
 import type { HarnessStore } from './store.ts'
 
@@ -40,10 +40,11 @@ function harnessMessage(overview: string, digest: string): UserMessage {
 }
 
 /** Seq of the last visible harness-state message, or undefined when none. */
-function findHarnessStateSeq(session: Session): number | undefined {
+function findHarnessStateSeq(session: Session): SessionSeq | undefined {
   const surface = new Set(session.surface.nodes)
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index]
+  const events = session.snapshotEvents()
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
     if (event?.type !== 'user/message') continue
     if (event.data.source?.kind !== HARNESS_STATE_SOURCE) continue
     // Only nodes still on the model-visible surface count; a block shadowed by
