@@ -30,15 +30,15 @@ function uncachedSession(): Session {
 
 describe('hasCacheEvidence', () => {
   it('is true when an assistant/message carries cacheReadTokens > 0', () => {
-    expect(hasCacheEvidence(cachedSession().events)).toBe(true)
+    expect(hasCacheEvidence(cachedSession().snapshotEvents())).toBe(true)
   })
   it('is false when all cacheReadTokens are 0', () => {
-    expect(hasCacheEvidence(uncachedSession().events)).toBe(false)
+    expect(hasCacheEvidence(uncachedSession().snapshotEvents())).toBe(false)
   })
   it('is false when no assistant/message has a usage record', () => {
     const session = Session.create(SessionId('no-usage'))
     session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
-    expect(hasCacheEvidence(session.events)).toBe(false)
+    expect(hasCacheEvidence(session.snapshotEvents())).toBe(false)
   })
   it('reads cacheReadTokens from assistant/chunk usage events as a fallback source', () => {
     const session = Session.create(SessionId('chunk-usage'))
@@ -47,24 +47,24 @@ describe('hasCacheEvidence', () => {
       turn: 1, step: 1,
       chunk: { type: 'usage', usage: { inputTokens: 50, outputTokens: 5, cacheReadTokens: 30 } },
     } as never)
-    expect(hasCacheEvidence(session.events)).toBe(true)
+    expect(hasCacheEvidence(session.snapshotEvents())).toBe(true)
   })
 })
 
 describe('detectPlannerRoute', () => {
   it('routes auto mode to A when the session has cache evidence', () => {
-    expect(detectPlannerRoute(cachedSession().events, 'auto')).toBe('A')
+    expect(detectPlannerRoute(cachedSession().snapshotEvents(), 'auto')).toBe('A')
   })
   it('routes auto mode to B when the session lacks cache evidence', () => {
-    expect(detectPlannerRoute(uncachedSession().events, 'auto')).toBe('B')
+    expect(detectPlannerRoute(uncachedSession().snapshotEvents(), 'auto')).toBe('B')
   })
   it('routes auto mode to B for a fresh session with no history', () => {
-    expect(detectPlannerRoute(Session.create(SessionId('fresh')).events, 'auto')).toBe('B')
+    expect(detectPlannerRoute(Session.create(SessionId('fresh')).snapshotEvents(), 'auto')).toBe('B')
   })
   it('force-routes session mode to A regardless of evidence', () => {
-    expect(detectPlannerRoute(Session.create(SessionId('forced')).events, 'session')).toBe('A')
+    expect(detectPlannerRoute(Session.create(SessionId('forced')).snapshotEvents(), 'session')).toBe('A')
   })
   it('force-routes off mode to B regardless of evidence', () => {
-    expect(detectPlannerRoute(cachedSession().events, 'off')).toBe('B')
+    expect(detectPlannerRoute(cachedSession().snapshotEvents(), 'off')).toBe('B')
   })
 })

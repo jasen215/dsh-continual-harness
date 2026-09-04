@@ -56,8 +56,9 @@ function isPurePunctuation(text: string): boolean { return text.length > 0 && !/
 
 /** Build the ranked-injection query from the most recent effective direct-user message. */
 export function buildQueryFromSession(session: Session, maxChars: number = MAX_QUERY_CHARS): string {
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index]
+  const events = session.snapshotEvents()
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
     if (event?.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
     const text = (Array.isArray(event.data?.content) ? event.data.content : [])
       .filter(block => block?.type === 'text' && typeof block.text === 'string')

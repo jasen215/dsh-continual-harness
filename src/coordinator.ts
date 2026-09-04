@@ -343,7 +343,7 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const historyText = historyForPrompt(options.store.history(request.agent))
 
       if (request.signal?.aborted) return errorResult('planning', 'aborted', 'refinement request aborted')
-      const route: PlannerRoute = detectPlannerRoute(request.agent.session.events, options.plannerPrefixCache ?? 'auto')
+      const route: PlannerRoute = detectPlannerRoute(request.agent.session.snapshotEvents(), options.plannerPrefixCache ?? 'auto')
       options.logger?.info(`harness refine planning route: ${route}`)
       const complete = options.completeFor(request.agent)
       const trajectorySignalRatio = options.trajectorySignalRatio ?? DEFAULT_TRAJECTORY_SIGNAL_RATIO
