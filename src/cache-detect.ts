@@ -16,18 +16,16 @@ export type PlannerPrefixCacheMode = 'auto' | 'session' | 'off'
 
 /**
  * True when any recorded model call in this session reported cache-read
- * tokens — evidence the provider can serve a warm prefix. Reads the same two
- * sources the spec allows: `assistant/message` events carry `usage` on the
- * event wrapper; `assistant/chunk` events of `type: 'usage'` carry it on the
- * chunk. Non-surface `assistant/chunk` events need no surfaceOp on append.
+ * tokens — evidence the provider can serve a warm prefix. Reads the one
+ * source the spec allows: `assistant/message` carries the step's `usage` on
+ * the event wrapper, so the model output and its accounting travel together.
+ * (dsh 0.1.5 removed the separate `assistant/chunk` event; its `usage` chunk
+ * is folded into this single record rather than lost.)
  */
 export function hasCacheEvidence(events: readonly SessionEvent[]): boolean {
   for (const event of events) {
     if (event.type === 'assistant/message') {
       if ((event.data.usage?.cacheReadTokens ?? 0) > 0) return true
-    } else if (event.type === 'assistant/chunk') {
-      const chunk = event.data.chunk as { type: 'usage'; usage?: { cacheReadTokens?: number } } | undefined
-      if (chunk?.type === 'usage' && (chunk.usage?.cacheReadTokens ?? 0) > 0) return true
     }
   }
   return false

@@ -89,7 +89,7 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
     const existingSeq = findHarnessStateSeq(agent.session)
     if (existingSeq !== undefined) {
       agent.session.append('user/message', desired, {
-        surfaceOp: { op: 'replace', start: existingSeq, end: existingSeq },
+        surfaceOp: { op: 'replace', startSeq: existingSeq, endSeq: existingSeq },
         sourceEventSeqs: [existingSeq],
       })
       store.recordInjections(agent, injectedKeys)

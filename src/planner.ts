@@ -25,7 +25,14 @@ export interface CompleteContext {
 
 /** One non-reasoning LLM call: system + user prompt in, plain text out. */
 export type Complete = (
-  system: string,
+  /**
+   * System slot for the request. `undefined` sends NO system slot at all —
+   * the shape of a loop-built host request on dsh 0.1.5, whose system prompt
+   * rides as the leading system-role message of `prefix`. Route A passes the
+   * host's own value (usually `undefined`) so the reused prefix stays warm;
+   * Route B passes an explicit prompt.
+   */
+  system: string | undefined,
   user: string,
   signal?: AbortSignal,
   /** Route A: warm session messages prepended before the trailing user message. */
@@ -127,11 +134,12 @@ export async function planRefinement(
   system?: string,
   context?: CompleteContext,
 ): Promise<RefinementProposal> {
+  const routeA = prefix !== undefined
   const user = [
     // Route A: the planning rules move into the trailing user message so the
-    // system slot can carry the session's own system prompt (byte-identical to
-    // the host loop request → warm prefix). Route B keeps them in the system slot.
-    prefix !== undefined || system !== undefined ? REFINEMENT_SYSTEM_PROMPT : '',
+    // system slot keeps the host's own value (byte-identical to the host loop
+    // request → warm prefix). Route B keeps them in the system slot.
+    routeA || system !== undefined ? REFINEMENT_SYSTEM_PROMPT : '',
     `# Store scope\n${input.scopeInstruction}`,
     input.stateOverview,
     input.historyText,
@@ -139,7 +147,11 @@ export async function planRefinement(
     input.trajectoryText === '' ? '' : `# Current trajectory excerpt (tail-biased)\n${input.trajectoryText}`,
     input.instructions ? `# Focus instructions\n${input.instructions}` : '',
   ].filter(Boolean).join('\n\n')
-  return parseProposal(await complete(system ?? REFINEMENT_SYSTEM_PROMPT, user, signal, prefix, context))
+  // Route A reuses the host's system slot verbatim. On dsh 0.1.5 that slot is
+  // usually `undefined` (loop-built requests carry the prompt inside `prefix`),
+  // so substituting the refinement prompt here would duplicate the rules into
+  // both slots and invalidate the warm prefix Route A exists to reuse.
+  return parseProposal(await complete(routeA ? system : system ?? REFINEMENT_SYSTEM_PROMPT, user, signal, prefix, context))
 }
 
 /** Run the automatic refinement review gate through the injected seam. */

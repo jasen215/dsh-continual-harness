@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Complete } from '../src/planner.ts'
 import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
@@ -150,10 +150,17 @@ function delayedStore(): HarnessStore & {
 
 function agentWithHeader(id = 'coordinator-agent'): Agent {
   const a = agent(id)
+  // dsh 0.1.5 moved the system prompt onto the model-visible surface: it is a
+  // `system/message` event, and `EpochHeader` has no `system` field at all
+  // (the session invariant rejects one), so a host-loop request carries the
+  // prompt inside `messages` and leaves the request's system slot unset.
+  a.session.append('system/message', {
+    turn: 1, step: 1,
+    message: createSystemMessage('session system prompt', 'dsh-continual-harness'),
+  }, { surfaceOp: 'append' })
   a.session.append('request/header', {
     header: {
       config: { provider: 'test-provider', model: 'test-model' },
-      system: 'session system prompt',
       tools: [{ name: 'read' }],
     },
     reason: 'initial',
@@ -167,13 +174,13 @@ function agentWithHeader(id = 'coordinator-agent'): Agent {
 }
 
 function snapshotRegistry(session: Session): { registry: HostRequestRegistry } {
-  // Deliberately DIFFERENT from the requestHeader/deriveMessages fallback: the
-  // snapshot carries its own system prompt and an extra synthetic message, so
-  // the tests prove the snapshot branch wins over the fallback (I-3).
+  // Deliberately DIFFERENT from the deriveMessages fallback: the snapshot adds
+  // an extra synthetic message, so the tests prove the snapshot branch wins
+  // over the fallback (I-3). It carries no `system` slot, exactly like a real
+  // dsh 0.1.5 loop-built request.
   const snapshot: HostRequestSnapshot = {
     provider: 'test-provider',
     model: 'test-model',
-    system: 'snapshot system prompt',
     tools: [{ name: 'read' }],
     messages: [
       ...session.deriveMessages(),
@@ -656,14 +663,18 @@ describe('Route A planning input', () => {
     })
     const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
     expect(result.commitStatus).toBe('committed')
-    // The snapshot branch wins over the requestHeader/deriveMessages fallback:
-    // the prefix is the SNAPSHOT's messages verbatim — the derived list plus
-    // the synthetic 'snapshot-only' message — and the system prompt is the
-    // snapshot's, not the header's 'session system prompt'.
-    expect(seen.system).toBe('snapshot system prompt')
+    // The snapshot branch wins over the deriveMessages fallback: the prefix is
+    // the SNAPSHOT's messages verbatim — the derived list plus the synthetic
+    // 'snapshot-only' message.
     expect(seen.prefix).toEqual(snapshotMessages) // verbatim, includes assistant text + snapshot-only
     expect(seen.prefix).toHaveLength(liveAgent.session.deriveMessages().length + 1)
     expect(JSON.stringify(seen.prefix)).toContain('snapshot-only')
+    // The reused request keeps the host's system slot EXACTLY: unset, because a
+    // dsh 0.1.5 loop-built request carries the system prompt as the leading
+    // system-role message of `prefix`. Substituting the refinement prompt here
+    // would duplicate the rules into both slots and invalidate the warm prefix.
+    expect(seen.system).toBeUndefined()
+    expect(JSON.stringify(seen.prefix)).toContain('session system prompt')
     expect(seen.context).toMatchObject({ tools: [{ name: 'read' }], sessionId: liveAgent.session.id })
     expect(store.trajectory).not.toHaveBeenCalled()
   })
