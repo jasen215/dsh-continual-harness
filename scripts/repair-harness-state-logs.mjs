@@ -6,11 +6,16 @@
  * v3) only classify platform source kinds. An artifact holding one message with
  * a plugin-defined source kind is refused as a whole
  * (`cannot safely transform unclassified message source`), so every session
- * logged by a plugin build up to 0.3.0 became unreadable once the harness
- * started writing the current v3 format. Plugin builds from 0.3.1 log the same
- * overview as a platform-classified `plugin` source, so rewriting the retired
- * kind makes the stored artifact readable again without touching a single
- * sequence number, payload, or surface operation.
+ * logged by a plugin build that still used the retired kind became unreadable
+ * once the harness started writing the current v3 format. A repaired build logs
+ * the same overview as a platform-classified `plugin` source, so rewriting the
+ * retired kind makes the stored artifact readable again without touching a
+ * single sequence number, payload, or surface operation.
+ *
+ * A log written in the current v3 generation stays readable with the retired
+ * kind (v3 treats plugin-owned payloads as opaque), so this script rewrites
+ * every generation: v0 artifacts to make them readable at all, and current
+ * artifacts to drop a latent kind that a later migration may refuse.
  *
  * Usage:
  *   node scripts/repair-harness-state-logs.mjs [options]
@@ -42,8 +47,8 @@ const REPLACEMENT = Object.freeze({ kind: 'plugin', plugin: 'dsh-continual-harne
 const ZSTD_MAGIC = 0xfd2fb528
 /** Retired plugin-defined session event type, refused by the same migrations. */
 const LEGACY_EVENT = 'harness/refinement'
-/** Artifact basenames this script owns: the v0 generation, compressed or plain. */
-const V0_ARTIFACTS = ['session.jsonl.zstd', 'session.jsonl']
+/** Artifact basenames this script owns: every generation, compressed or plain. */
+const ARTIFACT_PATTERN = /^session(?:\.v\d+)?\.jsonl(?:\.zstd)?$/
 
 const USAGE = `Usage:
   node scripts/repair-harness-state-logs.mjs [options]
@@ -84,7 +89,7 @@ function collectArtifacts(dir, depth, found) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name)
     if (entry.isDirectory()) collectArtifacts(path, depth + 1, found)
-    else if (V0_ARTIFACTS.includes(entry.name)) found.push(path)
+    else if (ARTIFACT_PATTERN.test(entry.name)) found.push(path)
   }
 }
 
@@ -233,7 +238,7 @@ function main() {
     repairFile(path, options, report)
   }
   process.stdout.write(`root: ${options.root}\n`)
-  process.stdout.write(`scanned v0 artifacts: ${scanned}\n`)
+  process.stdout.write(`scanned session artifacts: ${scanned}\n`)
   process.stdout.write(`repairable artifacts: ${report.repaired.length}\n`)
   for (const [path, rows, sources] of report.repaired) {
     process.stdout.write(`  ${path}: ${rows} row(s), ${sources} source(s)\n`)

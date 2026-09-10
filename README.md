@@ -224,9 +224,10 @@ Plugin builds up to 0.3.0 logged the injected overview under a plugin-defined
 classify platform source kinds, so one such message makes the whole stored
 artifact unreadable (`cannot safely transform unclassified message source`)
 once a host reads it with a v3-capable dsh. This build logs a classified
-`plugin` source instead; stored v0 logs are repaired offline with
-`node scripts/repair-harness-state-logs.mjs` (dry run by default; `--apply`
-backs each artifact up and replaces it atomically — see `--help`).
+`plugin` source instead; stored logs of any generation are repaired offline
+with `node scripts/repair-harness-state-logs.mjs` (dry run by default; `--apply`
+backs each artifact up and replaces it atomically, and artifacts written within
+`--min-age-seconds` are skipped — see `--help`).
 
 ## Known Limitations and Deferred Work
 
