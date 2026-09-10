@@ -32,7 +32,8 @@
   },
   "files": [
     "cordis.patch.yml",
-    "lib/types/**/*"
+    "lib/types/**/*",
+    "scripts/repair-harness-state-logs.mjs"
   ],
   "license": "MIT",
   "repository": {

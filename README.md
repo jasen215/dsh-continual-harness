@@ -219,6 +219,15 @@ artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
 (host dsh installations) must satisfy.
 
+Plugin builds up to 0.3.0 logged the injected overview under a plugin-defined
+`harness-state` message source. The released Session format migrations only
+classify platform source kinds, so one such message makes the whole stored
+artifact unreadable (`cannot safely transform unclassified message source`)
+once a host reads it with a v3-capable dsh. This build logs a classified
+`plugin` source instead; stored v0 logs are repaired offline with
+`node scripts/repair-harness-state-logs.mjs` (dry run by default; `--apply`
+backs each artifact up and replaces it atomically — see `--help`).
+
 ## Known Limitations and Deferred Work
 
 - No end-to-end tests with a real LLM: `completeViaAgent` depends on the loaded `llm` capability and provider/model configuration; tests cover the planning/review paths with a stub `Complete`. Real e2e requires `DEEPSEEK_API_KEY`.

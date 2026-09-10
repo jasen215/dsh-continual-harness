@@ -1,11 +1,12 @@
 /**
  * Domain constants and typed extension surfaces of the continual harness
  * plugin: the legacy `harness/refinement` session event type (kept readable
- * for old logs, no longer written), the model-visible
- * `harness-state` message source, and the scoped `harness/refined` event.
+ * for old logs, no longer written), the model-visible harness-state overview
+ * source, and the scoped `harness/refined` event.
  * @module dsh-continual-harness
  */
 
+import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { RefinementResult } from './types.ts'
 
@@ -23,8 +24,15 @@ export const REFINEMENT_HISTORY_FILE_NAME = 'refinements.jsonl'
 export const PLUGIN_NAME = 'dsh-continual-harness'
 /** Legacy session event type written by older plugin builds for a committed refinement result. */
 export const HARNESS_REFINEMENT_EVENT = 'harness/refinement'
-/** Message source kind of injected harness-state overviews. */
-export const HARNESS_STATE_SOURCE = 'harness-state'
+/**
+ * Presentation form of an injected harness-state overview. The overview rides a
+ * platform-classified `plugin` source: a plugin-defined source kind is legal in
+ * memory but unclassified by the released v2->v3 Session migration, so one
+ * logged occurrence makes the whole artifact unreadable.
+ */
+export const HARNESS_STATE_FORM = 'instructions'
+/** Legacy source kind written by plugin builds before the classified-source switch. */
+export const HARNESS_STATE_LEGACY_KIND = 'harness-state'
 /** Monotonic schema version of the harness state file. */
 export const HARNESS_SCHEMA_VERSION = 2
 /** Prefix shared by the active injection telemetry log and its epoch-stamped archives. */
@@ -62,6 +70,16 @@ export function registerSessionEventType(type: string): void {
   (KNOWN_SESSION_EVENT_TYPES as Set<string>).add(type)
 }
 
+/**
+ * Whether one logged message source is a harness-state overview: the current
+ * plugin-source form, or the legacy kind still present on the surface of
+ * sessions written by plugin builds up to 0.3.0.
+ */
+export function isHarnessStateSource(source: MessageSource): boolean {
+  if ((source.kind as string) === HARNESS_STATE_LEGACY_KIND) return true
+  return source.kind === 'plugin' && source.plugin === PLUGIN_NAME && source.form === HARNESS_STATE_FORM
+}
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -69,16 +87,6 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param result - the durable refinement result, including applied edits.
      */
     'harness/refinement': RefinementResult
-  }
-}
-
-declare module '@deepseek-ai/dsh-llm' {
-  interface MessageSourceMap {
-    /**
-     * Model-visible harness-state overview injected before a step.
-     * @param digest - content hash of the injected overview.
-     */
-    'harness-state': { kind: 'harness-state'; digest: string }
   }
 }
 
