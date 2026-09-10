@@ -18,7 +18,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { AgentRegistry, Inbox } from '@deepseek-ai/dsh-agent'
+import { AgentRegistry } from '@deepseek-ai/dsh-agent'
+import { stubInbox } from './fake-inbox.ts'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -60,7 +61,7 @@ function stubAgent(rawId: string): StubAgent {
     id: session.id,
     options: { provider: 'test-provider', model: 'test-model' },
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: stubInbox(),
     get status() { return status },
     ctx: new Context(),
     send: () => {},

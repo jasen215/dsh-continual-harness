@@ -394,7 +394,11 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
           const snapshot = options.hostRequests?.latestFor(session.id)
           const header = session.requestHeader()
           const prefix = snapshot?.messages ?? session.deriveMessages()
-          const system = snapshot?.system ?? header?.system
+          // dsh 0.1.5 removed `EpochHeader.system`: a loop-built request keeps
+          // the system prompt as the leading system-role message of `messages`,
+          // so an unset snapshot slot stays unset — the host request is reused
+          // byte-identically instead of gaining a system slot it never had.
+          const system = snapshot?.system
           const tools = snapshot?.tools ?? header?.tools
           const sessionId = snapshot?.sessionId ?? session.id
 

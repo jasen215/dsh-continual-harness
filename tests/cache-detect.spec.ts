@@ -40,15 +40,9 @@ describe('hasCacheEvidence', () => {
     session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
     expect(hasCacheEvidence(session.snapshotEvents())).toBe(false)
   })
-  it('reads cacheReadTokens from assistant/chunk usage events as a fallback source', () => {
-    const session = Session.create(SessionId('chunk-usage'))
-    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
-    session.append('assistant/chunk', {
-      turn: 1, step: 1,
-      chunk: { type: 'usage', usage: { inputTokens: 50, outputTokens: 5, cacheReadTokens: 30 } },
-    } as never)
-    expect(hasCacheEvidence(session.snapshotEvents())).toBe(true)
-  })
+  // dsh 0.1.5 removed the separate `assistant/chunk` event: the usage chunk now
+  // folds into `assistant/message.usage` (the source asserted above), so the
+  // old chunk-reading fallback has no event type left to read and is gone.
 })
 
 describe('detectPlannerRoute', () => {

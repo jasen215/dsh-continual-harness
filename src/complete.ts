@@ -27,7 +27,12 @@ async function streamToText(
   params: {
     provider: string
     model: string
-    system: string
+    /**
+     * System slot; `undefined` omits the field entirely so a reused Route A
+     * prefix stays byte-identical to the loop-built host request (dsh 0.1.5
+     * carries the system prompt inside `messages`).
+     */
+    system: string | undefined
     user: string
     prefix: readonly Message[] | undefined
     tools?: readonly ToolSchema[]
@@ -51,7 +56,7 @@ async function streamToText(
     for await (const chunk of llm.stream({
       provider: params.provider,
       model: params.model,
-      system: params.system,
+      ...(params.system === undefined ? {} : { system: params.system }),
       maxTokens: params.maxTokens,
       ...(params.tools === undefined ? {} : { tools: [...params.tools] }),
       ...(params.sessionId === undefined ? {} : { sessionId: params.sessionId }),

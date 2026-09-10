@@ -1,29 +1,29 @@
 /**
  * Pins the cross-package assumption behind `registerSessionEventType`
  * (`src/domain.ts`): the runtime `KNOWN_SESSION_EVENT_TYPES` Set that the
- * plugin mutates on mount is the SAME instance the real persistence
- * coordinator consults when it refuses a stored log containing an unknown
- * non-ignorable event type (`SessionFormatUnsupportedError`, "refusing to
- * interpret the log").
+ * plugin mutates on mount is the SAME instance the real persistence read path
+ * consults when it refuses a stored log containing an unknown non-ignorable
+ * event type (`SessionFormatUnsupportedError`, "refusing to interpret the
+ * log").
  *
- * This drives the real read path end-to-end — the real
- * `PersistenceCoordinator` from `@deepseek-ai/dsh-session-persistence` through
- * its real JSONL file backend — over hand-seeded legacy session logs. Every
- * package here resolves to one deduplicated `@deepseek-ai/dsh-session`
- * rc.7 instance, so a refusal (or acceptance) at `load()` proves the Set is
- * shared at the module level — the exact property a production harness
- * deployment (a single dsh-session version, one instance) relies on.
+ * This drives the real read path end-to-end — the real `SessionPersistence`
+ * service from `@deepseek-ai/dsh-session-persistence` through its real JSONL
+ * file backend — over hand-seeded legacy session logs. Every package here
+ * resolves to one deduplicated `@deepseek-ai/dsh-session` instance, so a
+ * refusal (or acceptance) while opening/reading proves the Set is shared at
+ * the module level — the exact property a production harness deployment (a
+ * single dsh-session version, one instance) relies on.
  * @module dsh-continual-harness
  */
 
-import { dirname, join } from 'node:path'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionFormatUnsupportedError } from '@deepseek-ai/dsh-session-persistence'
-import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { HARNESS_REFINEMENT_EVENT, registerSessionEventType } from '../src/domain.ts'
 
 const tempDirs: string[] = []
@@ -47,43 +47,77 @@ function event(type: string, seq: number, data: unknown, ignorable?: true): Reco
 const legacyRefinement = { id: 'legacy-ref-1', summary: 'written before the ignorable probe landed' }
 
 /**
- * Seed a legacy-style stored log (header line + plain JSONL event lines,
- * uncompressed, unpacked) at the exact artifact path the real JSONL backend
- * resolves, then return the live backend wired to a real `PersistenceCoordinator`.
+ * Build one JSONL backend over `root`. The coordinator's write path calls
+ * `ctx.sessions.list()` at construction, so the session store must be
+ * registered before the backend is built; Cordis `Service` constructors
+ * register synchronously (unlike `ctx.plugin`, which defers startup), so
+ * direct construction is required here.
  */
-function seedLegacyLog(
+function backend(root: string): JsonlSessionPersistence {
+  const ctx = new Context()
+  new SessionStore(ctx)
+  return new JsonlSessionPersistence(ctx, { root, compression: 'none' })
+}
+
+/** The single plaintext session artifact the backend materialized under `root`. */
+function findSeededLog(root: string): string {
+  const found: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.name.endsWith('.jsonl')) found.push(path)
+    }
+  }
+  walk(root)
+  if (found.length !== 1) throw new Error(`expected exactly one seeded log, found ${found.length}`)
+  return found[0]!
+}
+
+/**
+ * Seed a legacy-style stored log (header line + plain JSONL event lines,
+ * uncompressed) at the exact artifact path the real JSONL backend resolves,
+ * then return a FRESH backend for the read assertions.
+ *
+ * dsh 0.1.5 made the backend's path helper private and replaced the one-shot
+ * `load(id)` inspection with `open(id, access)` + `handle.read()`. Rather than
+ * recomputing the layout, let the backend materialize the artifact once and
+ * rewrite that file in place — the header line it wrote is kept verbatim, so
+ * only the event lines are ours.
+ */
+async function seedLegacyLog(
   root: string,
   id: string,
   events: readonly Record<string, unknown>[],
-): JsonlSessionPersistence {
-  const ctx = new Context()
-  // The coordinator's write path calls `ctx.sessions.list()` at construction,
-  // so the session store must be registered before the backend is built.
-  // Cordis `Service` constructors register synchronously (unlike `ctx.plugin`,
-  // which defers startup), so direct construction is required here.
-  new SessionStore(ctx)
-  const persistence = new JsonlSessionPersistence(ctx, { root, compression: 'none', packChunks: false })
+): Promise<JsonlSessionPersistence> {
   const header = Session.create(SessionId(id)).header
-  const headerLine = JSON.stringify({
-    type: 'session',
-    version: header.version,
-    id: String(header.id),
-    createdAt: header.createdAt,
-    delegationDepth: header.delegationDepth ?? 0,
-  })
-  const path = persistence.locate(header).path
-  mkdirSync(dirname(path), { recursive: true })
+  const handle = await backend(root).create(header)
+  try {
+    await handle.flush()
+  } finally {
+    await handle.close()
+  }
+  const path = findSeededLog(root)
+  const headerLine = readFileSync(path, 'utf8').split('\n')[0]
   writeFileSync(path, `${headerLine}\n${events.map(e => JSON.stringify(e)).join('\n')}\n`)
-  return persistence
+  return backend(root)
+}
+
+/** Open `id` read-only through the real backend and return its validated log. */
+async function readStored(persistence: JsonlSessionPersistence, id: string) {
+  const handle = await persistence.open(SessionId(id), 'read')
+  const result = await handle.read()
+  await handle.close()
+  return result
 }
 
 describe('persistence read gate (real coordinator + JSONL backend)', () => {
   it('refuses a stored log containing an unregistered out-of-repo event type (gate is live)', async () => {
-    const persistence = seedLegacyLog(tempRoot(), 'control-unknown-type', [
+    const persistence = await seedLegacyLog(tempRoot(), 'control-unknown-type', [
       event('todo/write', 0, { todos: [] }),
       event('harness/control-unknown', 1, { anything: true }),
     ])
-    const refusal = await persistence.load(SessionId('control-unknown-type')).then(
+    const refusal = await readStored(persistence, 'control-unknown-type').then(
       () => { throw new Error('expected SessionFormatUnsupportedError') },
       (error: unknown) => error,
     )
@@ -95,12 +129,12 @@ describe('persistence read gate (real coordinator + JSONL backend)', () => {
   it('loads a legacy bare harness/refinement log once the type is registered (shared Set pin)', async () => {
     const root = tempRoot()
     const id = 'registered-bare-refinement'
-    const persistence = seedLegacyLog(root, id, [
+    const persistence = await seedLegacyLog(root, id, [
       event('todo/write', 0, { todos: [] }),
       event(HARNESS_REFINEMENT_EVENT, 1, legacyRefinement),
     ])
     registerSessionEventType(HARNESS_REFINEMENT_EVENT)
-    const inspection = await persistence.load(SessionId(id))
+    const inspection = await readStored(persistence, id)
     const types = inspection.events.map(e => e.type)
     expect(types).toContain('todo/write')
     expect(types).toContain(HARNESS_REFINEMENT_EVENT)
@@ -110,10 +144,10 @@ describe('persistence read gate (real coordinator + JSONL backend)', () => {
   it('loads an ignorable-marked harness/refinement log without any registration', async () => {
     const root = tempRoot()
     const id = 'ignorable-refinement'
-    const persistence = seedLegacyLog(root, id, [
+    const persistence = await seedLegacyLog(root, id, [
       event(HARNESS_REFINEMENT_EVENT, 0, legacyRefinement, true),
     ])
-    const inspection = await persistence.load(SessionId(id))
+    const inspection = await readStored(persistence, id)
     expect(inspection.events.map(e => e.type)).toContain(HARNESS_REFINEMENT_EVENT)
   })
 })

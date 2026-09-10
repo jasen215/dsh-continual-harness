@@ -87,9 +87,9 @@ The Experience Solidification Protocol (ESP) is the **protocol surface** of this
 | --- | --- | --- |
 | Experience state schema | `harness_state.json` (`schemaVersion: 1`) | Four kinds of entries — `prompt / memory / skill / subagent` — each with `id / kind / version / content / updatedAt` |
 | Experience history | `refinements.jsonl` (append-only) | One `RefinementResult` record per apply/rollback; rollback by id |
-| Refinement event | session event `harness/refinement` | Written to the session log on apply/rollback (model-visible ⟺ logged) |
+| Refinement event | session event `harness/refinement` (retired) | Written on apply/rollback by builds up to 0.3.0; this build never appends it and keeps only its payload type declared for legacy compatibility |
 | Refinement notification | agent event `harness/refined` | Payload `{agent, result}`; subscribable by invariant and other plugins |
-| Experience injection | message source `harness-state` (carries `digest`) | Pre-injected into the model context; deduplicated by digest change |
+| Experience injection | message source `plugin` (`form: instructions`, `digest` in the content marker) | Pre-injected into the model context; deduplicated by digest change. The retired `harness-state` kind is still recognized so old logs replace their block instead of duplicating it |
 
 Any dsh plugin can read and write experience through this protocol (write state files, append history, publish events, inject messages); this package is the protocol's **reference implementation and primary consumer** (planning / refinement / projection / automatic gate).
 
@@ -218,6 +218,16 @@ typecheck`, `pnpm test`, and `pnpm run build` (tsc emits
 artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
 (host dsh installations) must satisfy.
+
+Plugin builds up to 0.3.0 logged the injected overview under a plugin-defined
+`harness-state` message source. The released Session format migrations only
+classify platform source kinds, so one such message makes the whole stored
+artifact unreadable (`cannot safely transform unclassified message source`)
+once a host reads it with a v3-capable dsh. This build logs a classified
+`plugin` source instead; stored logs of any generation are repaired offline
+with `node scripts/repair-harness-state-logs.mjs` (dry run by default; `--apply`
+backs each artifact up and replaces it atomically, and artifacts written within
+`--min-age-seconds` are skipped — see `--help`).
 
 ## Known Limitations and Deferred Work
 

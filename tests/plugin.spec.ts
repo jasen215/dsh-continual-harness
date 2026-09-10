@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { AgentRegistry, agentEvents, Inbox } from '@deepseek-ai/dsh-agent'
+import { AgentRegistry, agentEvents } from '@deepseek-ai/dsh-agent'
+import { stubInbox } from './fake-inbox.ts'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
@@ -12,7 +13,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as plugin from '../src/index.ts'
 import { loadReviews } from '../src/audit.ts'
-import { HARNESS_REFINEMENT_EVENT, HARNESS_STATE_SOURCE } from '../src/domain.ts'
+import { HARNESS_REFINEMENT_EVENT, isHarnessStateSource } from '../src/domain.ts'
 import { PLUGIN_LOG_FILE_NAME } from '../src/logfile.ts'
 import { HarnessStore } from '../src/store.ts'
 
@@ -42,7 +43,7 @@ function stubAgent(rawId: string): StubAgent {
     id: session.id,
     options: { provider: 'test-provider', model: 'test-model' },
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: stubInbox(),
     get status() { return status },
     ctx: new Context(),
     send: () => {},
@@ -556,9 +557,13 @@ describe('harness-state projection', () => {
     )
     expect(first.kind).toBe('enter')
     if (first.kind !== 'enter') throw new Error('expected enter decision')
-    const firstHarness = first.messages.filter(message => message.source.kind === HARNESS_STATE_SOURCE)
+    const firstHarness = first.messages.filter(message => isHarnessStateSource(message.source))
     expect(firstHarness).toHaveLength(1)
     expect(firstHarness[0].content).toContainEqual(expect.objectContaining({ type: 'text' }))
+    // The logged source must stay platform-classified: the released Session
+    // format migrations only classify platform source kinds, so one
+    // plugin-defined kind makes the whole durable artifact unreadable.
+    expect(firstHarness[0].source).toEqual({ kind: 'plugin', plugin: 'dsh-continual-harness', form: 'instructions' })
 
     const second = await agentEvents(ctx, agent).waterfall(
       'agent/pre-step',
@@ -566,7 +571,7 @@ describe('harness-state projection', () => {
       () => Promise.resolve({ kind: 'enter' as const, messages: claimed }),
     )
     if (second.kind !== 'enter') throw new Error('expected enter decision')
-    const secondHarness = second.messages.filter(message => message.source.kind === HARNESS_STATE_SOURCE)
+    const secondHarness = second.messages.filter(message => isHarnessStateSource(message.source))
     expect(secondHarness).toHaveLength(0)
   })
 
@@ -595,7 +600,7 @@ describe('harness-state projection', () => {
     )
     expect(first.kind).toBe('enter')
     if (first.kind !== 'enter') throw new Error('expected enter decision')
-    const firstBlock = first.messages.find(message => message.source.kind === HARNESS_STATE_SOURCE)
+    const firstBlock = first.messages.find(message => isHarnessStateSource(message.source))
     expect(firstBlock).toBeDefined()
 
     // The agent loop commits every decision message to the session log.
@@ -617,11 +622,11 @@ describe('harness-state projection', () => {
     )
     if (second.kind !== 'enter') throw new Error('expected enter decision')
     // The replacement is committed directly to the session; the decision carries no block.
-    expect(second.messages.some(message => message.source.kind === HARNESS_STATE_SOURCE)).toBe(false)
+    expect(second.messages.some(message => isHarnessStateSource(message.source))).toBe(false)
 
     // Exactly one harness-state block remains on the surface, with the new digest.
     const derived = session.deriveMessages()
-    const blocks = derived.filter(message => message.source?.kind === HARNESS_STATE_SOURCE)
+    const blocks = derived.filter(message => isHarnessStateSource(message.source))
     expect(blocks).toHaveLength(1)
     expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
   })

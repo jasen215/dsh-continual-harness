@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox } from '@deepseek-ai/dsh-agent'
+import { stubInbox } from './fake-inbox.ts'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { loadReviews, REVIEWS_FILE_NAME } from '../src/audit.ts'
@@ -106,7 +106,7 @@ function stubAgent(rawId: string): Agent {
     id: session.id,
     options: { provider: 'test-provider', model: 'test-model' },
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: stubInbox(),
     get status() { return status },
     ctx: new Context(),
     send: () => {},

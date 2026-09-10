@@ -30,6 +30,7 @@
 | 会话收尾 | 可选 `harness_wrapup` 工具机械给出 keep/promote/archive 建议；promote 只复制，冲突返回确定性错误 |
 | 会话内复盘轨迹 | 从 session 日志重建（tail-biased 截断） |
 | 不变量守护 | `harness/refinement` 事件校验 + 批量 fail 上报 |
+| 显式 A/B 基准 | 单一 `harness_benchmark` 动作工具：固定冻结用例、精修前参考快照、同轮 reference/candidate A/B 运行，决策由代码聚合 |
 
 ## 架构
 
@@ -82,9 +83,9 @@ tests/           23 个测试文件，287 个用例（storage / store / refine /
 | --- | --- | --- |
 | 经验状态 schema | `harness_state.json`（`schemaVersion: 1`） | `prompt / memory / skill / subagent` 四类条目，每条含 `id / kind / version / content / updatedAt` |
 | 经验历史 | `refinements.jsonl`（追加式） | 每次应用/回滚一条 `RefinementResult` 记录，按 id 可回滚 |
-| 精修事件 | session 事件 `harness/refinement` | 应用/回滚时写入会话日志（model-visible ⟺ logged） |
+| 精修事件 | session 事件 `harness/refinement`（已退役） | 0.3.0 及更早的构建在应用/回滚时写入；当前构建不再追加，仅为向后兼容保留其 payload 类型声明 |
 | 精修通知 | agent 事件 `harness/refined` | payload `{agent, result}`，供不变量等插件订阅 |
-| 经验注入 | 消息源 `harness-state`（携带 `digest`） | 预注入模型上下文，按摘要变化去重 |
+| 经验注入 | 消息源 `plugin`（`form: instructions`，`digest` 在内容标记里） | 预注入模型上下文，按摘要变化去重；读取旧日志时仍识别已退役的 `harness-state` kind，以便原位替换而非重复注入 |
 
 任何 dsh 插件都可以按这套协议读写经验（写状态文件、追加历史、发布事件、注入消息）；本包是协议的**参考实现与主要消费方**（规划/精修/投影/自动门）。
 
@@ -121,8 +122,11 @@ dsh plugin --profile <name> add dsh-continual-harness
 | `harnessRoot` | dsh 数据目录 `harness/` | 状态根目录（测试用临时目录） |
 | `skillsDir` | `$DSH_HOME/skills` | skill 条目物化为 dsh SKILL.md 目录束的目录（dsh 用户 skill 根） |
 | `defaultGlobal` | 必填 | 工具未显式指定 `global` 时的目标作用域 |
-| `maxTrajectoryChars` | 80000 | 复盘轨迹的最大字符数（tail-biased 截断） |
+| `maxTrajectoryChars` | 12000 | 规划轨迹的最大字符数（两层信号 + 摘要；取决于 `plannerPrefixCache` 路由） |
 | `plannerMaxTokens` | 32000 | 规划器 LLM 调用的最大 token 数 |
+| `plannerPrefixCache` | `auto` | 规划输入路由：`auto`（会话显示 `cacheReadTokens > 0` 时走 Route A 暖会话前缀，回复被截断时回退 Route B）、`session`（始终 Route A）、`off`（始终 Route B 摘要） |
+| `plannerPrefixMaxChars` | 12000 | Route A 会话前缀（`deriveMessages` 文本）的 tail-biased 字符上限 |
+| `trajectorySignalRatio` | 0.5 | Route B 轨迹预算中保留原文（信号层）而非摘要的比例 |
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | 自动精修：turn 间隔门、压缩结束门、冷却时间、禁用开关 |
 | `requireGlobalApproval` | `false` | 全局写入提交前是否要求显式人工审批（保守模式） |
 | `maxInjectedEntriesPerKind` | `6` | 每个 kind 排序注入的正整数上限（步长 1，最小值 1） |
@@ -199,6 +203,8 @@ tail -f ~/.dsh/harness/continual-harness.log
 ## 开发
 
 插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
+
+0.3.0 及更早的插件构建把注入的总览记在插件自定义的 `harness-state` 消息源下。已发布的 Session 格式迁移只识别平台的来源种类，因此只要有一条这样的消息，整个归档在支持 v3 的 dsh 读取时就会整体不可读（`cannot safely transform unclassified message source`）。当前构建改用平台已分类的 `plugin` 来源；已存日志（任意代）可用 `node scripts/repair-harness-state-logs.mjs` 离线修复（默认 dry run；`--apply` 会先备份再原子替换，写入时间在 `--min-age-seconds` 内的日志会被跳过——详见 `--help`）。
 
 ## Known Limitations and Deferred Work
 

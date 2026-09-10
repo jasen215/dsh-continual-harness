@@ -15,7 +15,7 @@ describe('query construction', () => {
   it('takes the most recent direct-user message, ignoring harness-state sources', () => {
     const session = Session.create(SessionId('s1'))
     userText(session, 'first question')
-    session.append('user/message', createUserMessage({ source: { kind: 'harness-state', digest: 'abc' }, content: [{ type: 'text', text: '<system-reminder>…' }] }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-continual-harness', form: 'instructions' }, content: [{ type: 'text', text: '<system-reminder>…' }] }), { surfaceOp: 'append' })
     userText(session, 'how do I pin versions?')
     expect(buildQueryFromSession(session)).toBe('how do I pin versions?')
   })
