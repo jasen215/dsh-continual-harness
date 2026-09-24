@@ -4,7 +4,7 @@
  * @module dsh-continual-harness
  */
 
-import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { RequestMessage, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   AutoRefineReview,
@@ -36,7 +36,7 @@ export type Complete = (
   user: string,
   signal?: AbortSignal,
   /** Route A: warm session messages prepended before the trailing user message. */
-  prefix?: readonly Message[],
+  prefix?: readonly RequestMessage[],
   /** Request-level context (tools/sessionId/output budget) for Route A. */
   context?: CompleteContext,
 ) => Promise<string>
@@ -130,7 +130,7 @@ export async function planRefinement(
   input: RefinementPlanInput,
   complete: Complete,
   signal?: AbortSignal,
-  prefix?: readonly Message[],
+  prefix?: readonly RequestMessage[],
   system?: string,
   context?: CompleteContext,
 ): Promise<RefinementProposal> {

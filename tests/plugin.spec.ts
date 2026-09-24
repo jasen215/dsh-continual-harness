@@ -7,6 +7,7 @@ import { AgentRegistry, agentEvents } from '@deepseek-ai/dsh-agent'
 import { stubInbox } from './fake-inbox.ts'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -271,6 +272,11 @@ describe('governance default mode', () => {
     // The gate looks the live agent up through the real agents service.
     const { agent } = stubAgent('gate-mount')
     ctx.agents.register(agent)
+    // dsh 0.1.7 defers the registration effect's `enter()` past one microtask
+    // (agents.register() is an async effect), so the agent is not visible to
+    // ctx.agents.get() until the effect body runs. Real sessions register long
+    // before any turn/end, but this test emits one immediately.
+    await Promise.resolve()
 
     ctx.emit('session/event', agent.session, {
       type: 'turn/end',
@@ -311,6 +317,9 @@ describe('governance default mode', () => {
 
     const { agent } = stubAgent('drain-mount')
     ctx.agents.register(agent)
+    // Same deferred-registration wait as above: the first turn/end must find
+    // the agent already entered in the registry.
+    await Promise.resolve()
     const emitTurn = (seq: number) => ctx.emit('session/event', agent.session, {
       type: 'turn/end',
       seq,
@@ -560,10 +569,12 @@ describe('harness-state projection', () => {
     const firstHarness = first.messages.filter(message => isHarnessStateSource(message.source))
     expect(firstHarness).toHaveLength(1)
     expect(firstHarness[0].content).toContainEqual(expect.objectContaining({ type: 'text' }))
-    // The logged source must stay platform-classified: the released Session
-    // format migrations only classify platform source kinds, so one
-    // plugin-defined kind makes the whole durable artifact unreadable.
-    expect(firstHarness[0].source).toEqual({ kind: 'plugin', plugin: 'dsh-continual-harness', form: 'instructions' })
+    // dsh 0.1.7 removed the shared catch-all `plugin` source kind: the plugin
+    // now declares its own producer kind on MessageSourceMap (see domain.ts),
+    // named after the V3→V4 migration's own `plugin:<package>` convention so a
+    // migrated block and a freshly written one share the kind. The
+    // `instructions` form still marks exactly the state overview.
+    expect(firstHarness[0].source).toEqual({ kind: 'plugin:dsh-continual-harness', form: 'instructions' })
 
     const second = await agentEvents(ctx, agent).waterfall(
       'agent/pre-step',
@@ -629,6 +640,34 @@ describe('harness-state projection', () => {
     const blocks = derived.filter(message => isHarnessStateSource(message.source))
     expect(blocks).toHaveLength(1)
     expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
+  })
+})
+
+describe('isHarnessStateSource across the source-kind migration', () => {
+  // Legacy shapes are outside the 0.1.7 MessageSource union by construction:
+  // they are read from logs written by older builds, so they need casts.
+  const sourceOf = (value: Record<string, unknown>): MessageSource => value as unknown as MessageSource
+
+  it('recognizes the injected overview in every kind the plugin has written', () => {
+    // This build's declared producer kind, which is also what the released
+    // V3→V4 migration rewrites the old `plugin` wrapper into.
+    expect(isHarnessStateSource(sourceOf({ kind: 'plugin:dsh-continual-harness', form: 'instructions' }))).toBe(true)
+    // A V3 log read without migration still carries the retired shared wrapper.
+    expect(isHarnessStateSource(sourceOf({
+      kind: 'plugin', plugin: 'dsh-continual-harness', form: 'instructions',
+    }))).toBe(true)
+    // The custom kind written by builds up to 0.3.0.
+    expect(isHarnessStateSource(sourceOf({ kind: 'harness-state' }))).toBe(true)
+  })
+
+  it('leaves another message from the same producer alone', () => {
+    // A /refine outcome notice shares the producer kind. Claiming it would make
+    // the projection replace a command reply instead of its own state block.
+    expect(isHarnessStateSource(sourceOf({
+      kind: 'plugin:dsh-continual-harness', form: 'notice', summary: 'committed',
+    }))).toBe(false)
+    // Another producer's wrapper with our plugin name is still not ours.
+    expect(isHarnessStateSource(sourceOf({ kind: 'plugin', plugin: 'other-plugin', form: 'instructions' }))).toBe(false)
   })
 })
 

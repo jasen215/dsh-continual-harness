@@ -6,7 +6,7 @@
  * @module dsh-continual-harness
  */
 
-import type { MessageSource } from '@deepseek-ai/dsh-llm'
+import type { ContextFormed, MessageSource } from '@deepseek-ai/dsh-llm'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { RefinementResult } from './types.ts'
 
@@ -33,6 +33,21 @@ export const HARNESS_REFINEMENT_EVENT = 'harness/refinement'
 export const HARNESS_STATE_FORM = 'instructions'
 /** Legacy source kind written by plugin builds before the classified-source switch. */
 export const HARNESS_STATE_LEGACY_KIND = 'harness-state'
+/**
+ * Producer kind this plugin declares for its own messages under dsh 0.1.7+.
+ * That release removed the shared catch-all `plugin` kind: every producer now
+ * declares its own kind by augmenting `MessageSourceMap` (see the declaration
+ * at the bottom of this module). The name follows the harness's own
+ * third-party convention — the released V3→V4 migration rewrites a `plugin`
+ * wrapper to `plugin:<package name>` — so a message migrated from a V3 log and
+ * one written by this build carry the SAME kind, and the projection replaces
+ * the block it wrote before the upgrade instead of appending a second one.
+ * This constant must stay equal to that interface's literal key — interface
+ * keys cannot be computed.
+ */
+export const HARNESS_STATE_KIND = 'plugin:dsh-continual-harness'
+/** Shared catch-all source kind written by plugin builds on dsh 0.1.5-0.1.6; removed in 0.1.7. */
+export const HARNESS_STATE_PLUGIN_KIND = 'plugin'
 /** Monotonic schema version of the harness state file. */
 export const HARNESS_SCHEMA_VERSION = 2
 /** Prefix shared by the active injection telemetry log and its epoch-stamped archives. */
@@ -71,13 +86,22 @@ export function registerSessionEventType(type: string): void {
 }
 
 /**
- * Whether one logged message source is a harness-state overview: the current
- * plugin-source form, or the legacy kind still present on the surface of
- * sessions written by plugin builds up to 0.3.0.
+ * Whether one logged message source is a harness-state overview: this build's
+ * declared producer kind, the shared `plugin` kind written on dsh 0.1.5-0.1.6,
+ * or the legacy kind still present on sessions written by builds up to 0.3.0.
+ * Every form but `instructions` is a different message from the same producer
+ * (e.g. a `/refine` outcome notice), so it must not match: the projection
+ * replaces exactly the state block, never an unrelated plugin message.
  */
 export function isHarnessStateSource(source: MessageSource): boolean {
   if ((source.kind as string) === HARNESS_STATE_LEGACY_KIND) return true
-  return source.kind === 'plugin' && source.plugin === PLUGIN_NAME && source.form === HARNESS_STATE_FORM
+  // The `plugin` kind is gone from 0.1.7's union; old logs still carry it.
+  const legacy = source as { kind: string; plugin?: string; form?: string }
+  if (legacy.kind === HARNESS_STATE_PLUGIN_KIND) {
+    return legacy.plugin === PLUGIN_NAME && legacy.form === HARNESS_STATE_FORM
+  }
+  if (source.kind !== HARNESS_STATE_KIND) return false
+  return source.form === HARNESS_STATE_FORM
 }
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -87,6 +111,18 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param result - the durable refinement result, including applied edits.
      */
     'harness/refinement': RefinementResult
+  }
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /**
+     * Where this plugin's own messages came from, declared here because dsh
+     * 0.1.7 removed the shared catch-all `plugin` kind in favor of one kind per
+     * producer. The `form` axis carries what the message is (`instructions`
+     * for the injected harness-state overview, `notice` for a command reply).
+     */
+    'plugin:dsh-continual-harness': { kind: 'plugin:dsh-continual-harness' } & ContextFormed
   }
 }
 

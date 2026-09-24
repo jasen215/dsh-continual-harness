@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { type Session, type SessionSeq, type UserMessage } from '@deepseek-ai/dsh-session'
-import { HARNESS_STATE_FORM, PLUGIN_NAME, isHarnessStateSource } from './domain.ts'
+import { HARNESS_STATE_FORM, HARNESS_STATE_KIND, isHarnessStateSource } from './domain.ts'
 import type { HarnessStore } from './store.ts'
 
 /** Digest length of the overview content hash. */
@@ -32,7 +32,7 @@ function digestOf(text: string): string {
 
 function harnessMessage(overview: string, digest: string): UserMessage {
   return createUserMessage({
-    source: { kind: 'plugin', plugin: PLUGIN_NAME, form: HARNESS_STATE_FORM },
+    source: { kind: HARNESS_STATE_KIND, form: HARNESS_STATE_FORM },
     content: [{
       type: 'text',
       text: `<system-reminder>\n<harness_state digest="${digest}">\n${overview}\n</harness_state>\n</system-reminder>`,

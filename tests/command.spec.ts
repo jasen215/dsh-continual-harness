@@ -10,7 +10,6 @@ import {
 } from '../src/command.ts'
 import type { CommandDefinition, CommandsCapability } from '../src/command.ts'
 import type { RefineCoordinator, RefineExecutionResult } from '../src/coordinator.ts'
-import { PLUGIN_NAME } from '../src/domain.ts'
 
 function agent(id = 'command-agent'): Agent {
   const session = Session.create(SessionId(id))
@@ -279,7 +278,7 @@ describe('createRefineCommandAdapter', () => {
     expect(data.text).toContain('diagnostics-error: security provider-failed scanner failed')
   })
 
-  it('default reporter falls back to a plugin-source user message without a commandId', async () => {
+  it('default reporter falls back to a producer-source user message without a commandId', async () => {
     const a = agent()
     const appendSpy = vi.spyOn(a.session, 'append')
     const handler = createRefineCommandAdapter(fakeCoordinator(committedWithRejected()), { defaultGlobal: false, report: reportRefineOutcome })
@@ -287,7 +286,7 @@ describe('createRefineCommandAdapter', () => {
     await vi.waitFor(() => expect(appendSpy).toHaveBeenCalled())
     const [type, message] = appendSpy.mock.calls[0]
     expect(type).toBe('user/message')
-    expect(message.source).toMatchObject({ kind: 'plugin', plugin: PLUGIN_NAME })
+    expect(message.source).toMatchObject({ kind: 'plugin:dsh-continual-harness', form: 'notice' })
     expect(message.content[0].text).toContain('status: committed')
   })
 })

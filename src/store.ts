@@ -364,8 +364,8 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
 
   // Signal layer: verbatim tail, newest last, labelled with the legacy
   // event-style tags so existing tests and downstream consumers are stable.
-  // tool/result messages (role 'user', first block 'tool-result') carry no
-  // planner-relevant text — skip them entirely instead of calling messageText.
+  // tool-role messages (one tool result each) carry no planner-relevant text —
+  // skip them entirely instead of calling messageText.
   // A message longer than the digest's per-role cap is digested instead of
   // kept verbatim: it would burn the signal budget without adding readable
   // context, and the digest already carries its truncated form.
@@ -374,7 +374,7 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
   let split = messages.length
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!
-    if (message.content[0]?.type === 'tool-result') continue
+    if (message.role === 'tool') continue
     const text = messageText(message)
     if (!text.trim()) continue
     const cap = TRAJECTORY_ROLE_CAPS[message.role === 'assistant' ? 'assistant' : 'user']
@@ -386,13 +386,13 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
     signalUsed += line.length
     split = i
   }
-  // The digest layer mirrors the signal layer: tool/result messages carry no
-  // planner text (messageText yields ''), so they are skipped rather than
-  // emitted as bare `[user]` tag lines.
+  // The digest layer mirrors the signal layer: tool-role messages carry no
+  // planner text, so they are skipped rather than emitted as bare `[user]` tag
+  // lines.
   const digestLines: string[] = []
   for (let i = 0; i < split; i++) {
     const message = messages[i]!
-    if (message.content[0]?.type === 'tool-result') continue
+    if (message.role === 'tool') continue
     digestLines.push(digestOf(message.role === 'assistant' ? 'assistant' : 'user', message.content))
   }
   let digest = digestLines.join('\n')
@@ -414,9 +414,15 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
   return digest ? `${digest}\n\n${signal}` : signal
 }
 
-/** Serialized text of one derived message (text blocks only; skips tool-result). */
-export function messageText(message: Pick<Message, 'content'>): string {
-  if (message.content[0]?.type === 'tool-result') return ''
+/**
+ * Serialized text of one derived message (text blocks only). A tool result is
+ * its own tool-role message in dsh 0.1.7 — no longer a `tool-result` first
+ * block — and contributes no text to the trajectory or the char budget either
+ * way, hence the role check. `role` stays optional because the digest layer
+ * passes bare blocks.
+ */
+export function messageText(message: Pick<Message, 'content'> & { role?: Message['role'] }): string {
+  if (message.role === 'tool') return ''
   return message.content
     // explicit predicate: the `typeof` guard survives the merge-extensible
     // ContentBlock union (a plugin-added 'text' block may carry non-string text)
