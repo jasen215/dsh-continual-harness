@@ -2,7 +2,7 @@
  * Digest-tracked harness-state projection: keeps exactly one compact overview
  * in the model's context as a durable user message, republished only when the
  * state digest changes. The overview is model-visible and logged as a
- * platform-classified `plugin`-source user message, so it satisfies the
+ * `plugin:dsh-continual-harness`-source user message, so it satisfies the
  * model-visible ⟺ logged rule and stays readable across Session format
  * migrations.
  *
@@ -12,6 +12,8 @@
  * lands at the tail of the step's messages (after the assembled system-prompt
  * context), so the current-state reminder is the most recent system-level
  * content before the model call; subsequent updates keep that stable position.
+ * The block's sequence is tracked as it commits (see session-state.ts), so
+ * locating the block never scans the event log.
  * @module dsh-continual-harness
  */
 
@@ -19,8 +21,9 @@ import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { type Session, type SessionSeq, type UserMessage } from '@deepseek-ai/dsh-session'
-import { HARNESS_STATE_FORM, PLUGIN_NAME, isHarnessStateSource } from './domain.ts'
+import { type UserMessage } from '@deepseek-ai/dsh-session'
+import { HARNESS_STATE_FORM, HARNESS_STATE_KIND } from './domain.ts'
+import { harnessStateSeqToReplace } from './session-state.ts'
 import type { HarnessStore } from './store.ts'
 
 /** Digest length of the overview content hash. */
@@ -32,28 +35,12 @@ function digestOf(text: string): string {
 
 function harnessMessage(overview: string, digest: string): UserMessage {
   return createUserMessage({
-    source: { kind: 'plugin', plugin: PLUGIN_NAME, form: HARNESS_STATE_FORM },
+    source: { kind: HARNESS_STATE_KIND, form: HARNESS_STATE_FORM },
     content: [{
       type: 'text',
       text: `<system-reminder>\n<harness_state digest="${digest}">\n${overview}\n</harness_state>\n</system-reminder>`,
     }],
   })
-}
-
-/** Seq of the last visible harness-state message, or undefined when none. */
-function findHarnessStateSeq(session: Session): SessionSeq | undefined {
-  const surface = new Set(session.surface.nodes)
-  const events = session.snapshotEvents()
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event?.type !== 'user/message') continue
-    if (event.data.source === undefined || !isHarnessStateSource(event.data.source)) continue
-    // Only nodes still on the model-visible surface count; a block shadowed by
-    // a previous replace or by compaction is already gone.
-    if (!surface.has(event.seq)) continue
-    return event.seq
-  }
-  return undefined
 }
 
 /**
@@ -87,12 +74,16 @@ export function registerHarnessProjection(ctx: Context, store: HarnessStore): vo
     // snapshot. The replacement is appended to the session log immediately,
     // so it is part of this step's derived transcript without re-entering the
     // decision messages (no double block).
-    const existingSeq = findHarnessStateSeq(agent.session)
+    const existingSeq = harnessStateSeqToReplace(agent.session, store)
     if (existingSeq !== undefined) {
-      agent.session.append('user/message', desired, {
+      const replaced = agent.session.append('user/message', desired, {
         surfaceOp: { op: 'replace', startSeq: existingSeq, endSeq: existingSeq },
         sourceEventSeqs: [existingSeq],
       })
+      // The replacement copy is the node a later update must shadow, so record
+      // it from the append itself rather than waiting for the event to come back
+      // through the observer.
+      store.recordSessionProjection(agent.session, { harnessStateSeq: replaced.seq })
       store.recordInjections(agent, injectedKeys)
       return decision
     }

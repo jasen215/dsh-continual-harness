@@ -7,10 +7,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type Message, type ToolSchema } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type RequestMessage, type ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
-import { PLUGIN_NAME } from './domain.ts'
+import { HARNESS_STATE_KIND } from './domain.ts'
 import type { Complete } from './planner.ts'
 
 /** Default planning output budget for the refiner. */
@@ -34,7 +34,7 @@ async function streamToText(
      */
     system: string | undefined
     user: string
-    prefix: readonly Message[] | undefined
+    prefix: readonly RequestMessage[] | undefined
     tools?: readonly ToolSchema[]
     sessionId?: SessionId
     maxTokens: number
@@ -63,7 +63,7 @@ async function streamToText(
       messages: [
         ...(params.prefix ?? []),
         createUserMessage({
-          source: { kind: 'plugin', plugin: PLUGIN_NAME },
+          source: { kind: HARNESS_STATE_KIND },
           content: [{ type: 'text', text: params.user }],
         }),
       ],

@@ -3,7 +3,7 @@
  * routes plus the remaining-output computation against a model context window.
  * @module dsh-continual-harness
  */
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 import { messageText } from './store.ts'
 
 /** Shared char→token estimate ratio for Route A and Route B (spec §2.2). */
@@ -22,7 +22,7 @@ export function estimateCharsTokens(chars: number, ratio: number): number {
 }
 
 /** Estimate the token weight of a message prefix from its serialized text. */
-export function estimateMessagesChars(messages: readonly Message[]): number {
+export function estimateMessagesChars(messages: readonly RequestMessage[]): number {
   return messages.reduce((total, message) => total + messageText(message).length, 0)
 }
 

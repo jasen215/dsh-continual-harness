@@ -5,7 +5,7 @@
  * @module dsh-continual-harness
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { isAgentLoopRequest, type GenerateOptions, type Message, type StreamChunk, type ToolSchema } from '@deepseek-ai/dsh-llm'
+import { isAgentLoopRequest, type GenerateOptions, type RequestMessage, type StreamChunk, type ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
 /** Read-only view of the latest agent-loop request for one session. */
@@ -14,7 +14,7 @@ export interface HostRequestSnapshot {
   model: string
   system?: string
   tools?: readonly ToolSchema[]
-  messages: readonly Message[]
+  messages: readonly RequestMessage[]
   sessionId: SessionId
 }
 

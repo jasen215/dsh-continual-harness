@@ -7,6 +7,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Complete } from '../src/planner.ts'
+import { isCacheEvidenceEvent } from '../src/cache-detect.ts'
 import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
@@ -91,6 +92,11 @@ function fakeStore(onApply?: () => void): HarnessStore {
     state: vi.fn(() => emptyState()),
     history: vi.fn(() => []),
     trajectory: vi.fn(() => ''),
+    // Planning reads one projection fact; derive it from the session's own
+    // events, which is exactly what the observer would have recorded.
+    sessionProjection: vi.fn((session: Session) => (session.snapshotEvents().some(isCacheEvidenceEvent)
+      ? { cacheEvidence: true }
+      : {})),
     applyRefinement: vi.fn(() => {
       onApply?.()
       return refinementResult('fake')

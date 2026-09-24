@@ -27,7 +27,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { executionSummary } from './coordinator.ts'
 import type { RefineCoordinator, RefineExecutionResult, RefineRequest } from './coordinator.ts'
-import { PLUGIN_NAME } from './domain.ts'
+import { HARNESS_STATE_KIND } from './domain.ts'
 import type { HarnessScope } from './types.ts'
 
 /**
@@ -406,8 +406,7 @@ export function reportRefineOutcome(
 function appendRefineOutcomeMessage(agent: Agent, execution: RefineExecutionResult, text: string): void {
   agent.session.append('user/message', createUserMessage({
     source: {
-      kind: 'plugin',
-      plugin: PLUGIN_NAME,
+      kind: HARNESS_STATE_KIND,
       form: 'notice',
       summary: boundContextSummary(executionSummary(execution)),
     },

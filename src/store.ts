@@ -33,6 +33,7 @@ import {
   mergeRefinementHistory,
   saveHarnessState,
 } from './storage.ts'
+import type { SessionProjectionState } from './session-state.ts'
 import { aggregateUsage } from './usage.ts'
 import type { HarnessState, MaterializationResult, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
@@ -77,6 +78,8 @@ export class HarnessStore {
   private readonly maxInjectedEntriesPerKind: number
   /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
   private usage: Record<string, { injectionCount: number; lastInjectedAt?: string }> | undefined
+  /** Per-session projection facts observed while the plugin runs; nothing is persisted. */
+  private readonly projections = new Map<string, SessionProjectionState>()
 
   constructor(
     private readonly ctx: Context,
@@ -103,6 +106,24 @@ export class HarnessStore {
       getLocalHarnessStateDir(this.home, String(agent.session.id)),
       diagnostics => this.logMigration(diagnostics),
     )
+  }
+
+  /**
+   * The session's tracked projection facts; empty until the observer records
+   * one. Facts are derivable from committed events and from current surface
+   * state, so nothing is read from or written to disk here.
+   */
+  sessionProjection(session: Session): SessionProjectionState {
+    return this.projections.get(String(session.id)) ?? {}
+  }
+
+  /** Merge newly observed projection facts; an unchanged patch is a no-op. */
+  recordSessionProjection(session: Session, patch: SessionProjectionState): void {
+    const key = String(session.id)
+    const current = this.projections.get(key) ?? {}
+    const next = { ...current, ...patch }
+    if (next.harnessStateSeq === current.harnessStateSeq && next.cacheEvidence === current.cacheEvidence) return
+    this.projections.set(key, next)
   }
 
   /** The cross-session global state; migration diagnostics are logged. */
@@ -364,8 +385,8 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
 
   // Signal layer: verbatim tail, newest last, labelled with the legacy
   // event-style tags so existing tests and downstream consumers are stable.
-  // tool/result messages (role 'user', first block 'tool-result') carry no
-  // planner-relevant text — skip them entirely instead of calling messageText.
+  // tool-role messages (one tool result each) carry no planner-relevant text —
+  // skip them entirely instead of calling messageText.
   // A message longer than the digest's per-role cap is digested instead of
   // kept verbatim: it would burn the signal budget without adding readable
   // context, and the digest already carries its truncated form.
@@ -374,7 +395,7 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
   let split = messages.length
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!
-    if (message.content[0]?.type === 'tool-result') continue
+    if (message.role === 'tool') continue
     const text = messageText(message)
     if (!text.trim()) continue
     const cap = TRAJECTORY_ROLE_CAPS[message.role === 'assistant' ? 'assistant' : 'user']
@@ -386,13 +407,13 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
     signalUsed += line.length
     split = i
   }
-  // The digest layer mirrors the signal layer: tool/result messages carry no
-  // planner text (messageText yields ''), so they are skipped rather than
-  // emitted as bare `[user]` tag lines.
+  // The digest layer mirrors the signal layer: tool-role messages carry no
+  // planner text, so they are skipped rather than emitted as bare `[user]` tag
+  // lines.
   const digestLines: string[] = []
   for (let i = 0; i < split; i++) {
     const message = messages[i]!
-    if (message.content[0]?.type === 'tool-result') continue
+    if (message.role === 'tool') continue
     digestLines.push(digestOf(message.role === 'assistant' ? 'assistant' : 'user', message.content))
   }
   let digest = digestLines.join('\n')
@@ -414,9 +435,15 @@ export function serializeTrajectory(session: Session, maxChars: number, signalRa
   return digest ? `${digest}\n\n${signal}` : signal
 }
 
-/** Serialized text of one derived message (text blocks only; skips tool-result). */
-export function messageText(message: Pick<Message, 'content'>): string {
-  if (message.content[0]?.type === 'tool-result') return ''
+/**
+ * Serialized text of one derived message (text blocks only). A tool result is
+ * its own tool-role message in dsh 0.1.7 — no longer a `tool-result` first
+ * block — and contributes no text to the trajectory or the char budget either
+ * way, hence the role check. `role` stays optional because the digest layer
+ * passes bare blocks.
+ */
+export function messageText(message: Pick<Message, 'content'> & { role?: Message['role'] }): string {
+  if (message.role === 'tool') return ''
   return message.content
     // explicit predicate: the `typeof` guard survives the merge-extensible
     // ContentBlock union (a plugin-added 'text' block may carry non-string text)
