@@ -31,6 +31,7 @@ import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO } from './store.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
+import { registerSessionProjectionObserver } from './session-state.ts'
 import { installHostRequestSnapshot } from './request-snapshot.ts'
 import { HarnessStore } from './store.ts'
 import { registerBenchmarkTool, registerHarnessTool, registerHarnessWrapup } from './tool.ts'
@@ -317,6 +318,10 @@ export function apply(ctx: Context, config: Config): void {
       maxFailedCells: benchmark.maxFailedCells,
     })
   }
+  // Observation is registered before the projection and the driver, so the
+  // facts either of them reads (the block sequence, cache-read evidence) are
+  // already being tracked wherever the plugin runs.
+  registerSessionProjectionObserver(ctx, store)
   registerHarnessProjection(ctx, store)
   const autoRefine = config.autoRefine ?? { enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }
   registerHarnessDriver(ctx, coordinator, store, {

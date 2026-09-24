@@ -33,6 +33,7 @@ import {
   mergeRefinementHistory,
   saveHarnessState,
 } from './storage.ts'
+import type { SessionProjectionState } from './session-state.ts'
 import { aggregateUsage } from './usage.ts'
 import type { HarnessState, MaterializationResult, RefinementKind, RefinementProposal, RefinementResult } from './types.ts'
 
@@ -77,6 +78,8 @@ export class HarnessStore {
   private readonly maxInjectedEntriesPerKind: number
   /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
   private usage: Record<string, { injectionCount: number; lastInjectedAt?: string }> | undefined
+  /** Per-session projection facts observed while the plugin runs; nothing is persisted. */
+  private readonly projections = new Map<string, SessionProjectionState>()
 
   constructor(
     private readonly ctx: Context,
@@ -103,6 +106,24 @@ export class HarnessStore {
       getLocalHarnessStateDir(this.home, String(agent.session.id)),
       diagnostics => this.logMigration(diagnostics),
     )
+  }
+
+  /**
+   * The session's tracked projection facts; empty until the observer records
+   * one. Facts are derivable from committed events and from current surface
+   * state, so nothing is read from or written to disk here.
+   */
+  sessionProjection(session: Session): SessionProjectionState {
+    return this.projections.get(String(session.id)) ?? {}
+  }
+
+  /** Merge newly observed projection facts; an unchanged patch is a no-op. */
+  recordSessionProjection(session: Session, patch: SessionProjectionState): void {
+    const key = String(session.id)
+    const current = this.projections.get(key) ?? {}
+    const next = { ...current, ...patch }
+    if (next.harnessStateSeq === current.harnessStateSeq && next.cacheEvidence === current.cacheEvidence) return
+    this.projections.set(key, next)
   }
 
   /** The cross-session global state; migration diagnostics are logged. */

@@ -21,6 +21,7 @@ import {
 import { DEFAULT_PLANNER_MAX_TOKENS } from './complete.ts'
 import type { HostRequestRegistry } from './request-snapshot.ts'
 import { detectPlannerRoute, type PlannerPrefixCacheMode, type PlannerRoute } from './cache-detect.ts'
+import { hasSessionCacheEvidence } from './session-state.ts'
 import { rollbackProposal, touchedSkillIds, validateEdit } from './refine.ts'
 import type { RefinementEdit } from './types.ts'
 import type { HarnessStore } from './store.ts'
@@ -343,7 +344,8 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
       const historyText = historyForPrompt(options.store.history(request.agent))
 
       if (request.signal?.aborted) return errorResult('planning', 'aborted', 'refinement request aborted')
-      const route: PlannerRoute = detectPlannerRoute(request.agent.session.snapshotEvents(), options.plannerPrefixCache ?? 'auto')
+      const cacheEvidence = hasSessionCacheEvidence(request.agent.session, options.store)
+      const route: PlannerRoute = detectPlannerRoute(cacheEvidence, options.plannerPrefixCache ?? 'auto')
       options.logger?.info(`harness refine planning route: ${route}`)
       const complete = options.completeFor(request.agent)
       const trajectorySignalRatio = options.trajectorySignalRatio ?? DEFAULT_TRAJECTORY_SIGNAL_RATIO
