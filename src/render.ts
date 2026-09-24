@@ -54,13 +54,23 @@ export const ACK_PHRASES: ReadonlySet<string> = new Set(['好', '好的', '可�
 function collapseWhitespace(text: string): string { return text.replace(/\s+/g, ' ').trim() }
 function isPurePunctuation(text: string): boolean { return text.length > 0 && !/[\p{L}\p{N}]/u.test(text) }
 
-/** Build the ranked-injection query from the most recent effective direct-user message. */
+/**
+ * Build the ranked-injection query from the most recent effective direct-user
+ * message.
+ *
+ * Reads the session's derived history rather than the event log: that array is
+ * the current model-visible projection (a raw event with no surface marker is
+ * absent, a compaction replace removes shadowed nodes, and plugin-owned message
+ * changes arrive already applied), which is the transcript the query ranks
+ * against. It also avoids `snapshotEvents()`, a synchronous history read whose
+ * new uses are prohibited.
+ */
 export function buildQueryFromSession(session: Session, maxChars: number = MAX_QUERY_CHARS): string {
-  const events = session.snapshotEvents()
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event?.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
-    const text = (Array.isArray(event.data?.content) ? event.data.content : [])
+  const messages = session.deriveMessages()
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.source.kind !== 'user') continue
+    const text = (Array.isArray(message.content) ? message.content : [])
       .filter(block => block?.type === 'text' && typeof block.text === 'string')
       .map(block => (block as { text: string }).text).join('\n')
     const normalized = collapseWhitespace(text)
