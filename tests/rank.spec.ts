@@ -210,9 +210,10 @@ describe('ranked injection', () => {
     expect(injectedKeys[0]).toBe('local:s1:memory:pinning')
   })
   it('drops corpus-generic terms so generic phrasing cannot promote unrelated entries', () => {
-    // Why: a real message like "关于 X 这个问题该怎么处理" shares 这个/问题/处理
-    // with unrelated entries. Counting those matches put the newest noise in front
-    // of the single entry the query actually named.
+    // Why: a real question in Chinese ("how should this X question be handled?")
+    // shares its generic words for "this", "question" and "handle" with unrelated
+    // entries. Counting those matches put the newest noise in front of the single
+    // entry the query actually named.
     const noise = ['n1', 'n2', 'n3', 'n4', 'n5'].map((id, index) => [id, { content: '这是问题，需要处理', updatedAt: `2026-02-0${index + 1}T00:00:00.000Z` }] as [string, { content: string; updatedAt: string }])
     const state = pad(withEntries([['zzzanchor', { content: 'zzzanchor procedure', updatedAt: '2026-01-01T00:00:00.000Z' }], ...noise]), 14)
     const { injectedKeys } = formatHarnessStateForPromptStructured(state, '关于 zzzanchor这个问题该怎么处理？', { sessionId: 's1', maxPerKind: 6, isLocal: () => true })
@@ -263,10 +264,10 @@ describe('query terms', () => {
     expect(queryTerms('!!!')).toEqual([])
   })
   it('keeps a latin term from swallowing the CJK characters glued to it', () => {
-    // Why: Chinese messages routinely glue a latin term to Chinese with no space
-    // ("Hermes配置怎么写"). Han characters are \p{L}, so a naive latin run would
-    // swallow them and shingle the mixed run into junk terms that then match
-    // unrelated English content.
+    // Why: Chinese messages routinely glue a latin term to Chinese with no space.
+    // Han characters are \p{L}, so a naive latin run would swallow them and
+    // shingle the mixed run into junk terms that then match unrelated English
+    // content.
     expect(queryTerms('Hermes配置怎么写')).toEqual(['hermes', '配置', '置怎', '怎么', '么写'])
   })
 })

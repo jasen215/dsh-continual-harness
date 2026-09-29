@@ -71,9 +71,9 @@ function refinementStamp(refinements: HarnessState['refinements']): string {
  *   block never shows stale versions or a retired entry;
  * - a query change republishes only when it surfaces an evidence-backed entry
  *   that the current block does not already carry. Follow-up messages that
- *   match nothing ("1", "继续" after the acknowledgement phrases are skipped)
- *   merely reorder the selection toward recency, and replacing relevant
- *   experience with the newest entries is worse than leaving the block alone.
+ *   match nothing ("1", or an acknowledgement phrase) merely reorder the
+ *   selection toward recency, and replacing relevant experience with the newest
+ *   entries is worse than leaving the block alone.
  *
  * An existing block is replaced in place; otherwise the block is appended at
  * the tail of the step's messages, after the assembled system-prompt context.

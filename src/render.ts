@@ -121,16 +121,17 @@ const MIN_LATIN_TERM_CHARS = 2
  * A term shared with a large share of the corpus says nothing about which entry
  * answers the query. Measured over the live 73-entry state with 13 anchor
  * queries: dropping terms above this share took slots filled purely by generic
- * phrasing ("关于 X 这个问题") from 26–34 of 78 to 0 of 78 while keeping every
- * anchor term (13/13, identical anywhere in the 5–20% range).
+ * phrasing (a generic "about this X question" wrapper) from 26–34 of 78 to 0 of
+ * 78 while keeping every anchor term (13/13, identical anywhere in the 5–20%
+ * range).
  */
 const MAX_TERM_CORPUS_SHARE = 0.1
 const CJK_SCRIPTS = '\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}'
 /**
  * One CJK run, or one non-CJK letter/digit run. The lookahead is load-bearing:
- * Han characters are `\p{L}`, so without it a run like `Hermes配置` would be
- * swallowed whole and shingled into junk terms (`he`, `rm`, `es`) that match
- * unrelated English content.
+ * Han characters are `\p{L}`, so without it a bare latin word followed by Han
+ * characters would be swallowed whole and shingled into junk terms (`he`, `rm`,
+ * `es`) that match unrelated English content.
  */
 const QUERY_RUN_PATTERN = new RegExp(`[${CJK_SCRIPTS}]+|(?:(?![${CJK_SCRIPTS}])[\\p{L}\\p{N}])+`, 'gu')
 const CJK_CHAR_PATTERN = new RegExp(`[${CJK_SCRIPTS}]`, 'u')
