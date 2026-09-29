@@ -140,7 +140,7 @@ function applyKnownRefinement(home: string, agent: Agent, refinementId: string):
   const result = store.applyRefinement(agent, {
     id: refinementId,
     summary: 'add a durable memory',
-    edits: [{ action: 'create', kind: 'memory', id: 'mem-1', content: 'learned' }],
+    edits: [{ action: 'create', kind: 'memory', id: 'mem-1', blastRadius: 'project', content: 'learned' }],
   }, { global: true })
   expect(result.appliedEdits).toHaveLength(1)
 }
@@ -366,7 +366,7 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
       id: 'refine-shadow',
       summary: 'update the global foo skill',
       edits: [{
-        action: 'update', kind: 'skill', id: 'foo', reason: 'refresh',
+        action: 'update', kind: 'skill', id: 'foo', reason: 'refresh', blastRadius: 'project',
         content: 'global NEW body', description: 'global new desc',
       }],
     }, { global: true })

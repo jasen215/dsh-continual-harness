@@ -12,10 +12,10 @@ describe('archive/unarchive', () => {
   }
 
   it('validateEdit accepts archive/pin edits without content and rejects non-update lifecycle edits', () => {
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', archive: true, reason: 'hide' })).toBeUndefined()
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', pin: true, reason: 'lock' })).toBeUndefined()
-    expect(validateEdit({ action: 'create', kind: 'memory', id: 'm', archive: true, content: 'x' })).toBe('archive/pin only valid on update edits')
-    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', pin: true, reason: 'remove' })).toBe('archive/pin only valid on update edits')
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', archive: true, reason: 'hide' })).toBeUndefined()
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', pin: true, reason: 'lock' })).toBeUndefined()
+    expect(validateEdit({ action: 'create', kind: 'memory', id: 'm', blastRadius: 'project', archive: true, content: 'x' })).toBe('archive/pin only valid on update edits')
+    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', blastRadius: 'project', pin: true, reason: 'remove' })).toBe('archive/pin only valid on update edits')
   })
 
   it('archives an active entry, bumps version, records snapshots, and rejects re-archive', () => {
@@ -23,7 +23,7 @@ describe('archive/unarchive', () => {
     state.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'x', updatedAt: 't' }
     const { result, state: next } = applyRefinementProposal(state, {
       id: 'a1', summary: 'archive',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: true, reason: 'stale' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', archive: true, reason: 'stale' }],
     }, { id: 'a1', scope: 'local', baselineState: state })
     expect(result.appliedEdits[0]?.applied).toBe(true)
     expect(result.appliedEdits[0]?.reason).toBe('stale')
@@ -35,7 +35,7 @@ describe('archive/unarchive', () => {
 
     const { result: dup } = applyRefinementProposal(next, {
       id: 'a2', summary: 're-archive',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: true, reason: 'again' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', archive: true, reason: 'again' }],
     }, { id: 'a2', scope: 'local', baselineState: next })
     expect(dup.appliedEdits[0]?.applied).toBe(false)
     expect(dup.appliedEdits[0]?.error).toBe('already archived')
@@ -46,7 +46,7 @@ describe('archive/unarchive', () => {
     state.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'x', updatedAt: 't' }
     const { result, state: pinned } = applyRefinementProposal(state, {
       id: 'p1', summary: 'pin',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', pin: true, reason: 'keep' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', pin: true, reason: 'keep' }],
     }, { id: 'p1', scope: 'local', baselineState: state })
     expect(result.appliedEdits[0]?.applied).toBe(true)
     expect(result.appliedEdits[0]?.reason).toBe('keep')
@@ -57,7 +57,7 @@ describe('archive/unarchive', () => {
 
     const { result: unpinResult, state: unpinned } = applyRefinementProposal(pinned, {
       id: 'p2', summary: 'unpin',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', pin: false, reason: 'release' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', pin: false, reason: 'release' }],
     }, { id: 'p2', scope: 'local', baselineState: pinned })
     expect(unpinResult.appliedEdits[0]?.applied).toBe(true)
     expect(unpinned.entries.memory['m']?.metadata?.pinned).toBe(false)
@@ -70,14 +70,14 @@ describe('archive/unarchive', () => {
     const state = archivedState()
     const { result, state: next } = applyRefinementProposal(state, {
       id: 'u1', summary: 'unarchive',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: false, reason: 'needed' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', archive: false, reason: 'needed' }],
     }, { id: 'u1', scope: 'local', baselineState: state })
     expect(result.appliedEdits[0]?.applied).toBe(true)
     expect(next.entries.memory['m']?.metadata?.lifecycleState).toBe('active')
 
     const { result: dup } = applyRefinementProposal(next, {
       id: 'u2', summary: 're-unarchive',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: false, reason: 'again' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', archive: false, reason: 'again' }],
     }, { id: 'u2', scope: 'local', baselineState: next })
     expect(dup.appliedEdits[0]?.applied).toBe(false)
     expect(dup.appliedEdits[0]?.error).toBe('not archived')

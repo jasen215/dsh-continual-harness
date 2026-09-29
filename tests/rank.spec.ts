@@ -288,3 +288,55 @@ describe('formatHarnessStateForPromptStructured files key list', () => {
     expect(overview).not.toContain('print(1)')
   })
 })
+
+describe('blastRadius x injection (gap 9)', () => {
+  const at = '2026-01-01T00:00:00.000Z'
+
+  it('does not promote a session-radius entry into the project front-row', () => {
+    const state = freshState()
+    // The session fact matches the query; the project fact does not. Only the
+    // spurious promotion could put the session fact first.
+    state.entries.memory.sessionFact = { id: 'sessionFact', kind: 'memory', version: 1, content: 'ranking notes', projects: ['dsh-continual-harness'], blastRadius: 'session', updatedAt: at }
+    state.entries.memory.projectFact = { id: 'projectFact', kind: 'memory', version: 1, content: 'unrelated body', projects: ['dsh-continual-harness'], blastRadius: 'project', updatedAt: at }
+    const rendered = formatHarnessStateForPromptStructured(state, 'ranking notes', {
+      // The session fact must be this session's own copy, otherwise the global
+      // layer filter removes it before ranking is observable at all.
+      sessionId: 'x', isLocal: (kind, id) => kind === 'memory' && id === 'sessionFact', indexLines: DEFAULT_INDEX_LINES, project: 'dsh-continual-harness',
+    })
+    const order = rendered.injectedKeys.map(key => key.split(':').at(-1))
+    // A session fact keeps its cwd provenance but carries no project reach, so
+    // it must not outrank a project-radius entry. Rank only: it stays reachable.
+    expect(order).toEqual(['projectFact', 'sessionFact'])
+  })
+
+  it('never injects a session-radius entry that comes from the global layer', () => {
+    const state = freshState()
+    state.entries.memory.globalSession = { id: 'globalSession', kind: 'memory', version: 1, content: 'ranking notes', blastRadius: 'session', updatedAt: at }
+    // `isLocal` false for everything: this entry is the global-layer one, and a
+    // session's reach cannot be honoured from a store every session reads.
+    const rendered = formatHarnessStateForPromptStructured(state, 'ranking notes', { sessionId: 'x', isLocal: () => false })
+    expect(rendered.injectedKeys).toEqual([])
+    expect(rendered.overview).toContain('memory (0)')
+  })
+
+  it('still injects a session-radius entry owned by this session', () => {
+    const state = freshState()
+    state.entries.memory.mySession = { id: 'mySession', kind: 'memory', version: 1, content: 'ranking notes', blastRadius: 'session', updatedAt: at }
+    // The local copy is the effective entry, and its reach is exactly the
+    // session viewing it: filtering here would hide the entry it belongs to.
+    const rendered = formatHarnessStateForPromptStructured(state, 'ranking notes', {
+      sessionId: 'x', isLocal: (kind, id) => kind === 'memory' && id === 'mySession',
+    })
+    expect(rendered.injectedKeys.map(key => key.split(':').at(-1))).toEqual(['mySession'])
+  })
+
+  it('keeps a session-radius entry reachable even when another project tagged it', () => {
+    const state = freshState()
+    state.entries.memory.sessionForeign = { id: 'sessionForeign', kind: 'memory', version: 1, content: 'ranking notes', projects: ['other-repo'], blastRadius: 'session', updatedAt: at }
+    const rendered = formatHarnessStateForPromptStructured(state, 'ranking notes', {
+      sessionId: 'x', isLocal: () => true, indexLines: DEFAULT_INDEX_LINES, project: 'dsh-continual-harness',
+    })
+    // Rank, never filter: a foreign tag must not hide it either.
+    expect(rendered.injectedKeys.map(key => key.split(':').at(-1))).toContain('sessionForeign')
+  })
+})

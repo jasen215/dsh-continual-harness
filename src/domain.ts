@@ -8,7 +8,7 @@
 
 import type { ContextFormed, MessageSource } from '@deepseek-ai/dsh-llm'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
-import type { RefinementResult } from './types.ts'
+import type { BlastRadius, RefinementResult } from './types.ts'
 
 /** Directory name of a harness store. */
 export const HARNESS_DIR_NAME = 'harness'
@@ -50,6 +50,14 @@ export const HARNESS_STATE_KIND = 'plugin:dsh-continual-harness'
 export const HARNESS_STATE_PLUGIN_KIND = 'plugin'
 /** Monotonic schema version of the harness state file. */
 export const HARNESS_SCHEMA_VERSION = 2
+/** Valid blast radius values: how far an entry's effects may reach. The
+ * `readonly BlastRadius[]` annotation keeps this array and the types.ts union
+ * from drifting: an unlisted member is a compile error. */
+export const BLAST_RADIUS_VALUES: readonly BlastRadius[] = ['general', 'project', 'session']
+/** Narrow an untrusted value (e.g. a parsed state field) to a declared reach. */
+export function isBlastRadius(value: unknown): value is BlastRadius {
+  return BLAST_RADIUS_VALUES.some(radius => radius === value)
+}
 /** Prefix shared by the active injection telemetry log and its epoch-stamped archives. */
 export const USAGE_ARCHIVE_PREFIX = 'usage.events.'
 /** Append-only injection telemetry event log under the harness home. */

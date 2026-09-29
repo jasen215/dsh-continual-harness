@@ -9,34 +9,34 @@ import type { HarnessState, RefinementEdit, RefinementProposal } from '../src/ty
 
 describe('edit reason contract', () => {
   it('accepts create without reason', () => {
-    expect(validateEdit({ action: 'create', kind: 'memory', id: 'fact', content: 'x' }))
+    expect(validateEdit({ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'x' }))
       .toBeUndefined()
   })
 
   it('rejects update/delete without reason with the exact message', () => {
     const message = (id: string) => `edit "${id}" rejected: missing reason, please re-add it`
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', content: 'x' }))
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', content: 'x' }))
       .toBe(message('m'))
     expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm' }))
       .toBe(message('m'))
     // empty-string reason is also rejected
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', reason: '', content: 'x' }))
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: '', content: 'x' }))
       .toBe(message('m'))
   })
 
   it('accepts update/delete with a reason', () => {
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'x' }))
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'why', content: 'x' }))
       .toBeUndefined()
-    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', reason: 'why' }))
+    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'why' }))
       .toBeUndefined()
   })
 
   it('rejects a non-string reason without throwing', () => {
     const message = (id: string) => `edit "${id}" rejected: missing reason, please re-add it`
     // parseProposal does no field validation, so the model can emit a number
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', reason: 123, content: 'x' }))
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 123, content: 'x' }))
       .toBe(message('m'))
-    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', reason: 123 }))
+    expect(validateEdit({ action: 'delete', kind: 'memory', id: 'm', blastRadius: 'project', reason: 123 }))
       .toBe(message('m'))
     // and applying such a proposal rejects per-edit instead of crashing the apply
     const state = freshState()
@@ -44,7 +44,7 @@ describe('edit reason contract', () => {
     const proposal: RefinementProposal = {
       id: 'refine_rules_nonstring',
       summary: 'non-string reason',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 123, content: 'new' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 123, content: 'new' }],
     }
     const { result } = applyRefinementProposal(state, proposal, {
       id: proposal.id,
@@ -72,7 +72,7 @@ describe('edit blastRadius contract', () => {
 })
 
 describe('applied edit persistence', () => {
-  it('persists blastRadius defaulting to general and reason only when given', () => {
+  it('persists the declared blastRadius alongside reason', () => {
     const state = freshState()
     state.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
     state.entries.memory['m2'] = { id: 'm2', kind: 'memory', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
@@ -80,8 +80,8 @@ describe('applied edit persistence', () => {
       id: 'refine_rules_1',
       summary: 'persistence',
       edits: [
-        { action: 'create', kind: 'memory', id: 'new', content: 'fresh' },
-        { action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'new' },
+        { action: 'create', kind: 'memory', id: 'new', blastRadius: 'session', content: 'fresh' },
+        { action: 'update', kind: 'memory', id: 'm', reason: 'why', blastRadius: 'session', content: 'new' },
         { action: 'update', kind: 'memory', id: 'm2', reason: 'why', blastRadius: 'project', content: 'new' },
       ],
     }
@@ -90,23 +90,23 @@ describe('applied edit persistence', () => {
       scope: 'local',
       baselineState: state,
     })
-    // create: blastRadius defaults to general, reason absent
+    // create: the declared session radius persists, reason absent
     const created = result.appliedEdits.find(edit => edit.id === 'new')!
     expect(created.applied).toBe(true)
-    expect(created.blastRadius).toBe('general')
+    expect(created.blastRadius).toBe('session')
     expect('reason' in created).toBe(false)
-    // update: reason persists, blastRadius defaults to general
+    // update: reason and the declared session radius both persist
     const updated = result.appliedEdits.find(edit => edit.id === 'm')!
     expect(updated.applied).toBe(true)
     expect(updated.reason).toBe('why')
-    expect(updated.blastRadius).toBe('general')
+    expect(updated.blastRadius).toBe('session')
     // explicit blastRadius persists as-is
     const explicit = result.appliedEdits.find(edit => edit.id === 'm2')!
     expect(explicit.blastRadius).toBe('project')
     expect(explicit.reason).toBe('why')
     // the committed result record persists the same fields
     const committed = next.refinements[0]!.appliedEdits.find(edit => edit.id === 'm')!
-    expect(committed.blastRadius).toBe('general')
+    expect(committed.blastRadius).toBe('session')
     expect(committed.reason).toBe('why')
   })
 
@@ -116,7 +116,7 @@ describe('applied edit persistence', () => {
       id: 'refine_rules_2',
       summary: 'rejected',
       edits: [
-        { action: 'update', kind: 'memory', id: 'missing', reason: 'why', content: 'x' },
+        { action: 'update', kind: 'memory', id: 'missing', blastRadius: 'project', reason: 'why', content: 'x' },
       ],
     }
     const { result } = applyRefinementProposal(state, proposal, {
@@ -127,7 +127,7 @@ describe('applied edit persistence', () => {
     const rejected = result.appliedEdits[0]!
     expect(rejected.applied).toBe(false)
     expect(rejected.error).toBe('entry not found')
-    expect(rejected.blastRadius).toBe('general')
+    expect(rejected.blastRadius).toBe('project')
   })
 
   it('normalizes an invalid blastRadius to general on rejected edits', () => {
@@ -161,8 +161,8 @@ describe('rollback reason stamping', () => {
       id: 'refine_rules_3',
       summary: 'two creates',
       edits: [
-        { action: 'create', kind: 'memory', id: 'a', content: 'A' },
-        { action: 'create', kind: 'memory', id: 'b', content: 'B' },
+        { action: 'create', kind: 'memory', id: 'a', blastRadius: 'project', content: 'A' },
+        { action: 'create', kind: 'memory', id: 'b', blastRadius: 'project', content: 'B' },
       ],
     }
     const { result, state: next } = applyRefinementProposal(state, proposal, {
@@ -216,19 +216,19 @@ describe('growth limit rule', () => {
   it('rejects an update exceeding maxEntryGrowth with the exact message', () => {
     const { result } = applyGrowth(
       memoryState('x'.repeat(100)),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'grow', content: 'y'.repeat(200) },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'grow', content: 'y'.repeat(200) },
       0.5,
     )
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(false)
     expect(edit.error).toBe('entry growth exceeds the maxEntryGrowth cap')
-    expect(edit.blastRadius).toBe('general')
+    expect(edit.blastRadius).toBe('project')
   })
 
   it('allows an update exactly at the maxEntryGrowth threshold', () => {
     const { result, state: next } = applyGrowth(
       memoryState('x'.repeat(100)),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'grow', content: 'y'.repeat(150) },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'grow', content: 'y'.repeat(150) },
       0.5,
     )
     expect(result.appliedEdits[0]!.applied).toBe(true)
@@ -238,7 +238,7 @@ describe('growth limit rule', () => {
   it('disables the limit when maxEntryGrowth is 0', () => {
     const { result } = applyGrowth(
       memoryState('x'.repeat(100)),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'grow', content: 'y'.repeat(400) },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'grow', content: 'y'.repeat(400) },
       0,
     )
     expect(result.appliedEdits[0]!.applied).toBe(true)
@@ -247,7 +247,7 @@ describe('growth limit rule', () => {
   it('skips the check when the old content is empty', () => {
     const { result } = applyGrowth(
       memoryState(''),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'grow', content: 'y'.repeat(200) },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'grow', content: 'y'.repeat(200) },
       0.5,
     )
     expect(result.appliedEdits[0]!.applied).toBe(true)
@@ -281,19 +281,19 @@ describe('protected rule', () => {
   it('rejects an automatic update of a protected entry with the exact message', () => {
     const { result } = applyProtected(
       memoryState('pinned'),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'auto', content: 'new' },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'auto', content: 'new' },
       true,
     )
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(false)
     expect(edit.error).toBe('protected entries are mutable only in explicit user sessions')
-    expect(edit.blastRadius).toBe('general')
+    expect(edit.blastRadius).toBe('project')
   })
 
   it('rejects an automatic delete of a protected entry', () => {
     const { result } = applyProtected(
       memoryState('pinned'),
-      { action: 'delete', kind: 'memory', id: 'm', reason: 'auto' },
+      { action: 'delete', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'auto' },
       true,
     )
     expect(result.appliedEdits[0]!.applied).toBe(false)
@@ -303,7 +303,7 @@ describe('protected rule', () => {
   it('allows the tool path (automatic false) to edit a protected entry', () => {
     const { result, state: next } = applyProtected(
       memoryState('pinned'),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'tool', content: 'new' },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'tool', content: 'new' },
       false,
     )
     expect(result.appliedEdits[0]!.applied).toBe(true)
@@ -313,7 +313,7 @@ describe('protected rule', () => {
   it('allows automatic edits of unprotected entries', () => {
     const { result } = applyProtected(
       memoryState(),
-      { action: 'update', kind: 'memory', id: 'm', reason: 'auto', content: 'new' },
+      { action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'auto', content: 'new' },
       true,
     )
     expect(result.appliedEdits[0]!.applied).toBe(true)
@@ -371,7 +371,7 @@ describe('local-during-global rule', () => {
       kind: 'memory',
       id: 'global-only',
       reason: 'why',
-      content: 'x',
+      content: 'x', blastRadius: 'project',
     })
     expect(result.appliedEdits[0]!.applied).toBe(false)
     expect(result.appliedEdits[0]!.error).toBe('global entries are read-only during a local refinement; create a local shadow first')
@@ -393,7 +393,7 @@ describe('local-during-global rule', () => {
       action: 'create',
       kind: 'memory',
       id: 'global-only',
-      content: 'shadow',
+      content: 'shadow', blastRadius: 'project',
     })
     expect(result.appliedEdits[0]!.applied).toBe(true)
     expect(next.entries.memory['global-only']!.content).toBe('shadow')
@@ -405,7 +405,7 @@ describe('local-during-global rule', () => {
       kind: 'memory',
       id: 'shared',
       reason: 'why',
-      content: 'new local copy',
+      content: 'new local copy', blastRadius: 'project',
     })
     expect(result.appliedEdits[0]!.applied).toBe(true)
     expect(next.entries.memory['shared']!.content).toBe('new local copy')
@@ -423,7 +423,7 @@ describe('local-during-global rule', () => {
     const proposal: RefinementProposal = {
       id: 'refine_no_global',
       summary: 'no global entries',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'new' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'why', content: 'new' }],
     }
     const { result } = applyRefinementProposal(state, proposal, {
       id: proposal.id,

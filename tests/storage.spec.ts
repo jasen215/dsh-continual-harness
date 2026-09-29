@@ -2,25 +2,9 @@ import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import {
-  appendGlobalRefinement,
-  appendLocalRefinement,
-  emptyHarnessState,
-  getGlobalHarnessStateDir,
-  getLocalHarnessStateDir,
-  loadGlobalRefinementHistory,
-  loadHarnessState,
-  loadSessionRefinementHistory,
-  loadUsageEvents,
-  migrateHarnessState,
-  appendUsageEvent,
-  appendUsageEvents,
-  mergeHarnessStates,
-  mergeRefinementHistory,
-  saveHarnessState,
-} from '../src/storage.ts'
+import { appendGlobalRefinement, appendLocalRefinement, appendUsageEvent, appendUsageEvents, backfillBlastRadius, emptyHarnessState, getGlobalHarnessStateDir, getLocalHarnessStateDir, loadGlobalRefinementHistory, loadHarnessState, loadSessionRefinementHistory, loadUsageEvents, mergeHarnessStates, mergeRefinementHistory, migrateHarnessState, normalizeBlastRadius, saveHarnessState } from '../src/storage.ts'
 import { USAGE_ARCHIVE_PREFIX, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import type { RefinementResult } from '../src/types.ts'
+import type { HarnessState, RefinementResult } from '../src/types.ts'
 
 const tempDirs: string[] = []
 
@@ -337,5 +321,113 @@ describe('harness state storage', () => {
     appendLocalRefinement(home, 'session-a', result)
     expect(loadSessionRefinementHistory(home, 'session-a')).toEqual([result])
     expect(loadSessionRefinementHistory(home, 'session-b')).toEqual([])
+  })
+})
+
+describe('blastRadius backfill', () => {
+  const baseEntry = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, kind: 'memory' as const, version: 1, content: 'c', updatedAt: '2026-09-29T00:00:00Z', ...extra,
+  })
+  const baseEdit = (id: string, extra: Record<string, unknown> = {}) => ({
+    action: 'create' as const, kind: 'memory' as const, id, applied: true, ...extra,
+  })
+  const stateWith = (entries: Array<{ id: string }>, edits: unknown[][]): HarnessState => ({
+    schemaVersion: HARNESS_SCHEMA_VERSION,
+    entries: {
+      prompt: {},
+      memory: Object.fromEntries(entries.map(entry => [entry.id, entry])),
+      skill: {},
+      subagent: {},
+    },
+    refinements: edits.map((appliedEdits, i) => ({ id: `r${i}`, summary: 's', appliedEdits, committedAt: 't', scope: 'local' })),
+  }) as unknown as HarnessState
+  it('clears an out-of-domain radius but keeps the entry', () => {
+    const state = stateWith([baseEntry('a', { blastRadius: 'global' })], [])
+    expect(normalizeBlastRadius(state)).toBe(1)
+    // Losing a memory over one stale field would be worse than the stale value.
+    expect(state.entries.memory.a).toBeDefined()
+    expect(state.entries.memory.a.blastRadius).toBeUndefined()
+  })
+
+  it('lets history refill a cleared radius instead of leaving it invented', () => {
+    const state = stateWith([baseEntry('a', { blastRadius: 7 })], [[baseEdit('a', { blastRadius: 'project' })]])
+    expect(normalizeBlastRadius(state)).toBe(1)
+    expect(backfillBlastRadius(state)).toEqual({ filled: 1, undeclared: 0 })
+    expect(state.entries.memory.a.blastRadius).toBe('project')
+  })
+
+  it('leaves an in-domain radius untouched', () => {
+    const state = stateWith([baseEntry('a', { blastRadius: 'session' }), baseEntry('b')], [])
+    expect(normalizeBlastRadius(state)).toBe(0)
+    expect(state.entries.memory.a.blastRadius).toBe('session')
+    expect(state.entries.memory.b.blastRadius).toBeUndefined()
+  })
+
+  it('reports the clearing through migrate diagnostics', () => {
+    const parsed = {
+      schemaVersion: 1,
+      entries: { memory: { a: baseEntry('a', { blastRadius: 'global' }) } },
+      refinements: [],
+    }
+    const { state, diagnostics } = migrateHarnessState(parsed)
+    expect(diagnostics.some(line => line.includes('out-of-domain'))).toBe(true)
+    expect(state.entries.memory.a).toBeDefined()
+  })
+
+  it('takes the last successful edit\'s radius', () => {
+    const state = stateWith([baseEntry('a')], [
+      [baseEdit('a', { blastRadius: 'project' })],
+      [baseEdit('a', { blastRadius: 'session' })],
+    ])
+    expect(backfillBlastRadius(state)).toEqual({ filled: 1, undeclared: 0 })
+    expect(state.entries.memory.a.blastRadius).toBe('session')
+  })
+
+  it('skips rejected edits, whose radius can be a fallback rather than a declaration', () => {
+    const state = stateWith([baseEntry('a')], [
+      [baseEdit('a', { blastRadius: 'project' })],
+      [baseEdit('a', { blastRadius: 'general', applied: false, error: 'rejected' })],
+    ])
+    expect(backfillBlastRadius(state)).toEqual({ filled: 1, undeclared: 0 })
+    expect(state.entries.memory.a.blastRadius).toBe('project')
+  })
+
+  it('leaves an entry undeclared when no successful edit declared a valid radius', () => {
+    const state = stateWith([baseEntry('a'), baseEntry('b')], [
+      [baseEdit('a', { blastRadius: 'bogus' })],
+      [baseEdit('b', { applied: false })],
+    ])
+    expect(backfillBlastRadius(state)).toEqual({ filled: 0, undeclared: 2 })
+    expect(state.entries.memory.a.blastRadius).toBeUndefined()
+    expect(state.entries.memory.b.blastRadius).toBeUndefined()
+  })
+
+  it('never overwrites a radius already on the entry, and is idempotent', () => {
+    const state = stateWith([baseEntry('a', { blastRadius: 'general' })], [[baseEdit('a', { blastRadius: 'session' })]])
+    expect(backfillBlastRadius(state)).toEqual({ filled: 0, undeclared: 0 })
+    expect(state.entries.memory.a.blastRadius).toBe('general')
+
+    const again = stateWith([baseEntry('b')], [[baseEdit('b', { blastRadius: 'project' })]])
+    expect(backfillBlastRadius(again)).toEqual({ filled: 1, undeclared: 0 })
+    expect(backfillBlastRadius(again)).toEqual({ filled: 0, undeclared: 0 })
+  })
+
+  it('migrateHarnessState fills the field and reports the backfill in diagnostics', () => {
+    const { state, diagnostics } = migrateHarnessState(
+      stateWith([baseEntry('a')], [[baseEdit('a', { blastRadius: 'project' })]]),
+    )
+    expect(state.entries.memory.a.blastRadius).toBe('project')
+    expect(diagnostics).toContain('backfilled blastRadius on 1 entries from refinement history')
+  })
+
+  it('treats an entry with no history as undeclared, not as an error', () => {
+    const state = stateWith([baseEntry('a')], [])
+    expect(backfillBlastRadius(state)).toEqual({ filled: 0, undeclared: 1 })
+
+    // Loading it must stay clean: undeclared is a legal legacy state (3.1),
+    // so it is not a diagnostic the way "skipping invalid entry" is.
+    const { state: loaded, diagnostics } = migrateHarnessState(stateWith([baseEntry('a')], []))
+    expect(loaded.entries.memory.a.blastRadius).toBeUndefined()
+    expect(diagnostics).toEqual([])
   })
 })

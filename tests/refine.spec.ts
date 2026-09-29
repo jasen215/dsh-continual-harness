@@ -1,45 +1,177 @@
 import { describe, expect, it } from 'vitest'
-import {
-  applyRefinementProposal,
-  freshState,
-  rollbackProposal,
-  touchedSkillIds,
-  validateEdit,
-} from '../src/refine.ts'
+import { applyRefinementProposal, entryFingerprint, freshState, rollbackProposal, touchedSkillIds, validateEdit } from '../src/refine.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS } from '../src/skills.ts'
-import type { RefinementProposal } from '../src/types.ts'
+import type { BlastRadius, RefinementProposal } from '../src/types.ts'
 import type { SkillEntry } from '../src/types.ts'
+
+describe('scope x blastRadius exclusion (3.4.1)', () => {
+  const base = freshState()
+  const apply = (scope: 'local' | 'global', blastRadius: BlastRadius) => applyRefinementProposal(base, {
+    id: 'refine_1', summary: 's',
+    edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'c', blastRadius }],
+  }, { id: 'refine_1', scope, baselineState: base })
+
+  it('rejects general content targeting the local scope', () => {
+    const { result } = apply('local', 'general')
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toContain(`'general' cannot target the local scope`)
+  })
+
+  it('rejects session content targeting the global scope', () => {
+    const { result } = apply('global', 'session')
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toContain(`'session' cannot target the global scope`)
+  })
+
+  it('admits the legal pairs, including local+project', () => {
+    expect(apply('global', 'general').result.appliedEdits[0]?.applied).toBe(true)
+    expect(apply('local', 'session').result.appliedEdits[0]?.applied).toBe(true)
+    expect(apply('global', 'project').result.appliedEdits[0]?.applied).toBe(true)
+  })
+
+  it('lets a delete omit the reach it cannot have', () => {
+    // A delete claims no reach at all, so demanding a declaration would be
+    // meaningless. (The replay exemption — a record's general fallback is not a
+    // declaration — is covered by the rollback cases in this file.)
+    const seeded = applyRefinementProposal(base, {
+      id: 'refine_0', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', blastRadius: 'project', content: 'c' }],
+    }, { id: 'refine_0', scope: 'local', baselineState: base })
+    const { result, state: deleted } = applyRefinementProposal(seeded.state, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'delete', kind: 'memory', id: 'a', reason: 'why' }],
+    }, { id: 'refine_1', scope: 'local', baselineState: seeded.state })
+    expect(result.appliedEdits[0]?.applied).toBe(true)
+    expect(deleted.entries.memory.a).toBeUndefined()
+  })
+
+  it('still lets a rollback delete what it must, whatever the record fallback says', () => {
+    // An applied record falls back to 'general' when nothing was declared; a
+    // rollback must not turn that fallback into a declaration and reject itself.
+    const created = applyRefinementProposal(base, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', blastRadius: 'project', content: 'c' }],
+    }, { id: 'refine_1', scope: 'local', baselineState: base })
+    const { state, result } = applyRefinementProposal(created.state, rollbackProposal(created.result), {
+      id: 'rollback_refine_1', scope: 'local', baselineState: created.state,
+    })
+    expect(result.appliedEdits[0]?.error).toBeUndefined()
+    expect(state.entries.memory.a).toBeUndefined()
+  })
+})
+
+describe('blastRadius reaches the entry it writes (gap 9)', () => {
+  const state0 = freshState()
+  const opts = { id: 'refine_1', scope: 'global' as const, baselineState: state0 }
+
+  it('stamps a declared blastRadius onto a created entry', () => {
+    const { state } = applyRefinementProposal(state0, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'c', blastRadius: 'project' }],
+    }, opts)
+    expect(state.entries.memory.a?.blastRadius).toBe('project')
+  })
+
+  it('stamps a declared blastRadius onto an updated entry', () => {
+    const { state: created } = applyRefinementProposal(state0, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'c', blastRadius: 'project' }],
+    }, opts)
+    const updated = applyRefinementProposal(created, {
+      id: 'refine_2', summary: 's',
+      edits: [{ action: 'update', kind: 'memory', id: 'a', content: 'c2', blastRadius: 'session', reason: 'why' }],
+    }, { id: 'refine_2', scope: 'local', baselineState: created })
+    // Without this the rejection path would look identical to a missing stamp.
+    expect(updated.result.appliedEdits[0]?.applied).toBe(true)
+    expect(updated.state.entries.memory.a?.blastRadius).toBe('session')
+  })
+
+  it('rejects an edit that omits blastRadius instead of defaulting one', () => {
+    const { result } = applyRefinementProposal(state0, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'c' }],
+    }, opts)
+    // 3.4.1: an omission is a missing declaration, not 'unspecified', so nothing
+    // may be inferred on the writer's behalf.
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toContain('missing blastRadius')
+  })
+
+  it('rejects an explicit null blastRadius like any other non-declaration', () => {
+    const { result } = applyRefinementProposal(state0, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'c', blastRadius: null as unknown as BlastRadius }],
+    }, opts)
+    expect(result.appliedEdits[0]?.applied).toBe(false)
+    expect(result.appliedEdits[0]?.error).toContain('invalid blastRadius')
+  })
+
+  it('stamps the declared reach on an archive edit too', () => {
+    const { state: created } = applyRefinementProposal(state0, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'c', blastRadius: 'project' }],
+    }, opts)
+    const archived = applyRefinementProposal(created, {
+      id: 'refine_2', summary: 's',
+      edits: [{ action: 'update', kind: 'memory', id: 'a', reason: 'hide', archive: true, blastRadius: 'session' }],
+    }, { id: 'refine_2', scope: 'local', baselineState: created })
+    // The validator forces a declaration on this edit, so dropping it would
+    // leave the entry and the journal disagreeing about the reach.
+    expect(archived.result.appliedEdits[0]?.applied).toBe(true)
+    expect(archived.state.entries.memory.a?.blastRadius).toBe('session')
+    expect(archived.state.entries.memory.a?.metadata?.lifecycleState).toBe('archived')
+  })
+
+  it('carries the declaration through rollback instead of dropping it', () => {
+    const first = applyRefinementProposal(state0, {
+      id: 'refine_1', summary: 's',
+      edits: [{ action: 'create', kind: 'memory', id: 'a', content: 'v1', blastRadius: 'project' }],
+    }, opts)
+    const second = applyRefinementProposal(first.state, {
+      id: 'refine_2', summary: 's',
+      edits: [{ action: 'update', kind: 'memory', id: 'a', content: 'v2', blastRadius: 'session', reason: 'why' }],
+    }, { id: 'refine_2', scope: 'local', baselineState: first.state })
+    expect(second.result.appliedEdits[0]?.applied).toBe(true)
+    expect(second.state.entries.memory.a?.blastRadius).toBe('session')
+    // Rolling the update back must restore the earlier reach, not leave the
+    // later one in place: an entry's reach is part of what rollback restores.
+    const { state: reverted } = applyRefinementProposal(second.state, rollbackProposal(second.result), {
+      id: 'rollback_refine_2', scope: 'local', baselineState: second.state,
+    })
+    expect(reverted.entries.memory.a?.blastRadius).toBe('project')
+  })
+})
 
 const tinyLimits = { maxSkillFiles: 1, maxSkillFileBytes: 16, maxSkillBundleBytes: 64 }
 
 describe('validateEdit', () => {
   it('accepts a well-formed create edit', () => {
-    expect(validateEdit({ action: 'create', kind: 'memory', id: 'deploy-failure', content: 'remember to pin versions' }))
+    expect(validateEdit({ action: 'create', kind: 'memory', id: 'deploy-failure', blastRadius: 'project', content: 'remember to pin versions' }))
       .toBeUndefined()
   })
 
   it('rejects unknown kinds and actions', () => {
-    expect(validateEdit({ action: 'create', kind: 'bogus', id: 'x', content: 'y' })).toContain('unknown kind')
+    expect(validateEdit({ action: 'create', kind: 'bogus', id: 'x', blastRadius: 'project', content: 'y' })).toContain('unknown kind')
     expect(validateEdit({ action: 'rename', kind: 'memory', id: 'x', content: 'y' })).toContain('unknown action')
   })
 
   it('treats the base system prompt as immutable', () => {
-    expect(validateEdit({ action: 'update', kind: 'prompt', id: 'base_system_prompt', content: 'x' }))
+    expect(validateEdit({ action: 'update', kind: 'prompt', id: 'base_system_prompt', blastRadius: 'project', content: 'x' }))
       .toBe('the base system prompt is immutable')
   })
 
   it('validates skill edits: kebab-case id, content required, description optional', () => {
-    expect(validateEdit({ action: 'create', kind: 'skill', id: 'Not Kebab', content: 'c' })).toContain('kebab-case')
-    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', description: 'summary' }))
+    expect(validateEdit({ action: 'create', kind: 'skill', id: 'Not Kebab', blastRadius: 'project', content: 'c' })).toContain('kebab-case')
+    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', blastRadius: 'project', content: 'c', description: 'summary' }))
       .toBeUndefined()
-    expect(validateEdit({ action: 'delete', kind: 'skill', id: 's', reason: 'why' })).toBeUndefined()
+    expect(validateEdit({ action: 'delete', kind: 'skill', id: 's', blastRadius: 'project', reason: 'why' })).toBeUndefined()
     // legacy python-contract fields remain tolerated for state compatibility
-    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', content: 'c', reference: 'r', arguments: '{}' }))
+    expect(validateEdit({ action: 'create', kind: 'skill', id: 's', blastRadius: 'project', content: 'c', reference: 'r', arguments: '{}' }))
       .toBeUndefined()
   })
 
   it('requires content for non-delete edits', () => {
-    expect(validateEdit({ action: 'update', kind: 'memory', id: 'x', reason: 'why' })).toContain('content')
+    expect(validateEdit({ action: 'update', kind: 'memory', id: 'x', blastRadius: 'project', reason: 'why' })).toContain('content')
   })
 })
 
@@ -48,10 +180,10 @@ describe('applyRefinementProposal', () => {
     id: 'refine_1',
     summary: 'remember the pattern',
     edits: [
-      { action: 'create', kind: 'memory', id: 'pin-versions', content: 'always pin versions' },
-      { action: 'create', kind: 'skill', id: 'repro', content: 'repro skill', description: 'reproduce a bug fast' },
-      { action: 'update', kind: 'memory', id: 'missing', reason: 'why', content: 'x' },
-      { action: 'delete', kind: 'memory', id: 'stale', reason: 'why', content: '' },
+      { action: 'create', kind: 'memory', id: 'pin-versions', blastRadius: 'project', content: 'always pin versions' },
+      { action: 'create', kind: 'skill', id: 'repro', blastRadius: 'project', content: 'repro skill', description: 'reproduce a bug fast' },
+      { action: 'update', kind: 'memory', id: 'missing', blastRadius: 'project', reason: 'why', content: 'x' },
+      { action: 'delete', kind: 'memory', id: 'stale', blastRadius: 'project', reason: 'why', content: '' },
     ],
   }
 
@@ -78,13 +210,13 @@ describe('applyRefinementProposal', () => {
     const state = freshState()
     const { state: created } = applyRefinementProposal(state, {
       id: 'title-create', summary: 'title',
-      edits: [{ action: 'create', kind: 'memory', id: 'titled', content: 'x', title: 'Original title' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'titled', blastRadius: 'project', content: 'x', title: 'Original title' }],
     }, { id: 'title-create', scope: 'local', baselineState: state })
     expect(created.entries.memory['titled']?.title).toBe('Original title')
 
     const { state: updated } = applyRefinementProposal(created, {
       id: 'title-update', summary: 'rename',
-      edits: [{ action: 'update', kind: 'memory', id: 'titled', reason: 'clarify', content: 'y', title: 'Updated title' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'titled', blastRadius: 'project', reason: 'clarify', content: 'y', title: 'Updated title' }],
     }, { id: 'title-update', scope: 'local', baselineState: created })
     expect(updated.entries.memory['titled']?.title).toBe('Updated title')
   })
@@ -93,13 +225,13 @@ describe('applyRefinementProposal', () => {
     const state = freshState()
     const { state: created } = applyRefinementProposal(state, {
       id: 's1', summary: 'create',
-      edits: [{ action: 'create', kind: 'memory', id: 'm', content: 'x' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'm', blastRadius: 'project', content: 'x' }],
     }, { id: 's1', scope: 'local', baselineState: state, sourceSession: 'session-9' })
     expect(created.entries.memory['m']?.metadata?.sourceSession).toBe('session-9')
 
     const { state: updated } = applyRefinementProposal(created, {
       id: 's2', summary: 'update',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'y' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'why', content: 'y' }],
     }, { id: 's2', scope: 'local', baselineState: created, sourceSession: 'session-9' })
     expect(updated.entries.memory['m']?.metadata?.sourceSession).toBe('session-9')
     expect(updated.entries.memory['m']?.content).toBe('y')
@@ -110,7 +242,7 @@ describe('applyRefinementProposal', () => {
     const { state: created } = applyRefinementProposal(state, {
       id: 'precedence-create', summary: 'create historical',
       edits: [{
-        action: 'create', kind: 'memory', id: 'historical', content: 'x',
+        action: 'create', kind: 'memory', id: 'historical', content: 'x', blastRadius: 'project',
         metadata: { sourceSession: 'historical' },
       }],
     }, {
@@ -121,7 +253,7 @@ describe('applyRefinementProposal', () => {
     const { state: updated } = applyRefinementProposal(created, {
       id: 'precedence-update', summary: 'update historical',
       edits: [{
-        action: 'update', kind: 'memory', id: 'historical', reason: 'restore', content: 'y',
+        action: 'update', kind: 'memory', id: 'historical', reason: 'restore', content: 'y', blastRadius: 'project',
         metadata: { sourceSession: 'historical-update' },
       }],
     }, {
@@ -136,7 +268,7 @@ describe('applyRefinementProposal', () => {
     }
     const { state: archived } = applyRefinementProposal(archiveState, {
       id: 'archive', summary: 'archive',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', archive: true }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', archive: true }],
     }, { id: 'archive', scope: 'local', baselineState: archiveState, sourceSession: 'current' })
     expect(archived.entries.memory['m']?.metadata?.sourceSession).toBe('original')
 
@@ -144,7 +276,7 @@ describe('applyRefinementProposal', () => {
     pinState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
     const { state: pinned } = applyRefinementProposal(pinState, {
       id: 'pin', summary: 'pin',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', pin: true }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', pin: true }],
     }, { id: 'pin', scope: 'local', baselineState: pinState, sourceSession: 'current' })
     expect(pinned.entries.memory['m']?.metadata?.sourceSession).toBeUndefined()
 
@@ -152,13 +284,13 @@ describe('applyRefinementProposal', () => {
     noMetadataState.entries.memory['m'] = { id: 'm', kind: 'memory', version: 1, content: 'old', updatedAt: 't' }
     const { state: noMetadataUpdated } = applyRefinementProposal(noMetadataState, {
       id: 'old-entry', summary: 'update old entry',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'annotate', content: 'new' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'annotate', content: 'new' }],
     }, { id: 'old-entry', scope: 'local', baselineState: noMetadataState, sourceSession: 'current' })
     expect(noMetadataUpdated.entries.memory['m']?.metadata).toEqual({ sourceSession: 'current' })
 
     const { state: noSource } = applyRefinementProposal(freshState(), {
       id: 'no-source', summary: 'create without metadata',
-      edits: [{ action: 'create', kind: 'memory', id: 'm', content: 'x' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'm', blastRadius: 'project', content: 'x' }],
     }, { id: 'no-source', scope: 'local', baselineState: freshState() })
     expect(noSource.entries.memory['m']).not.toHaveProperty('metadata')
   })
@@ -171,7 +303,7 @@ describe('applyRefinementProposal', () => {
     const { result } = applyRefinementProposal(state, {
       id: 'refine_2',
       summary: 'update',
-      edits: [{ action: 'update', kind: 'memory', id: 'pin-versions', reason: 'why', content: 'newest' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'pin-versions', blastRadius: 'project', reason: 'why', content: 'newest' }],
     }, { id: 'refine_2', scope: 'local', baselineState: baseline })
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(false)
@@ -188,7 +320,7 @@ describe('full entry snapshots and rollback', () => {
     }
     const { result, state: next } = applyRefinementProposal(state, {
       id: 'r1', summary: 'update',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'new' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'why', content: 'new' }],
     }, { id: 'r1', scope: 'local', baselineState: state })
     const edit = result.appliedEdits[0]!
     expect(edit.applied).toBe(true)
@@ -216,7 +348,7 @@ describe('full entry snapshots and rollback', () => {
     }
     const { result, state: next } = applyRefinementProposal(state, {
       id: 'r-delete', summary: 'delete',
-      edits: [{ action: 'delete', kind: 'memory', id: 'm', reason: 'remove' }],
+      edits: [{ action: 'delete', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'remove' }],
     }, { id: 'r-delete', scope: 'local', baselineState: state })
     const rollback = rollbackProposal(result)
     expect(rollback.edits[0]).toMatchObject({
@@ -247,10 +379,10 @@ describe('full entry snapshots and rollback', () => {
     }
     const { result, state: next } = applyRefinementProposal(state, {
       id: 'r-strip', summary: 'update',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'new' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', blastRadius: 'project', content: 'new' }],
     }, { id: 'r-strip', scope: 'local', baselineState: state })
     // The in-memory result keeps the snapshots (rollback/diagnostics use them).
-    expect(result.appliedEdits[0]).toMatchObject({ applied: true, reason: 'why', blastRadius: 'general' })
+    expect(result.appliedEdits[0]).toMatchObject({ applied: true, reason: 'why', blastRadius: 'project' })
     expect(result.appliedEdits[0]?.beforeEntry?.content).toBe('old')
     expect(result.appliedEdits[0]?.beforeEntry?.title).toBe('old title')
     expect(result.appliedEdits[0]?.afterEntry?.content).toBe('new')
@@ -258,7 +390,7 @@ describe('full entry snapshots and rollback', () => {
     const persisted = next.refinements[0]!
     const edit = persisted.appliedEdits[0]!
     expect(persisted.summary).toBe('update')
-    expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'm', applied: true, reason: 'why', blastRadius: 'general' })
+    expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'm', applied: true, reason: 'why', blastRadius: 'project' })
     expect(edit.before).toBeUndefined()
     expect(edit.after).toBeUndefined()
     expect(edit.beforeEntry).toBeUndefined()
@@ -275,7 +407,7 @@ describe('full entry snapshots and rollback', () => {
     state.entries.skill['skill'] = { ...baseline.entries.skill['skill']!, reference: 'new reference' }
     const { result } = applyRefinementProposal(state, {
       id: 'r-skill-fields', summary: 'update',
-      edits: [{ action: 'update', kind: 'skill', id: 'skill', reason: 'why', content: 'same' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'skill', blastRadius: 'project', reason: 'why', content: 'same' }],
     }, { id: 'r-skill-fields', scope: 'local', baselineState: baseline })
     expect(result.appliedEdits[0]?.applied).toBe(false)
     expect(result.appliedEdits[0]?.error).toBe('entry changed during refinement planning')
@@ -288,7 +420,7 @@ describe('full entry snapshots and rollback', () => {
     state.entries.memory['m'] = { ...baseline.entries.memory['m']!, metadata: { pinned: true } }
     const { result } = applyRefinementProposal(state, {
       id: 'r3', summary: 'update',
-      edits: [{ action: 'update', kind: 'memory', id: 'm', reason: 'why', content: 'same' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'm', blastRadius: 'project', reason: 'why', content: 'same' }],
     }, { id: 'r3', scope: 'local', baselineState: baseline })
     expect(result.appliedEdits[0]?.applied).toBe(false)
     expect(result.appliedEdits[0]?.error).toBe('entry changed during refinement planning')
@@ -302,9 +434,9 @@ describe('full entry snapshots and rollback', () => {
     const { result } = applyRefinementProposal(state, {
       id: 'auto-protected', summary: 'auto skill edit',
       edits: [
-        { action: 'create', kind: 'skill', id: 'new-skill', content: 'body' },
-        { action: 'update', kind: 'skill', id: 'existing', reason: 'auto', content: 'tampered' },
-        { action: 'delete', kind: 'skill', id: 'existing', reason: 'auto' },
+        { action: 'create', kind: 'skill', id: 'new-skill', blastRadius: 'project', content: 'body' },
+        { action: 'update', kind: 'skill', id: 'existing', blastRadius: 'project', reason: 'auto', content: 'tampered' },
+        { action: 'delete', kind: 'skill', id: 'existing', blastRadius: 'project', reason: 'auto' },
       ],
     }, {
       id: 'auto-protected', scope: 'local', baselineState: state,
@@ -319,7 +451,7 @@ describe('full entry snapshots and rollback', () => {
     // the explicit (non-automatic) tool path may still edit the kind
     const manual = applyRefinementProposal(state, {
       id: 'manual-skill', summary: 'manual skill edit',
-      edits: [{ action: 'create', kind: 'skill', id: 'new-skill', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'new-skill', blastRadius: 'project', content: 'body' }],
     }, { id: 'manual-skill', scope: 'local', baselineState: state, protectedKinds: ['skill'] })
     expect(manual.result.appliedEdits[0]?.applied).toBe(true)
   })
@@ -328,7 +460,7 @@ describe('full entry snapshots and rollback', () => {
     const state = freshState()
     const { result } = applyRefinementProposal(state, {
       id: 'auto-protected-2', summary: 'auto create',
-      edits: [{ action: 'create', kind: 'skill', id: 'unprotected-skill', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'unprotected-skill', blastRadius: 'project', content: 'body' }],
     }, {
       id: 'auto-protected-2', scope: 'local', baselineState: state,
       protectedKinds: ['skill'], automatic: true,
@@ -345,7 +477,7 @@ describe('full entry snapshots and rollback', () => {
     const { state: next } = applyRefinementProposal(state, {
       id: 'u', summary: 'refresh skill',
       edits: [{
-        action: 'update', kind: 'skill', id: 's', reason: 'refresh',
+        action: 'update', kind: 'skill', id: 's', reason: 'refresh', blastRadius: 'project',
         content: 'new body', description: 'fresh desc', reference: 'new ref', arguments: '{"a":1}',
       }],
     }, { id: 'u', scope: 'local', baselineState: state })
@@ -364,7 +496,7 @@ describe('full entry snapshots and rollback', () => {
     }
     const { state: next } = applyRefinementProposal(state, {
       id: 'u-protection', summary: 'update protection',
-      edits: [{ action: 'update', kind: 'skill', id: 's', reason: 'restore', content: 'new body', protection: 'user-owned' }],
+      edits: [{ action: 'update', kind: 'skill', id: 's', blastRadius: 'project', reason: 'restore', content: 'new body', protection: 'user-owned' }],
     }, { id: 'u-protection', scope: 'local', baselineState: state })
     expect(next.entries.skill['s']?.protection).toBe('user-owned')
   })
@@ -378,7 +510,7 @@ describe('full entry snapshots and rollback', () => {
     }
     const { result, state: deleted } = applyRefinementProposal(state, {
       id: 'd', summary: 'delete skill',
-      edits: [{ action: 'delete', kind: 'skill', id: 's', reason: 'remove' }],
+      edits: [{ action: 'delete', kind: 'skill', id: 's', blastRadius: 'project', reason: 'remove' }],
     }, { id: 'd', scope: 'local', baselineState: state })
     const rollback = rollbackProposal(result)
     expect(rollback.edits[0]).toMatchObject({
@@ -405,7 +537,7 @@ describe('full entry snapshots and rollback', () => {
     const { result, state: updated } = applyRefinementProposal(state, {
       id: 'u', summary: 'update skill',
       edits: [{
-        action: 'update', kind: 'skill', id: 's', reason: 'refresh',
+        action: 'update', kind: 'skill', id: 's', reason: 'refresh', blastRadius: 'project',
         content: 'new body', description: 'changed desc',
       }],
     }, { id: 'u', scope: 'local', baselineState: state })
@@ -421,7 +553,7 @@ describe('full entry snapshots and rollback', () => {
     state.entries.skill['s'] = { id: 's', kind: 'skill', version: 1, content: 'body', updatedAt: 't' }
     const { result, state: updated } = applyRefinementProposal(state, {
       id: 'u', summary: 'add description',
-      edits: [{ action: 'update', kind: 'skill', id: 's', reason: 'add desc', content: 'new body', description: 'added desc' }],
+      edits: [{ action: 'update', kind: 'skill', id: 's', blastRadius: 'project', reason: 'add desc', content: 'new body', description: 'added desc' }],
     }, { id: 'u', scope: 'local', baselineState: state })
     expect(updated.entries.skill['s']?.description).toBe('added desc')
     const rollback = rollbackProposal(result)
@@ -438,7 +570,7 @@ describe('full entry snapshots and rollback', () => {
 
 describe('validateEdit with bundle files', () => {
   it('rejects a skill edit whose files fail bundle validation', () => {
-    const edit = { action: 'create', kind: 'skill' as const, id: 's', content: 'c', files: { '../evil': 'x' } }
+    const edit = { action: 'create', kind: 'skill' as const, id: 's', blastRadius: 'project' as const, content: 'c', files: { '../evil': 'x' } }
     expect(validateEdit(edit, { skillBundleLimits: DEFAULT_SKILL_BUNDLE_LIMITS })).toContain('invalid path segment')
     expect(validateEdit({ ...edit, files: { 'scripts/a.py': 'x', 'scripts/b.py': 'y' } }, { skillBundleLimits: tinyLimits }))
       .toContain('maxSkillFiles')
@@ -446,7 +578,7 @@ describe('validateEdit with bundle files', () => {
 
   it('accepts a skill edit with valid files', () => {
     expect(validateEdit(
-      { action: 'create', kind: 'skill', id: 's', content: 'c', files: { 'scripts/x.py': 'print(1)' } },
+      { action: 'create', kind: 'skill', id: 's', blastRadius: 'project', content: 'c', files: { 'scripts/x.py': 'print(1)' } },
       { skillBundleLimits: DEFAULT_SKILL_BUNDLE_LIMITS },
     )).toBeUndefined()
   })
@@ -456,7 +588,7 @@ describe('applyRefinementProposal project stamping', () => {
   const create: RefinementProposal = {
     id: 'refine_p1',
     summary: 'learn something here',
-    edits: [{ action: 'create', kind: 'memory', id: 'local-trick', content: 'the trick' }],
+    edits: [{ action: 'create', kind: 'memory', id: 'local-trick', blastRadius: 'project', content: 'the trick' }],
   }
 
   it('tags a created entry with the project the commit came from', () => {
@@ -482,7 +614,7 @@ describe('applyRefinementProposal project stamping', () => {
     const twice = applyRefinementProposal(once, {
       id: 'refine_p2',
       summary: 'same lesson, other repo',
-      edits: [{ action: 'update', kind: 'memory', id: 'local-trick', reason: 'sharpened here', content: 'the trick, sharpened' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'local-trick', blastRadius: 'project', reason: 'sharpened here', content: 'the trick, sharpened' }],
     }, { id: 'refine_p2', scope: 'global', baselineState: once, project: 'repo-b' }).state
     expect(twice.entries.memory['local-trick']?.projects).toEqual(['repo-a', 'repo-b'])
   })
@@ -493,13 +625,13 @@ describe('applyRefinementProposal with files', () => {
     const state = freshState()
     const { state: created } = applyRefinementProposal(state, {
       id: 'r1', summary: 's',
-      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', files: { 'scripts/x.py': 'v1' } }],
     }, { id: 'r1', scope: 'local', baselineState: state })
     expect((created.entries.skill['oq'] as SkillEntry).files).toEqual({ 'scripts/x.py': 'v1' })
 
     const { state: updated } = applyRefinementProposal(created, {
       id: 'r2', summary: 's',
-      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body2', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body2', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
     }, { id: 'r2', scope: 'local', baselineState: created })
     expect((updated.entries.skill['oq'] as SkillEntry).files).toEqual({ 'scripts/x.py': 'v2' })
   })
@@ -508,16 +640,16 @@ describe('applyRefinementProposal with files', () => {
     const state = freshState()
     const { state: created } = applyRefinementProposal(state, {
       id: 'r1', summary: 's',
-      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', files: { 'scripts/x.py': 'v1' } }],
     }, { id: 'r1', scope: 'local', baselineState: state })
     const { state: cleared } = applyRefinementProposal(created, {
       id: 'r2', summary: 's',
-      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why', files: {} }],
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', reason: 'why', files: {} }],
     }, { id: 'r2', scope: 'local', baselineState: created })
     expect((cleared.entries.skill['oq'] as SkillEntry).files).toEqual({})
     const { state: kept } = applyRefinementProposal(cleared, {
       id: 'r3', summary: 's',
-      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', reason: 'why' }],
     }, { id: 'r3', scope: 'local', baselineState: cleared })
     expect((kept.entries.skill['oq'] as SkillEntry).files).toEqual({})
   })
@@ -526,16 +658,16 @@ describe('applyRefinementProposal with files', () => {
     const state = freshState()
     const { state: first } = applyRefinementProposal(state, {
       id: 'r1', summary: 's',
-      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', files: { 'scripts/x.py': 'v1' } }],
     }, { id: 'r1', scope: 'local', baselineState: state })
     const { state: second } = applyRefinementProposal(first, {
       id: 'r2', summary: 's',
-      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
     }, { id: 'r2', scope: 'local', baselineState: first })
     // a stale plan built against `first` must now be rejected against `second`
     const stale = applyRefinementProposal(second, {
       id: 'r3', summary: 's',
-      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'body', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', reason: 'why', files: { 'scripts/x.py': 'v2' } }],
     }, { id: 'r3', scope: 'local', baselineState: first })
     expect(stale.result.appliedEdits.find(edit => edit.id === 'oq')?.error).toBe('entry changed during refinement planning')
   })
@@ -544,7 +676,7 @@ describe('applyRefinementProposal with files', () => {
     const state = freshState()
     const { state: created, result: createResult } = applyRefinementProposal(state, {
       id: 'r1', summary: 's',
-      edits: [{ action: 'create', kind: 'skill', id: 'oq', content: 'body', files: { 'scripts/x.py': 'v1' } }],
+      edits: [{ action: 'create', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'body', files: { 'scripts/x.py': 'v1' } }],
     }, { id: 'r1', scope: 'local', baselineState: state })
     // update adds nothing to files, then rollback of the create must drop files entirely
     const rollback = rollbackProposal(createResult)
@@ -559,12 +691,12 @@ describe('applyRefinementProposal with files', () => {
     before.entries.skill['oq'] = { id: 'oq', kind: 'skill', version: 1, content: 'old', updatedAt: '2026-01-01T00:00:00.000Z' }
     const { state: added, result: addResult } = applyRefinementProposal(before, {
       id: 'r2', summary: 's',
-      edits: [{ action: 'update', kind: 'skill', id: 'oq', content: 'new', reason: 'why', files: { 'scripts/x.py': 'v1' } }],
+      edits: [{ action: 'update', kind: 'skill', id: 'oq', blastRadius: 'project', content: 'new', reason: 'why', files: { 'scripts/x.py': 'v1' } }],
     }, { id: 'r2', scope: 'local', baselineState: before })
     expect((added.entries.skill['oq'] as SkillEntry).files).toEqual({ 'scripts/x.py': 'v1' })
     const rollback2 = rollbackProposal(addResult)
     const { state: undone } = applyRefinementProposal(added, rollback2, {
-      id: rollback2.id, scope: 'local', baselineState: added,
+      id: rollback2.id, rollbackOf: addResult.id, scope: 'local', baselineState: added,
     })
     const undoneEntry = undone.entries.skill['oq'] as SkillEntry
     expect(undoneEntry.content).toBe('old')
@@ -575,7 +707,7 @@ describe('applyRefinementProposal with files', () => {
     const state = freshState()
     const { result } = applyRefinementProposal(state, {
       id: 'r1', summary: 's',
-      edits: [{ action: 'create', kind: 'skill', id: 'taken', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'taken', blastRadius: 'project', content: 'body' }],
     }, {
       id: 'r1', scope: 'local', baselineState: state,
       editGate: edit => edit.id === 'taken' ? 'skill directory exists and is not harness-owned; pick another id' : undefined,
@@ -607,8 +739,8 @@ describe('rollbackProposal', () => {
       id: 'refine_3',
       summary: 'two creates',
       edits: [
-        { action: 'create', kind: 'memory', id: 'a', content: 'A' },
-        { action: 'create', kind: 'memory', id: 'b', content: 'B' },
+        { action: 'create', kind: 'memory', id: 'a', blastRadius: 'project', content: 'A' },
+        { action: 'create', kind: 'memory', id: 'b', blastRadius: 'project', content: 'B' },
       ],
     }
     const { result, state: next } = applyRefinementProposal(state, proposal, {
@@ -639,5 +771,15 @@ describe('touchedSkillIds', () => {
       { applied: true, kind: 'memory', id: 'm1' },
       { applied: true, kind: 'skill', id: 's2' },
     ])).toEqual(['s1', 's2'])
+  })
+})
+
+describe('entryFingerprint covers the persisted reach', () => {
+  it('changes when only blastRadius changes', () => {
+    // The fingerprint is the baseline-conflict key: a mutable field missing from
+    // it means a stale plan can silently overwrite a concurrent declaration.
+    const base = { id: 'm', kind: 'memory' as const, version: 1, content: 'c', updatedAt: 't' }
+    expect(entryFingerprint({ ...base, blastRadius: 'project' }))
+      .not.toBe(entryFingerprint({ ...base, blastRadius: 'session' }))
   })
 })

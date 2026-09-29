@@ -287,7 +287,7 @@ describe('createRefineCoordinator', () => {
       await Promise.resolve()
       store.plannerEnd()
       sequence += 1
-      return JSON.stringify({ id: sequence === 1 ? 'first' : 'second', summary: 'test', edits: [{ action: 'create', kind: 'memory', id: `m${sequence}`, content: 'x' }] })
+      return JSON.stringify({ id: sequence === 1 ? 'first' : 'second', summary: 'test', edits: [{ action: 'create', kind: 'memory', id: `m${sequence}`, blastRadius: 'project', content: 'x' }] })
     }
     const coordinator = createRefineCoordinator({ store, completeFor: () => complete as Complete })
     const first = coordinator.execute(planRequest('local', 'tool'))
@@ -313,7 +313,7 @@ describe('createRefineCoordinator', () => {
     const home = tempHome()
     const store = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
     store.localState(agent())
-    const complete = cannedComplete({ id: 'plan-1', summary: 'save lesson', edits: [{ action: 'create', kind: 'memory', id: 'lesson', content: 'x' }] })
+    const complete = cannedComplete({ id: 'plan-1', summary: 'save lesson', edits: [{ action: 'create', kind: 'memory', id: 'lesson', blastRadius: 'project', content: 'x' }] })
     const coordinator = createRefineCoordinator({ store, completeFor: () => complete })
     const result = await coordinator.execute(planRequest('local', 'tool', 'focus'))
     expect(result).toMatchObject({ commitStatus: 'committed', approval: 'not-required', appliedCount: 1, rejectedCount: 0 })
@@ -329,18 +329,18 @@ describe('createRefineCoordinator', () => {
     const liveAgent = agent('baseline-conflict-agent')
     store.applyRefinement(liveAgent, {
       id: 'seed-target', summary: 'seed target',
-      edits: [{ action: 'create', kind: 'memory', id: 'target', content: 'before' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'target', blastRadius: 'project', content: 'before' }],
     })
 
     let mutation: RefinementResult & { materialization: MaterializationResult } | undefined
     const complete: Complete = async () => {
       mutation = store.applyRefinement(liveAgent, {
         id: 'mutate-target', summary: 'mutate target',
-        edits: [{ action: 'update', kind: 'memory', id: 'target', content: 'changed', reason: 'change during planning' }],
+        edits: [{ action: 'update', kind: 'memory', id: 'target', blastRadius: 'project', content: 'changed', reason: 'change during planning' }],
       })
       return JSON.stringify({
         id: 'planned-target-update', summary: 'planned update',
-        edits: [{ action: 'update', kind: 'memory', id: 'target', content: 'planned', reason: 'planned change' }],
+        edits: [{ action: 'update', kind: 'memory', id: 'target', blastRadius: 'project', content: 'planned', reason: 'planned change' }],
       })
     }
     const result = await createRefineCoordinator({ store, completeFor: () => complete })
@@ -365,7 +365,7 @@ describe('createRefineCoordinator', () => {
         { action: 'update', kind: 'memory', id: 'bad', applied: false, blastRadius: 'general', error: 'entry not found' },
       ],
     }))
-    const result = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'ok', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
+    const result = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'ok', blastRadius: 'project', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
     expect(result).toMatchObject({ commitStatus: 'committed-with-rejected-edits', appliedCount: 1, rejectedCount: 1 })
   })
 
@@ -395,7 +395,7 @@ describe('createRefineCoordinator', () => {
     const planning = await createRefineCoordinator({ store, completeFor: () => cannedComplete('{}') }).execute({ ...planRequest('local', 'tool'), signal: before.signal })
     expect(planning).toMatchObject({ failedAt: 'validation', error: { code: 'aborted' } })
     const controller = new AbortController()
-    const complete = async () => { controller.abort(); return JSON.stringify({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }) }
+    const complete = async () => { controller.abort(); return JSON.stringify({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }) }
     const commit = await createRefineCoordinator({ store, completeFor: () => complete as Complete }).execute({ ...planRequest('local', 'tool'), signal: controller.signal })
     expect(commit).toMatchObject({ failedAt: 'planning', error: { code: 'aborted' } })
     expect(store.applyRefinement).not.toHaveBeenCalled()
@@ -406,7 +406,7 @@ describe('createRefineCoordinator', () => {
     const store = fakeStore()
     const result = await createRefineCoordinator({
       store,
-      completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+      completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }),
       requireGlobalApprovalForTool: true,
       requireGlobalApproval: async () => { controller.abort() },
     }).execute({ ...planRequest('global', 'tool'), signal: controller.signal })
@@ -416,11 +416,11 @@ describe('createRefineCoordinator', () => {
 
   it('requires and maps global approval without Store commits', async () => {
     const missingStore = fakeStore()
-    const missing = await createRefineCoordinator({ store: missingStore, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }), requireGlobalApprovalForTool: true }).execute(planRequest('global', 'tool'))
+    const missing = await createRefineCoordinator({ store: missingStore, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }), requireGlobalApprovalForTool: true }).execute(planRequest('global', 'tool'))
     expect(missing).toMatchObject({ approval: 'not-required', failedAt: 'approval', error: { code: 'approval-unavailable' } })
     expect(missingStore.applyRefinement).not.toHaveBeenCalled()
     const rejectedStore = fakeStore()
-    const rejected = await createRefineCoordinator({ store: rejectedStore, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }), requireGlobalApprovalForTool: true, requireGlobalApproval: async () => { throw new Error('no') } }).execute(planRequest('global', 'tool'))
+    const rejected = await createRefineCoordinator({ store: rejectedStore, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }), requireGlobalApprovalForTool: true, requireGlobalApproval: async () => { throw new Error('no') } }).execute(planRequest('global', 'tool'))
     expect(rejected).toMatchObject({ approval: 'rejected', failedAt: 'approval', error: { code: 'approval-rejected', message: 'no' } })
     expect(rejectedStore.applyRefinement).not.toHaveBeenCalled()
   })
@@ -432,14 +432,14 @@ describe('createRefineCoordinator', () => {
       appliedEdits: [{ action: 'create', kind: 'memory', id: 'x', applied: true, blastRadius: 'general' }],
       materialization: { ...emptyMaterialization(), status: 'failed' },
     }))
-    const result = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
+    const result = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
     expect(result).toMatchObject({ commitStatus: 'committed', appliedCount: 1, rejectedCount: 0, failedAt: 'materialization', error: { code: 'materialization-failed' } })
   })
 
   it('maps a throwing Store commit to the stable commit-failed code without a success result', async () => {
     const store = fakeStore()
     store.applyRefinement = vi.fn(async () => { throw new Error('disk full') })
-    const plan = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
+    const plan = await createRefineCoordinator({ store, completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }) }).execute(planRequest('local', 'tool'))
     expect(plan).toMatchObject({
       commitStatus: 'not-committed',
       approval: 'not-required',
@@ -483,7 +483,7 @@ describe('createRefineCoordinator', () => {
       const { runner, run } = fakeRunner()
       const coordinator = createRefineCoordinator({
         store,
-        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'skill', id: 'one', content: 'x' }] }),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'skill', id: 'one', blastRadius: 'project', content: 'x' }] }),
         diagnostics: runner,
       })
       const result = await coordinator.execute(planRequest('local', 'tool'))
@@ -510,7 +510,7 @@ describe('createRefineCoordinator', () => {
       // rejected approval
       await createRefineCoordinator({
         store: fakeStore(),
-        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }),
         requireGlobalApprovalForTool: true,
         requireGlobalApproval: async () => { throw new Error('no') },
         diagnostics: runner,
@@ -520,7 +520,7 @@ describe('createRefineCoordinator', () => {
       failing.applyRefinement = vi.fn(async () => { throw new Error('commit boom') })
       await createRefineCoordinator({
         store: failing,
-        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }),
         diagnostics: runner,
       }).execute(planRequest('local', 'tool'))
       // rollback target validation failure
@@ -542,7 +542,7 @@ describe('createRefineCoordinator', () => {
       run.mockRejectedValue(new Error('runner exploded'))
       const result = await createRefineCoordinator({
         store,
-        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }),
         diagnostics: runner,
       }).execute(planRequest('local', 'tool'))
       expect(result).toMatchObject({
@@ -569,7 +569,7 @@ describe('createRefineCoordinator', () => {
       const { runner, run } = fakeRunner()
       const result = await createRefineCoordinator({
         store,
-        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', content: 'x' }] }),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'x', blastRadius: 'project', content: 'x' }] }),
         diagnostics: runner,
       }).execute({ ...planRequest('local', 'tool'), signal: controller.signal })
       expect(result).toMatchObject({
@@ -586,7 +586,7 @@ describe('createRefineCoordinator', () => {
       const { runner, run } = fakeRunner()
       const result = await createRefineCoordinator({
         store: fakeStore(),
-        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'x' }] }),
+        completeFor: () => cannedComplete({ id: 'r', summary: 'r', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'x' }] }),
         diagnostics: runner,
       }).execute(planRequest('local', 'tool'))
       expect(result.commitStatus).toBe('committed')
@@ -653,7 +653,7 @@ describe('Route A planning input', () => {
       seen.system = system
       seen.prefix = prefix ? [...prefix] : undefined
       seen.context = context
-      return '{"id":"refine_snap","summary":"snapshot","edits":[{"action":"create","kind":"memory","id":"snap","content":"x"}]}'
+      return '{"id":"refine_snap","summary":"snapshot","edits":[{"action":"create","kind":"memory","id":"snap","blastRadius":"project","content":"x"}]}'
     }
     const liveAgent = agentWithHeader('route-a-verbatim')
     const { registry } = snapshotRegistry(liveAgent.session)

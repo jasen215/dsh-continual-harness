@@ -238,7 +238,13 @@ export function formatHarnessStateForPromptStructured(state: HarnessState, query
   const scoredAll: { kind: RefinementKind; entry: HarnessEntry; score: number }[] = []
   for (const kind of kinds) {
     const active = Object.entries(state.entries[kind])
-      .filter(([key, entry]) => entry.metadata?.lifecycleState !== 'archived' && !key.startsWith('local:'))
+      .filter(([key, entry]) => entry.metadata?.lifecycleState !== 'archived'
+        && !key.startsWith('local:')
+        // A session-radius entry's reach is a single session, so only the
+        // session that owns it may inject it. In the global layer such an entry
+        // is illegal data (3.4.1 rejects `global + session`) and would otherwise
+        // be injected into every session of the project (gap 9).
+        && !(entry.blastRadius === 'session' && !opts.isLocal(kind, entry.id)))
       .map(([, entry]) => entry)
     const weights = termWeights(active, terms)
     const scored = active
@@ -270,6 +276,11 @@ export function formatHarnessStateForPromptStructured(state: HarnessState, query
   if (indexLines > 0) {
     const projectRank = (entry: HarnessEntry): number => {
       if (opts.project === undefined) return 0
+      // A session-radius entry's reach is one session, not a project: its cwd
+      // tag is provenance, not a claim of project ownership, so promoting it
+      // into the project front-row would outlive the session that learned it
+      // (gap 9). Rank only — the entry stays reachable.
+      if (entry.blastRadius === 'session') return 0
       const tags = entry.projects
       if (tags === undefined || tags.length === 0) return 1
       return tags.includes(opts.project) ? 2 : 0

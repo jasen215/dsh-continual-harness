@@ -28,14 +28,14 @@ describe('continual-harness invariant', () => {
     emitRefined(ctx, agentOf('ok-1'), {
       id: 'refine_1',
       summary: 'seed',
-      appliedEdits: [{ action: 'create', kind: 'memory', id: 'm', applied: true }],
+      appliedEdits: [{ action: 'create', kind: 'memory', id: 'm', blastRadius: 'project', applied: true }],
       committedAt: '2026-01-01T00:00:00.000Z',
       scope: 'local',
     })
     emitRefined(ctx, agentOf('ok-2'), {
       id: 'rollback_refine_1',
       summary: 'undo',
-      appliedEdits: [{ action: 'delete', kind: 'memory', id: 'm', applied: true }],
+      appliedEdits: [{ action: 'delete', kind: 'memory', id: 'm', blastRadius: 'project', applied: true }],
       committedAt: '2026-01-01T00:00:00.000Z',
       scope: 'local',
       rollbackOf: 'refine_1',
@@ -50,9 +50,9 @@ describe('continual-harness invariant', () => {
     ['missing summary', { id: 'x', appliedEdits: [] }, 'summary must be a string'],
     ['non-array edits', { id: 'x', summary: 's', appliedEdits: 'no' }, 'appliedEdits must be an array'],
     ['bad action', { id: 'x', summary: 's', appliedEdits: [{ action: 'upsert', kind: 'memory', id: 'm', applied: true }] }, 'action must be'],
-    ['bad kind', { id: 'x', summary: 's', appliedEdits: [{ action: 'create', kind: 'note', id: 'm', applied: true }] }, 'kind must be'],
+    ['bad kind', { id: 'x', summary: 's', appliedEdits: [{ action: 'create', kind: 'note', id: 'm', blastRadius: 'project', applied: true }] }, 'kind must be'],
     ['missing edit id', { id: 'x', summary: 's', appliedEdits: [{ action: 'create', kind: 'memory', applied: true }] }, 'edit id must be a string'],
-    ['non-boolean applied', { id: 'x', summary: 's', appliedEdits: [{ action: 'create', kind: 'memory', id: 'm', applied: 'yes' }] }, 'applied must be a boolean'],
+    ['non-boolean applied', { id: 'x', summary: 's', appliedEdits: [{ action: 'create', kind: 'memory', id: 'm', blastRadius: 'project', applied: 'yes' }] }, 'applied must be a boolean'],
     ['non-string rollbackOf', { id: 'x', summary: 's', appliedEdits: [], rollbackOf: 7 }, 'rollbackOf must be a string'],
   ])('fails a malformed record: %s', async (_label, data, fragment) => {
     const ctx = new Context()

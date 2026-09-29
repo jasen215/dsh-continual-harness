@@ -39,6 +39,14 @@ export interface HarnessEntry {
    * worked in, and never hides an entry because of another project's tag.
    */
   projects?: string[]
+  /**
+   * How far this entry's effects may reach — declared by the model on the edit
+   * that established the content. Absent means undeclared: the entry is left
+   * as-is and nothing is inferred from it. Distinct from `projects`: this is
+   * validity scope, that is provenance (stamped from the applying session's
+   * cwd, never declared by the model).
+   */
+  blastRadius?: BlastRadius
   /** Provenance and lifecycle metadata (v2). */
   metadata?: {
     /** Trajectory provenance: source session id. */
@@ -94,7 +102,10 @@ export interface RefinementEdit {
   description?: string
   /** Why this edit is made; required for `update`/`delete`, stamped by rollback. */
   reason?: string
-  /** How far this edit's effects may reach; defaults to `general` on apply. */
+  /**
+   * How far this edit reaches (3.4.1). A declared value is stamped onto the
+   * entry the edit writes; omitting it stamps nothing and infers nothing.
+   */
   blastRadius?: BlastRadius
   /** Legacy fields, tolerated for state compatibility. */
   reference?: string
@@ -131,7 +142,12 @@ export interface AppliedRefinementEdit {
   after?: string
   /** Why this edit was made; `rollback:<id>` for generated rollbacks. */
   reason?: string
-  /** How far this edit's effects reach; always present, defaults to `general`. */
+  /**
+   * How far this edit's effects reach. Present on every record so a declaration
+   * is never lost; when the edit declared nothing (or an out-of-enum value) the
+   * field falls back to `general`, so a consumer that must not trust a fallback
+   * — the entry backfill — skips records with `applied: false`.
+   */
   blastRadius: BlastRadius
   /** Set when validation or the baseline conflict check rejected the edit. */
   error?: string

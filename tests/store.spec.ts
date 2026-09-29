@@ -87,7 +87,7 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'refine_ws',
       summary: 'note in this project',
-      edits: [{ action: 'create', kind: 'memory', id: 'ws-note', content: 'x' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'ws-note', blastRadius: 'project', content: 'x' }],
     }, { global: true })
 
     const state = JSON.parse(readFileSync(join(home, 'harness_state.json'), 'utf8')) as {
@@ -156,7 +156,7 @@ describe('HarnessStore', () => {
     const plan: RefinementProposal = {
       id: 'refine_1',
       summary: 'remember',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'durable' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'durable' }],
     }
     const result = store.applyRefinement(agent, plan, {})
     expect(result.scope).toBe('local')
@@ -175,7 +175,7 @@ describe('HarnessStore', () => {
     const { agent } = stubAgent('journal-agent')
     store.applyRefinement(agent, {
       id: 'refine_j', summary: 'update',
-      edits: [{ action: 'create', kind: 'memory', id: 'note', content: 'first' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'note', blastRadius: 'project', content: 'first' }],
     }, {})
     const sessionDir = getLocalHarnessStateDir(home, 'journal-agent')
     // Session journal: the full record with snapshot bodies, for rollback.
@@ -188,7 +188,7 @@ describe('HarnessStore', () => {
     const saved = loadHarnessState(sessionDir)
     expect(saved.refinements[0]?.id).toBe('refine_j')
     expect(saved.refinements[0]?.summary).toBe('update')
-    expect(saved.refinements[0]?.appliedEdits[0]).toMatchObject({ action: 'create', kind: 'memory', id: 'note', applied: true })
+    expect(saved.refinements[0]?.appliedEdits[0]).toMatchObject({ action: 'create', kind: 'memory', id: 'note', blastRadius: 'project', applied: true })
     expect(saved.refinements[0]?.appliedEdits[0]?.after).toBeUndefined()
     expect(saved.refinements[0]?.appliedEdits[0]?.afterEntry).toBeUndefined()
   })
@@ -200,7 +200,7 @@ describe('HarnessStore', () => {
     const plan: RefinementProposal = {
       id: 'refine_2',
       summary: 'add',
-      edits: [{ action: 'create', kind: 'memory', id: 'temp', content: 'x' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'temp', blastRadius: 'project', content: 'x' }],
     }
     store.applyRefinement(agent, plan, {})
     const rollback = store.rollbackRefinement(agent, 'refine_2', {})
@@ -216,7 +216,7 @@ describe('HarnessStore', () => {
     const plan: RefinementProposal = {
       id: 'refine_3',
       summary: 'global',
-      edits: [{ action: 'create', kind: 'prompt', id: 'global-note', content: 'cross-session' }],
+      edits: [{ action: 'create', kind: 'prompt', id: 'global-note', blastRadius: 'project', content: 'cross-session' }],
     }
     store.applyRefinement(agent, plan, { global: true })
     expect(store.state(agent).entries.prompt['global-note']?.content).toBe('cross-session')
@@ -230,7 +230,7 @@ describe('HarnessStore', () => {
     const { agent } = stubAgent('promote-1')
     store.applyRefinement(agent, {
       id: 'rp1', summary: 'local seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'lesson', content: 'durable' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'lesson', blastRadius: 'project', content: 'durable' }],
     }, {})
     const out = store.promoteEntry(agent, 'lesson')
     expect(out.applied).toBe(true)
@@ -246,7 +246,7 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'rp-full', summary: 'local skill',
       edits: [{
-        action: 'create', kind: 'skill', id: 'complete-skill', content: 'body', title: 'Title',
+        action: 'create', kind: 'skill', id: 'complete-skill', content: 'body', title: 'Title', blastRadius: 'project',
         description: 'Description', reference: 'Reference', arguments: '{"mode":"fast"}',
         metadata: { sourceSession: 'original', lifecycleState: 'archived', pinned: true, lastInjectedAt: 'when' },
       }],
@@ -260,6 +260,23 @@ describe('HarnessStore', () => {
     })
     expect(promoted?.updatedAt).toEqual(expect.any(String))
     expect(store.localState(agent).entries.skill['complete-skill']).toEqual(localBefore)
+  })
+
+  it('refuses to promote a session-radius entry into the store every session reads', () => {
+    const ctx = new Context()
+    const store = testStore(ctx, tempHome())
+    const { agent } = stubAgent('promote-session')
+    store.applyRefinement(agent, {
+      id: 'rp-session', summary: 'session seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'session-fact', content: 'only here', blastRadius: 'session' }],
+    }, {})
+    // The local copy is legal, the global layer is not (3.4.1), and the refusal
+    // must be reported instead of swallowed as a successful promotion.
+    const out = store.promoteEntry(agent, 'session-fact')
+    expect(out.applied).toBe(false)
+    expect(out.error).toContain(`blastRadius 'session'`)
+    expect(store.globalState().entries.memory['session-fact']).toBeUndefined()
+    expect(store.localState(agent).entries.memory['session-fact']?.content).toBe('only here')
   })
 
   it('reports an unknown local id without changing either store', () => {
@@ -278,11 +295,11 @@ describe('HarnessStore', () => {
     const { agent } = stubAgent('promote-ambig')
     store.applyRefinement(agent, {
       id: 'rp-a', summary: 'seed memory',
-      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'm' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'same', blastRadius: 'project', content: 'm' }],
     }, {})
     store.applyRefinement(agent, {
       id: 'rp-b', summary: 'seed skill',
-      edits: [{ action: 'create', kind: 'skill', id: 'same', content: 's' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'same', blastRadius: 'project', content: 's' }],
     }, {})
     expect(store.promoteEntry(agent, 'same')).toEqual({ applied: false, error: 'ambiguous local id: same' })
     expect(store.globalState().entries).toEqual({ prompt: {}, memory: {}, skill: {}, subagent: {} })
@@ -295,11 +312,11 @@ describe('HarnessStore', () => {
     const { agent } = stubAgent('promote-2')
     store.applyRefinement(agent, {
       id: 'rp2', summary: 'seed both',
-      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'local' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'same', blastRadius: 'project', content: 'local' }],
     }, {})
     store.applyRefinement(agent, {
       id: 'rp3', summary: 'seed global',
-      edits: [{ action: 'create', kind: 'memory', id: 'same', content: 'global' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'same', blastRadius: 'project', content: 'global' }],
     }, { global: true })
     const out = store.promoteEntry(agent, 'same')
     expect(out.applied).toBe(false)
@@ -323,7 +340,7 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'refine_skill',
       summary: 'add repro skill',
-      edits: [{ action: 'create', kind: 'skill', id: 'repro', content: 'repro body', description: 'reproduce fast' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'repro', blastRadius: 'project', content: 'repro body', description: 'reproduce fast' }],
     }, {})
     expect(existsSync(bundle)).toBe(true)
     expect(readFileSync(bundle, 'utf8')).toContain('name: repro')
@@ -344,21 +361,21 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'skill_seed',
       summary: 'seed skill',
-      edits: [{ action: 'create', kind: 'skill', id: 'repro', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'repro', blastRadius: 'project', content: 'body' }],
     }, {})
     expect(existsSync(bundle)).toBe(true)
 
     store.applyRefinement(agent, {
       id: 'skill_archive',
       summary: 'archive skill',
-      edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: true, reason: 'hide' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'repro', blastRadius: 'project', archive: true, reason: 'hide' }],
     }, {})
     expect(existsSync(bundle)).toBe(false)
 
     store.applyRefinement(agent, {
       id: 'skill_unarchive',
       summary: 'restore skill',
-      edits: [{ action: 'update', kind: 'skill', id: 'repro', archive: false, reason: 'restore' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'repro', blastRadius: 'project', archive: false, reason: 'restore' }],
     }, {})
     expect(existsSync(bundle)).toBe(true)
   })
@@ -372,14 +389,14 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'seed_repeated_skill',
       summary: 'seed skill',
-      edits: [{ action: 'create', kind: 'skill', id: 'repeat-demo', content: 'before', description: 'Use repeat demo' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'repeat-demo', blastRadius: 'project', content: 'before', description: 'Use repeat demo' }],
     }, { global: true })
     const result = store.applyRefinement(agent, {
       id: 'update_repeated_skill',
       summary: 'update skill twice',
       edits: [
-        { action: 'update', kind: 'skill', id: 'repeat-demo', content: 'after', reason: 'first update' },
-        { action: 'update', kind: 'skill', id: 'repeat-demo', content: 'after', reason: 'second update' },
+        { action: 'update', kind: 'skill', id: 'repeat-demo', blastRadius: 'project', content: 'after', reason: 'first update' },
+        { action: 'update', kind: 'skill', id: 'repeat-demo', blastRadius: 'project', content: 'after', reason: 'second update' },
       ],
     }, { global: true })
 
@@ -397,7 +414,7 @@ describe('HarnessStore', () => {
       id: 'refine_bundle',
       summary: 'create a bundle skill',
       edits: [{
-        action: 'create', kind: 'skill', id: 'bundle-demo',
+        action: 'create', kind: 'skill', id: 'bundle-demo', blastRadius: 'project',
         description: 'Use whenever bundling',
         content: '## Steps\\n1. Run `scripts/bundle.py`',
         files: { 'scripts/bundle.py': 'print(1)', 'references/t.md': '# t' },
@@ -418,7 +435,7 @@ describe('HarnessStore', () => {
     const result = store.applyRefinement(agent, {
       id: 'refine_empty_conflict',
       summary: 'take an existing directory',
-      edits: [{ action: 'create', kind: 'skill', id: 'empty', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'empty', blastRadius: 'project', content: 'body' }],
     }, { global: true })
     const failed = result.appliedEdits.find(edit => edit.id === 'empty')
     expect(failed?.applied).toBe(false)
@@ -436,7 +453,7 @@ describe('HarnessStore', () => {
     const result = store.applyRefinement(agent, {
       id: 'refine_conflict',
       summary: 'take a used name',
-      edits: [{ action: 'create', kind: 'skill', id: 'taken', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'taken', blastRadius: 'project', content: 'body' }],
     }, { global: true })
     const failed = result.appliedEdits.find(edit => edit.id === 'taken')
     expect(failed?.applied).toBe(false)
@@ -452,13 +469,13 @@ describe('HarnessStore', () => {
     const { agent } = stubAgent('m')
     store.applyRefinement(agent, {
       id: 'refine_seed', summary: 'seed',
-      edits: [{ action: 'create', kind: 'skill', id: 'ours', content: 'body', description: 'use ours' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'ours', blastRadius: 'project', content: 'body', description: 'use ours' }],
     }, { global: true })
     // replace the seeded SKILL.md with a user-owned one, then update must skip
     writeFileSync(join(root, 'skills', 'ours', 'SKILL.md'), '---\\nname: ours\\n---\\nuser skill')
     const result = store.applyRefinement(agent, {
       id: 'refine_update', summary: 'update',
-      edits: [{ action: 'update', kind: 'skill', id: 'ours', content: 'body2', reason: 'why' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'ours', blastRadius: 'project', content: 'body2', reason: 'why' }],
     }, { global: true })
     expect(result.materialization.status).toBe('partial')
     expect(result.materialization.skipped).toEqual([join(root, 'skills', 'ours')])
@@ -480,12 +497,12 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'refine_seed',
       summary: 'seed a long memory',
-      edits: [{ action: 'create', kind: 'memory', id: 'long', content: 'x'.repeat(100) }],
+      edits: [{ action: 'create', kind: 'memory', id: 'long', blastRadius: 'project', content: 'x'.repeat(100) }],
     }, {})
     const grown = store.applyRefinement(agent, {
       id: 'refine_grow',
       summary: 'grow too much',
-      edits: [{ action: 'update', kind: 'memory', id: 'long', reason: 'grow', content: 'y'.repeat(200) }],
+      edits: [{ action: 'update', kind: 'memory', id: 'long', blastRadius: 'project', reason: 'grow', content: 'y'.repeat(200) }],
     }, {})
     expect(grown.appliedEdits[0]!.applied).toBe(false)
     expect(grown.appliedEdits[0]!.error).toBe('entry growth exceeds the maxEntryGrowth cap')
@@ -515,7 +532,7 @@ describe('HarnessStore', () => {
     const automatic = store.applyRefinement(agent, {
       id: 'refine_auto',
       summary: 'automatic write',
-      edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', reason: 'auto', content: 'tampered' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', blastRadius: 'project', reason: 'auto', content: 'tampered' }],
     }, { automatic: true, global: true })
     expect(automatic.appliedEdits[0]!.applied).toBe(false)
     expect(automatic.appliedEdits[0]!.error).toBe('kind skill is protected from automatic refinement')
@@ -531,7 +548,7 @@ describe('HarnessStore', () => {
     const perEntry = perEntryStore.applyRefinement(agent, {
       id: 'refine_auto_per_entry',
       summary: 'automatic write',
-      edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', reason: 'auto', content: 'tampered' }],
+      edits: [{ action: 'update', kind: 'skill', id: 'pinned-skill', blastRadius: 'project', reason: 'auto', content: 'tampered' }],
     }, { automatic: true, global: true })
     expect(perEntry.appliedEdits[0]!.applied).toBe(false)
     expect(perEntry.appliedEdits[0]!.error).toBe('protected entries are mutable only in explicit user sessions')
@@ -549,7 +566,7 @@ describe('HarnessStore', () => {
     const automatic = store.applyRefinement(agent, {
       id: 'refine_auto_kind',
       summary: 'automatic skill create',
-      edits: [{ action: 'create', kind: 'skill', id: 'fresh-skill', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'fresh-skill', blastRadius: 'project', content: 'body' }],
     }, { automatic: true })
     expect(automatic.appliedEdits[0]!.applied).toBe(false)
     expect(automatic.appliedEdits[0]!.error).toBe('kind skill is protected from automatic refinement')
@@ -558,7 +575,7 @@ describe('HarnessStore', () => {
     const manual = store.applyRefinement(agent, {
       id: 'refine_manual_kind',
       summary: 'explicit skill create',
-      edits: [{ action: 'create', kind: 'skill', id: 'fresh-skill', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'fresh-skill', blastRadius: 'project', content: 'body' }],
     }, {})
     expect(manual.appliedEdits[0]!.applied).toBe(true)
     expect(store.state(agent).entries.skill['fresh-skill']?.content).toBe('body')
@@ -572,7 +589,7 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'seed',
       summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'original' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'original' }],
     }, {})
     // the state the planner saw
     const planningBaseline = store.localState(agent)
@@ -580,12 +597,12 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'concurrent',
       summary: 'concurrent',
-      edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'other writer', content: 'changed concurrently' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'fact', blastRadius: 'project', reason: 'other writer', content: 'changed concurrently' }],
     }, {})
     const result = store.applyRefinement(agent, {
       id: 'stale',
       summary: 'stale plan',
-      edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'stale plan', content: 'stale write' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'fact', blastRadius: 'project', reason: 'stale plan', content: 'stale write' }],
     }, { baseline: planningBaseline })
     expect(result.appliedEdits[0]!.applied).toBe(false)
     expect(result.appliedEdits[0]!.error).toBe('entry changed during refinement planning')
@@ -600,12 +617,12 @@ describe('HarnessStore', () => {
     store.applyRefinement(agent, {
       id: 'seed',
       summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'original' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'original' }],
     }, {})
     const result = store.applyRefinement(agent, {
       id: 'no-baseline',
       summary: 'commit without baseline',
-      edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'write', content: 'applied' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'fact', blastRadius: 'project', reason: 'write', content: 'applied' }],
     }, {})
     expect(result.appliedEdits[0]!.applied).toBe(true)
     expect(store.state(agent).entries.memory['fact']!.content).toBe('applied')
@@ -649,7 +666,7 @@ describe('HarnessStore', () => {
       store.applyRefinement(agent, {
         id: 'seed',
         summary: 'seed',
-        edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'original' }],
+        edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'original' }],
       }, {})
       const captured = store.captureSnapshot(agent, 'ref-1')
       expect(captured.state.entries.memory['fact']?.content).toBe('original')
@@ -658,7 +675,7 @@ describe('HarnessStore', () => {
       store.applyRefinement(agent, {
         id: 'grow',
         summary: 'grow',
-        edits: [{ action: 'update', kind: 'memory', id: 'fact', reason: 'grow', content: 'changed' }],
+        edits: [{ action: 'update', kind: 'memory', id: 'fact', blastRadius: 'project', reason: 'grow', content: 'changed' }],
       }, {})
       expect(store.state(agent).entries.memory['fact']?.content).toBe('changed')
       expect(captured.state.entries.memory['fact']?.content).toBe('original')

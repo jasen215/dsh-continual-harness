@@ -121,7 +121,7 @@ function makeLlm(replies: ReadonlyArray<Record<string, unknown>>) {
 const PLAN = {
   id: 'refine_appr',
   summary: 'approve the global write',
-  edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }],
+  edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }],
 }
 
 describe('plugin registration', () => {
@@ -214,7 +214,7 @@ describe('plugin registration', () => {
     seeder.applyRefinement(stubAgent('seeder').agent, {
       id: 'refine_seed',
       summary: 'seed a global memory',
-      edits: [{ action: 'create', kind: 'memory', id: 'seed', content: 'x' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'seed', blastRadius: 'project', content: 'x' }],
     }, { global: true })
 
     const result = await execute(ctx, 'harness_refine', { rollback_id: 'refine_seed' }, stubAgent('executor').agent)
@@ -259,7 +259,7 @@ describe('governance default mode', () => {
     await ctx.plugin(ToolRuntime)
     ctx.provide('llm', makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ]) as never)
     // auditReviews defaults to true: the plugin-wired driver appends every gate
     // verdict to <harnessRoot>/reviews.jsonl. cooldownMs is 1 because the
@@ -306,9 +306,9 @@ describe('governance default mode', () => {
     await ctx.plugin(ToolRuntime)
     ctx.provide('llm', makeLlm([
       { approved: true, rationale: 'first interval' },
-      { id: 'auto_1', summary: 'auto one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto one', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
       { approved: true, rationale: 'final drain' },
-      { id: 'auto_2', summary: 'auto two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+      { id: 'auto_2', summary: 'auto two', edits: [{ action: 'create', kind: 'memory', id: 'm2', blastRadius: 'project', content: 'drained' }] },
     ]) as never)
     await ctx.plugin(plugin, {
       ...pluginConfig(home),
@@ -438,7 +438,7 @@ describe('governance config defaults', () => {
     seeder.applyRefinement(stubAgent('growth-seeder').agent, {
       id: 'refine_seed_growth',
       summary: 'seed a one-character memory',
-      edits: [{ action: 'create', kind: 'memory', id: 'seed', content: 'x' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'seed', blastRadius: 'project', content: 'x' }],
     }, { global: true })
 
     // The plan carries a reason so validation passes and only the growth rule
@@ -446,7 +446,7 @@ describe('governance config defaults', () => {
     ctx.provide('llm', makePlanLlm({
       id: 'refine_growth',
       summary: 'grow the seeded entry',
-      edits: [{ action: 'update', kind: 'memory', id: 'seed', content: 'a'.repeat(20), reason: 'grow it' }],
+      edits: [{ action: 'update', kind: 'memory', id: 'seed', blastRadius: 'project', content: 'a'.repeat(20), reason: 'grow it' }],
     }) as never)
     await ctx.plugin(plugin, pluginConfig(home))
 
@@ -455,7 +455,7 @@ describe('governance config defaults', () => {
     expect(json.applied).toBe(0)
     expect(json.failed).toBe(1)
     const edit = (json.edits as Array<Record<string, unknown>>)[0]
-    expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'seed', applied: false })
+    expect(edit).toMatchObject({ action: 'update', kind: 'memory', id: 'seed', blastRadius: 'project', applied: false })
     expect(edit?.error).toBe('entry growth exceeds the maxEntryGrowth cap')
 
     const fresh = new HarnessStore(new Context(), { harnessRoot: home, skillsDir: join(home, 'skills') })
@@ -553,7 +553,7 @@ describe('harness-state projection', () => {
     seeder.applyRefinement(agent, {
       id: 'refine_p',
       summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'durable' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'durable' }],
     }, {})
 
     const signal = new AbortController().signal
@@ -599,7 +599,7 @@ describe('harness-state projection', () => {
     seeder.applyRefinement(agent, {
       id: 'refine_p1',
       summary: 'seed one',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'durable' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'durable' }],
     }, {})
     const signal = new AbortController().signal
     const claimed1 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prompt one' }] })]
@@ -623,7 +623,7 @@ describe('harness-state projection', () => {
     seeder.applyRefinement(agent, {
       id: 'refine_p2',
       summary: 'seed two',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact2', content: 'more' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact2', blastRadius: 'project', content: 'more' }],
     }, {})
     const claimed2 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prompt two' }] })]
     const second = await agentEvents(ctx, agent).waterfall(
@@ -658,12 +658,12 @@ describe('harness-state projection', () => {
     seeder.applyRefinement(agent, {
       id: 'refine_gate_1',
       summary: 'seed evidence',
-      edits: [{ action: 'create', kind: 'memory', id: 'zzz-late', content: 'zzzalpha ranking notes' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'zzz-late', blastRadius: 'project', content: 'zzzalpha ranking notes' }],
     }, {})
     seeder.applyRefinement(agent, {
       id: 'refine_gate_2',
       summary: 'seed filler',
-      edits: [{ action: 'create', kind: 'memory', id: 'a-pad', content: 'unrelated filler' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'a-pad', blastRadius: 'project', content: 'unrelated filler' }],
     }, {})
 
     const signal = new AbortController().signal
@@ -711,12 +711,12 @@ describe('harness-state projection', () => {
     seeder.applyRefinement(agent, {
       id: 'refine_switch_1',
       summary: 'seed alpha',
-      edits: [{ action: 'create', kind: 'memory', id: 'zzz-alpha', content: 'zzzalpha ranking notes' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'zzz-alpha', blastRadius: 'project', content: 'zzzalpha ranking notes' }],
     }, {})
     seeder.applyRefinement(agent, {
       id: 'refine_switch_2',
       summary: 'seed beta',
-      edits: [{ action: 'create', kind: 'memory', id: 'zzz-beta', content: 'zzzbeta caching notes' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'zzz-beta', blastRadius: 'project', content: 'zzzbeta caching notes' }],
     }, {})
 
     const signal = new AbortController().signal
@@ -768,8 +768,8 @@ describe('harness-state projection', () => {
       id: 'refine_stable_seed',
       summary: 'seed',
       edits: [
-        { action: 'create', kind: 'memory', id: 'zzz-beta', content: 'zzzbeta caching notes' },
-        { action: 'create', kind: 'memory', id: 'zzz-alpha', content: 'zzzalpha ranking notes' },
+        { action: 'create', kind: 'memory', id: 'zzz-beta', blastRadius: 'project', content: 'zzzbeta caching notes' },
+        { action: 'create', kind: 'memory', id: 'zzz-alpha', blastRadius: 'project', content: 'zzzalpha ranking notes' },
         ...Array.from({ length: 14 }, (_, index) => ({
           action: 'create' as const,
           kind: 'memory' as const,
@@ -826,7 +826,7 @@ describe('harness-state projection', () => {
     store.applyRefinement(agent, {
       id: 'refine_stable_before',
       summary: 'before',
-      edits: [{ action: 'create', kind: 'memory', id: 'existing', content: 'already known' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'existing', blastRadius: 'project', content: 'already known' }],
     }, {})
 
     const signal = new AbortController().signal
@@ -852,7 +852,7 @@ describe('harness-state projection', () => {
     store.applyRefinement(agent, {
       id: 'refine_stable_after',
       summary: 'learned mid-session',
-      edits: [{ action: 'create', kind: 'memory', id: 'fresh', content: 'mid-session learning' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fresh', blastRadius: 'project', content: 'mid-session learning' }],
     }, {})
 
     const followUp = 'an unrelated question'
@@ -886,7 +886,7 @@ describe('harness-state projection', () => {
     seeder.applyRefinement(agent, {
       id: 'refine_vacuous',
       summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'durable' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'durable' }],
     }, {})
 
     const signal = new AbortController().signal
@@ -951,7 +951,7 @@ describe('skill bundle acceptance', () => {
       id: 'refine_bundle',
       summary: 'create a bundle skill',
       edits: [{
-        action: 'create', kind: 'skill', id: 'bundle-demo',
+        action: 'create', kind: 'skill', id: 'bundle-demo', blastRadius: 'project',
         description: 'Use whenever bundling',
         content: '## Steps\n1. Run `scripts/bundle.py`',
         files: { 'scripts/bundle.py': 'print(1)' },
@@ -984,7 +984,7 @@ describe('skill bundle acceptance', () => {
     ctx.provide('llm', makePlanLlm({
       id: 'refine_take',
       summary: 'try to take a user name',
-      edits: [{ action: 'create', kind: 'skill', id: 'mine', content: 'body' }],
+      edits: [{ action: 'create', kind: 'skill', id: 'mine', blastRadius: 'project', content: 'body' }],
     }) as never)
     await ctx.plugin(plugin, pluginConfig(home))
 
@@ -1035,7 +1035,7 @@ describe('post-apply diagnostics wiring', () => {
       id: 'refine_secret',
       summary: 'create a skill with a secret',
       edits: [{
-        action: 'create', kind: 'skill', id: 'secret-demo',
+        action: 'create', kind: 'skill', id: 'secret-demo', blastRadius: 'project',
         description: 'Use whenever handling tokens',
         content: '## Steps\n1. Call the API with ' + ('sk-' + 'abcdef1234567890abcdef1234567890'),
       }],
@@ -1064,7 +1064,7 @@ describe('post-apply diagnostics wiring', () => {
       id: 'refine_secret_off',
       summary: 'create a skill with a secret',
       edits: [{
-        action: 'create', kind: 'skill', id: 'secret-demo-off',
+        action: 'create', kind: 'skill', id: 'secret-demo-off', blastRadius: 'project',
         description: 'Use whenever handling tokens',
         content: '## Steps\n1. Call the API with ' + ('sk-' + 'abcdef1234567890abcdef1234567890'),
       }],
@@ -1090,7 +1090,7 @@ describe('harness_refine bundle materialization result', () => {
       id: 'refine_bundle',
       summary: 'create a bundle skill',
       edits: [{
-        action: 'create', kind: 'skill', id: 'bundle-demo',
+        action: 'create', kind: 'skill', id: 'bundle-demo', blastRadius: 'project',
         description: 'Use whenever bundling',
         content: '## Steps\n1. Run `scripts/bundle.py`',
         files: { 'scripts/bundle.py': 'print(1)', 'references/t.md': '# t' },
@@ -1138,7 +1138,7 @@ describe('harness_refine bundle materialization result', () => {
       id: 'refine_seed_bundle',
       summary: 'create a bundle skill',
       edits: [{
-        action: 'create', kind: 'skill', id: 'bundle-demo',
+        action: 'create', kind: 'skill', id: 'bundle-demo', blastRadius: 'project',
         description: 'Use whenever bundling',
         content: '## Steps\n1. Run `scripts/bundle.py`',
         files: { 'scripts/bundle.py': 'print(1)' },
@@ -1149,7 +1149,7 @@ describe('harness_refine bundle materialization result', () => {
       id: 'refine_bundle_update',
       summary: 'update the bundle skill',
       edits: [{
-        action: 'update', kind: 'skill', id: 'bundle-demo',
+        action: 'update', kind: 'skill', id: 'bundle-demo', blastRadius: 'project',
         description: 'Use whenever bundling',
         content: '## Steps\n1. Run `scripts/bundle.py`',
         files: { 'scripts/bundle.py': 'print(2)' },
