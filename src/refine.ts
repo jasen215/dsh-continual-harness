@@ -132,6 +132,13 @@ export function applyRefinementProposal(
     automatic?: boolean
     /** Session provenance stamped on create/content-update edits. */
     sourceSession?: string
+    /**
+     * Repository the commit is applied in, stamped onto created/updated entries
+     * so ranking can prefer this project's entries. Omitted by replay paths
+     * (rollback, benchmark derivation) that must stay independent of the machine
+     * they run on.
+     */
+    project?: string
     /** Bundle limits passed to validateEdit for skill files (spec §7.4). */
     skillBundleLimits?: SkillBundleLimits
     /** Per-edit veto hook (e.g. fs-backed create-conflict checks); returns the failure reason. */
@@ -295,6 +302,7 @@ export function applyRefinementProposal(
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
             ...(edit.files === undefined ? {} : { files: edit.files }),
             ...(edit.protection === undefined ? {} : { protection: edit.protection }),
+            ...(options.project === undefined ? {} : { projects: [options.project] }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
@@ -305,6 +313,7 @@ export function applyRefinementProposal(
             content,
             ...(edit.title === undefined ? {} : { title: edit.title }),
             ...(edit.protection === undefined ? {} : { protection: edit.protection }),
+            ...(options.project === undefined ? {} : { projects: [options.project] }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
           }
@@ -331,6 +340,9 @@ export function applyRefinementProposal(
       ...(edit.kind === 'skill' && edit.reference !== undefined ? { reference: edit.reference } : {}),
       ...(edit.kind === 'skill' && edit.arguments !== undefined ? { arguments: edit.arguments } : {}),
       ...(edit.kind === 'skill' && edit.files !== undefined ? { files: edit.files } : {}),
+      // An entry touched from a second project serves both; the union is what
+      // keeps a lesson learned in one repo from becoming invisible in the other.
+      ...(options.project === undefined ? {} : { projects: projectUnion(currentEntry.projects, options.project) }),
       ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
       updatedAt: now,
     }
@@ -437,6 +449,16 @@ export function entryToEditFields(before: HarnessEntry): Record<string, unknown>
     fields.files = skill.files ?? {}
   }
   return fields
+}
+
+/**
+ * An entry's project tags after being touched from `project`: the union, so a
+ * lesson refined from a second repository serves both. Order is assignment
+ * order, which keeps repeated applies byte-identical.
+ */
+function projectUnion(existing: string[] | undefined, project: string): string[] {
+  const tags = existing ?? []
+  return tags.includes(project) ? tags : [...tags, project]
 }
 
 /** A fresh empty entries map at the current schema version. */

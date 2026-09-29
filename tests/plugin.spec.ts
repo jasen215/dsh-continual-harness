@@ -641,6 +641,275 @@ describe('harness-state projection', () => {
     expect(blocks).toHaveLength(1)
     expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
   })
+
+  it('skips re-injection when a follow-up message carries no evidence', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, { ...pluginConfig(home), maxInjectedEntriesPerKind: 1 })
+
+    const { agent, session } = stubAgent('gated-no-evidence')
+    const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    // The evidence entry is created first and sorts last, so both the recency
+    // order and the id tiebreak point at the filler: the follow-up query below
+    // is guaranteed to select a different entry than the topical one did.
+    seeder.applyRefinement(agent, {
+      id: 'refine_gate_1',
+      summary: 'seed evidence',
+      edits: [{ action: 'create', kind: 'memory', id: 'zzz-late', content: 'zzzalpha ranking notes' }],
+    }, {})
+    seeder.applyRefinement(agent, {
+      id: 'refine_gate_2',
+      summary: 'seed filler',
+      edits: [{ action: 'create', kind: 'memory', id: 'a-pad', content: 'unrelated filler' }],
+    }, {})
+
+    const signal = new AbortController().signal
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'zzzalpha ranking' }] }), { surfaceOp: 'append' })
+    const claimed1 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'zzzalpha ranking' }] })]
+    const first = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed1, turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed1 }),
+    )
+    if (first.kind !== 'enter') throw new Error('expected enter decision')
+    const firstBlock = first.messages.find(message => isHarnessStateSource(message.source))
+    expect(firstBlock).toBeDefined()
+    for (const message of first.messages) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // "1" tokenizes to nothing: the selection collapses to recency, so the
+    // overview text changes while carrying no evidence for the question asked.
+    // Replacing a topical block with that would trade relevant experience for
+    // the newest entries, so the block must survive untouched.
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '1' }] }), { surfaceOp: 'append' })
+    const claimed2 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '1' }] })]
+    const second = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed2, turn: 2, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed2 }),
+    )
+    expect(second.messages.some(message => isHarnessStateSource(message.source))).toBe(false)
+    const blocks = session.deriveMessages().filter(message => isHarnessStateSource(message.source))
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.content).toEqual(firstBlock?.content)
+  })
+
+  it('re-injects when the question surfaces an evidence-backed entry the block lacks', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, { ...pluginConfig(home), maxInjectedEntriesPerKind: 1, injectionAnchor: 'query' })
+
+    const { agent, session } = stubAgent('gated-topic-switch')
+    const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    seeder.applyRefinement(agent, {
+      id: 'refine_switch_1',
+      summary: 'seed alpha',
+      edits: [{ action: 'create', kind: 'memory', id: 'zzz-alpha', content: 'zzzalpha ranking notes' }],
+    }, {})
+    seeder.applyRefinement(agent, {
+      id: 'refine_switch_2',
+      summary: 'seed beta',
+      edits: [{ action: 'create', kind: 'memory', id: 'zzz-beta', content: 'zzzbeta caching notes' }],
+    }, {})
+
+    const signal = new AbortController().signal
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'zzzalpha ranking' }] }), { surfaceOp: 'append' })
+    const claimed1 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'zzzalpha ranking' }] })]
+    const first = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed1, turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed1 }),
+    )
+    if (first.kind !== 'enter') throw new Error('expected enter decision')
+    const firstBlock = first.messages.find(message => isHarnessStateSource(message.source))
+    expect(firstBlock?.content).toContainEqual(expect.objectContaining({ text: expect.stringContaining('zzz-alpha') }))
+    for (const message of first.messages) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // A new question with real evidence must refresh the block, even though no
+    // refinement landed in between.
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'zzzbeta caching' }] }), { surfaceOp: 'append' })
+    const claimed2 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'zzzbeta caching' }] })]
+    const second = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed2, turn: 2, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed2 }),
+    )
+    expect(second.messages.some(message => isHarnessStateSource(message.source))).toBe(false)
+    const blocks = session.deriveMessages().filter(message => isHarnessStateSource(message.source))
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
+    expect(blocks[0]?.content).toContainEqual(expect.objectContaining({ text: expect.stringContaining('zzz-beta') }))
+  })
+
+  it('keeps one block across a topic change when injectionAnchor is stable', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, { ...pluginConfig(home), injectionAnchor: 'stable' })
+
+    const { agent, session } = stubAgent('gated-stable-anchor')
+    const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    // 16 entries against an index cap of 15: the address of a slot in the index
+    // is decided by the anchor, and one entry does not fit. That is what makes
+    // this test able to fail — with a live-question anchor the second question
+    // brings its own entry into the index.
+    seeder.applyRefinement(agent, {
+      id: 'refine_stable_seed',
+      summary: 'seed',
+      edits: [
+        { action: 'create', kind: 'memory', id: 'zzz-beta', content: 'zzzbeta caching notes' },
+        { action: 'create', kind: 'memory', id: 'zzz-alpha', content: 'zzzalpha ranking notes' },
+        ...Array.from({ length: 14 }, (_, index) => ({
+          action: 'create' as const,
+          kind: 'memory' as const,
+          id: `pad-${String(index).padStart(2, '0')}`,
+          content: 'unrelated filler',
+        })),
+      ],
+    }, {})
+
+    const signal = new AbortController().signal
+    const opening = 'zzzalpha ranking'
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: opening }] }), { surfaceOp: 'append' })
+    const claimed1 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: opening }] })]
+    const first = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed1, turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed1 }),
+    )
+    if (first.kind !== 'enter') throw new Error('expected enter decision')
+    const firstBlock = first.messages.find(message => isHarnessStateSource(message.source))
+    expect(firstBlock).toBeDefined()
+    expect(JSON.stringify(firstBlock?.content)).toContain('zzz-alpha')
+    for (const message of first.messages) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // A new question with its own evidence must NOT move a session-stable block:
+    // the anchor is the opening request plus the project, so the block stays
+    // byte-identical and the provider's cached prefix survives.
+    const followUp = 'zzzbeta caching'
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: followUp }] }), { surfaceOp: 'append' })
+    const claimed2 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: followUp }] })]
+    const second = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed2, turn: 2, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed2 }),
+    )
+    expect(second.messages.some(message => isHarnessStateSource(message.source))).toBe(false)
+    const blocks = session.deriveMessages().filter(message => isHarnessStateSource(message.source))
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.content).toEqual(firstBlock?.content)
+  })
+
+  it('re-publishes under a stable anchor when the harness state changes', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, { ...pluginConfig(home), injectionAnchor: 'stable' })
+
+    const { agent, session } = stubAgent('gated-stable-refinement')
+    const store = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    store.applyRefinement(agent, {
+      id: 'refine_stable_before',
+      summary: 'before',
+      edits: [{ action: 'create', kind: 'memory', id: 'existing', content: 'already known' }],
+    }, {})
+
+    const signal = new AbortController().signal
+    const opening = 'existing memory'
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: opening }] }), { surfaceOp: 'append' })
+    const claimed1 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: opening }] })]
+    const first = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed1, turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed1 }),
+    )
+    if (first.kind !== 'enter') throw new Error('expected enter decision')
+    const firstBlock = first.messages.find(message => isHarnessStateSource(message.source))
+    expect(firstBlock).toBeDefined()
+    for (const message of first.messages) {
+      session.append('user/message', message, { surfaceOp: 'append' })
+    }
+
+    // A stable anchor must not freeze the block: learning something mid-session
+    // is precisely when the model needs the new entry, and the gate's refinement
+    // stamp changes independently of the anchor. Suppressing this would buy a
+    // surviving cache prefix with a session that never sees what it learned.
+    store.applyRefinement(agent, {
+      id: 'refine_stable_after',
+      summary: 'learned mid-session',
+      edits: [{ action: 'create', kind: 'memory', id: 'fresh', content: 'mid-session learning' }],
+    }, {})
+
+    const followUp = 'an unrelated question'
+    session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: followUp }] }), { surfaceOp: 'append' })
+    const claimed2 = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: followUp }] })]
+    const second = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed2, turn: 2, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed2 }),
+    )
+    // The block is shadowed in place and appended to the session log, so the
+    // fresh snapshot reaches this step's derived transcript without re-entering
+    // the decision messages — the block count stays at one rather than doubling.
+    expect(second.messages.some(message => isHarnessStateSource(message.source))).toBe(false)
+    const blocks = session.deriveMessages().filter(message => isHarnessStateSource(message.source))
+    expect(blocks).toHaveLength(1)
+    expect(JSON.stringify(blocks[0]?.content)).toContain('learned mid-session')
+    expect(blocks[0]?.content).not.toEqual(firstBlock?.content)
+  })
+
+  it('publishes on the next step when the first step was vacuous', async () => {
+    const home = tempHome()
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(plugin, pluginConfig(home))
+
+    const { agent } = stubAgent('gated-vacuous-first-step')
+    const seeder = new HarnessStore(ctx, { harnessRoot: home, skillsDir: join(home, 'skills') })
+    seeder.applyRefinement(agent, {
+      id: 'refine_vacuous',
+      summary: 'seed',
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'durable' }],
+    }, {})
+
+    const signal = new AbortController().signal
+    // A vacuous first step shows nothing, so the block is not recorded as
+    // injected: recording it would suppress the block for the rest of the
+    // session, because a later step renders the same state and thus the same
+    // digest.
+    const vacuous = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: [], turn: 1, step: 1, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: [] }),
+    )
+    expect(vacuous.messages.some(message => isHarnessStateSource(message.source))).toBe(false)
+
+    const claimed = [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prompt' }] })]
+    const next = await agentEvents(ctx, agent).waterfall(
+      'agent/pre-step',
+      { messages: claimed, turn: 1, step: 2, signal },
+      () => Promise.resolve({ kind: 'enter' as const, messages: claimed }),
+    )
+    if (next.kind !== 'enter') throw new Error('expected enter decision')
+    expect(next.messages.some(message => isHarnessStateSource(message.source))).toBe(true)
+  })
 })
 
 describe('isHarnessStateSource across the source-kind migration', () => {

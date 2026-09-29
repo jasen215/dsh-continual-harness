@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import { ToolCallId, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { HarnessStore, serializeTrajectory } from '../src/store.ts'
 import { HARNESS_REFINEMENT_EVENT, HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import { getGlobalHarnessStateDir, getLocalHarnessStateDir, loadHarnessState, saveHarnessState } from '../src/storage.ts'
@@ -30,8 +30,17 @@ interface StubAgent {
 }
 
 /** Build one registry-compatible live agent with a durable session. */
-function stubAgent(rawId: string): StubAgent {
-  const session = Session.create(SessionId(rawId))
+function stubAgent(rawId: string, cwd?: string): StubAgent {
+  const id = SessionId(rawId)
+  const session = cwd === undefined
+    ? Session.create(id)
+    : Session.create(id, undefined, {
+        version: SESSION_FORMAT_VERSION,
+        id,
+        createdAt: Date.parse('2026-01-01T00:00:00.000Z'),
+        isSeeded: false,
+        cwd,
+      })
   let status: AgentStatus = 'running'
   const agent: Agent = {
     id: session.id,
@@ -54,8 +63,38 @@ function stubAgent(rawId: string): StubAgent {
 describe('HarnessStore', () => {
   /** Hermetic store: harness root + skills dir both inside one temp home. */
   function testStore(ctx: Context, root: string): HarnessStore {
-    return new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills') })
+    // The plugin default anchor is `stable` (cache-preserving, index-only). These
+    // tests describe per-question rendering and ranking, so they pin the anchor
+    // they are about instead of inheriting whatever the default becomes.
+    return new HarnessStore(ctx, { harnessRoot: root, skillsDir: join(root, 'skills'), injectionAnchor: 'query' })
   }
+
+  it('tags a live commit with the Workspace DSH accounts the session to', () => {
+    const home = tempHome()
+    // The workspace the user registered is the outer directory; the session cwd
+    // is a nested repository. The user's unit is what the entry must be tagged
+    // with, because that is the grouping the model's context will be ranked by.
+    const workspaceRoot = join(home, 'monorepo')
+    const nestedRepo = join(workspaceRoot, 'packages', 'app')
+    mkdirSync(join(nestedRepo, '.git'), { recursive: true })
+    const store = new HarnessStore(new Context(), {
+      harnessRoot: home,
+      skillsDir: join(home, 'skills'),
+      workspacePathFor: sessionId => sessionId === 'ws-agent' ? workspaceRoot : undefined,
+    })
+    const { agent } = stubAgent('ws-agent', nestedRepo)
+
+    store.applyRefinement(agent, {
+      id: 'refine_ws',
+      summary: 'note in this project',
+      edits: [{ action: 'create', kind: 'memory', id: 'ws-note', content: 'x' }],
+    }, { global: true })
+
+    const state = JSON.parse(readFileSync(join(home, 'harness_state.json'), 'utf8')) as {
+      entries: { memory: Record<string, { projects?: string[] }> }
+    }
+    expect(state.entries.memory['ws-note']?.projects).toEqual(['monorepo'])
+  })
 
   it('records injections and exposes persisted usage stats', () => {
     const home = tempHome()
