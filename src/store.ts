@@ -332,11 +332,20 @@ export class HarnessStore {
     if (hits.length > 1) return { applied: false, error: `ambiguous local id: ${id}` }
     const { kind, entry } = hits[0]!
     if (global.entries[kind][id] !== undefined) return { applied: false, error: 'global id conflict' }
-    this.applyRefinement(agent, {
+    const result = this.applyRefinement(agent, {
       id: `promote_${Date.now()}`,
       summary: `Promote local ${kind}:${id} to global`,
-      edits: [{ action: 'create', kind, id, ...entryToEditFields(entry!), reason: 'promote from session wrap-up' }],
+      // Promotion is a move to the project layer, so an undeclared entry is
+      // declared 'project' — the reach the operation itself has — while a
+      // declared value is kept as-is (a session-radius entry is then refused by
+      // the destination-layer check rather than silently widened).
+      edits: [{ action: 'create', kind, id, ...entryToEditFields(entry!), reason: 'promote from session wrap-up', ...(entry!.blastRadius === undefined ? { blastRadius: 'project' } : {}) }],
     }, { global: true })
+    // The commit can legitimately reject the create — a session-radius entry
+    // must not enter the store every session reads (3.4.1) — so reporting
+    // success unconditionally would be a silent false success.
+    const failed = result.appliedEdits.find(edit => !edit.applied)
+    if (failed) return { applied: false, error: failed.error ?? `promote rejected: ${kind}:${id}` }
     return { applied: true }
   }
 

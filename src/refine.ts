@@ -1,10 +1,11 @@
 /**
  * Deterministic half of the refinement flow: edit validation, proposal
- * application with baseline conflict detection, and snapshot rollback.
+ * application with baseline conflict detection, and the entry↔edit field
+ * mapping shared with rollback (see ./rollback.ts) and promote.
  * @module dsh-continual-harness
  */
 
-import { HARNESS_SCHEMA_VERSION, KEBAB_CASE_PATTERN, REFINEMENT_KINDS } from './domain.ts'
+import { BLAST_RADIUS_VALUES, HARNESS_SCHEMA_VERSION, KEBAB_CASE_PATTERN, REFINEMENT_KINDS, isBlastRadius } from './domain.ts'
 import { validateBundleFiles } from './skills.ts'
 import type { SkillBundleLimits } from './skills.ts'
 import type {
@@ -25,11 +26,10 @@ export { REFINEMENT_KINDS }
 export const REFINEMENT_ACTIONS = ['create', 'update', 'delete'] as const
 /** Identifier of the immutable base system prompt; never an editable id. */
 export const BASE_SYSTEM_PROMPT_ID = 'base_system_prompt'
-/** Valid blast radius values for a refinement edit. */
-export const BLAST_RADIUS_VALUES: readonly BlastRadius[] = ['general', 'project', 'session']
-
 /** Existing importers may continue importing this shared constant from refine.ts. */
 export { KEBAB_CASE_PATTERN }
+/** The same compatibility re-export this constant has always had from here. */
+export { BLAST_RADIUS_VALUES }
 
 /** Canonical serialization of an entry for baseline conflict detection. */
 export function entryFingerprint(entry: HarnessEntry): string {
@@ -45,13 +45,14 @@ export function entryFingerprint(entry: HarnessEntry): string {
       : undefined,
     metadata: entry.metadata,
     protection: entry.protection,
+    blastRadius: entry.blastRadius,
   })
 }
 
 /** Validate one edit; returns the failure reason or undefined when valid. */
 export function validateEdit(
   edit: RefinementEdit,
-  opts: { skillBundleLimits?: SkillBundleLimits } = {},
+  opts: { skillBundleLimits?: SkillBundleLimits; scope?: 'local' | 'global'; replay?: boolean } = {},
 ): string | undefined {
   if (!REFINEMENT_KINDS.includes(edit.kind)) return `unknown kind: ${edit.kind}`
   if (!REFINEMENT_ACTIONS.includes(edit.action)) return `unknown action: ${edit.action}`
@@ -62,8 +63,30 @@ export function validateEdit(
       && (typeof edit.reason !== 'string' || edit.reason.trim() === '')) {
     return `edit "${edit.id}" rejected: missing reason, please re-add it`
   }
-  if (edit.blastRadius !== undefined && !BLAST_RADIUS_VALUES.includes(edit.blastRadius)) {
+  if (edit.blastRadius === undefined) {
+    // 3.4.1: an omission is a missing declaration, not 'unspecified', so it is
+    // rejected rather than defaulted. Two writers may omit it: a delete claims
+    // no reach at all, and a replay (rollback) re-states recorded history
+    // instead of declaring reach.
+    if (opts.replay !== true && edit.action !== 'delete') {
+      return `edit "${edit.id}" rejected: missing blastRadius, please re-add it`
+    }
+  } else if (!isBlastRadius(edit.blastRadius)) {
     return `invalid blastRadius: ${edit.blastRadius}`
+  } else if (opts.scope !== undefined) {
+    // 3.4.1 mutual exclusions, checked against the DESTINATION layer: 'general'
+    // claims reach across projects, so it cannot live in the session-local
+    // store; 'session' claims one session, so it cannot live where every
+    // session reads it. This is the write-time half of the gap 9 fix, and it is
+    // why promoting a session-radius local entry to global is rejected. Declared
+    // values only: records carry a schema fallback, and treating that fallback
+    // as a declaration is a bug (see the create branch of rollbackProposal).
+    if (opts.scope === 'local' && edit.blastRadius === 'general') {
+      return `edit "${edit.id}" rejected: blastRadius 'general' cannot target the local scope`
+    }
+    if (opts.scope === 'global' && edit.blastRadius === 'session') {
+      return `edit "${edit.id}" rejected: blastRadius 'session' cannot target the global scope`
+    }
   }
   if (edit.action !== 'update' && (edit.archive !== undefined || edit.pin !== undefined)) {
     return 'archive/pin only valid on update edits'
@@ -95,7 +118,7 @@ function stampAppliedEdit(
   // parseProposal does no field validation, so an out-of-enum value must be
   // normalized: the tool result is validated against OUTPUT_SCHEMA and an
   // invalid blastRadius would hard-fail the whole result as INVALID_TOOL_OUTPUT.
-  const blastRadius: BlastRadius = radius !== undefined && BLAST_RADIUS_VALUES.includes(radius)
+  const blastRadius: BlastRadius = isBlastRadius(radius)
     ? radius
     : 'general'
   return {
@@ -149,13 +172,19 @@ export function applyRefinementProposal(
   const appliedEdits: AppliedRefinementEdit[] = []
   const next = structuredClone(state)
   for (const edit of proposal.edits) {
-    const invalid = validateEdit(edit, options.skillBundleLimits === undefined
-      ? {}
-      : { skillBundleLimits: options.skillBundleLimits })
+    const invalid = validateEdit(edit, {
+      ...(options.skillBundleLimits === undefined ? {} : { skillBundleLimits: options.skillBundleLimits }),
+      scope: options.scope,
+      replay: options.rollbackOf !== undefined,
+    })
     if (invalid) {
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: invalid }))
       continue
     }
+    // Every write branch below stamps the declared reach, so a declaration the
+    // validator forces the model to make is never silently dropped on the floor
+    // (archive/pin rebuild the entry from the current one).
+    const radiusFields = edit.blastRadius === undefined ? {} : { blastRadius: edit.blastRadius }
     const gated = options.editGate?.(edit)
     if (gated) {
       appliedEdits.push(stampAppliedEdit(edit, { applied: false, error: gated }))
@@ -246,6 +275,7 @@ export function applyRefinementProposal(
       }
       const nextEntry: HarnessEntry = {
         ...currentEntry,
+        ...radiusFields,
         version: currentEntry.version + 1,
         updatedAt: now,
         metadata: { ...currentEntry.metadata, lifecycleState: target },
@@ -263,6 +293,7 @@ export function applyRefinementProposal(
     if (edit.pin !== undefined) {
       const nextEntry: HarnessEntry = {
         ...currentEntry,
+        ...radiusFields,
         version: currentEntry.version + 1,
         updatedAt: now,
         metadata: { ...currentEntry.metadata, pinned: edit.pin },
@@ -302,6 +333,7 @@ export function applyRefinementProposal(
             ...(edit.arguments === undefined ? {} : { arguments: edit.arguments }),
             ...(edit.files === undefined ? {} : { files: edit.files }),
             ...(edit.protection === undefined ? {} : { protection: edit.protection }),
+            ...radiusFields,
             ...(options.project === undefined ? {} : { projects: [options.project] }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
@@ -313,6 +345,7 @@ export function applyRefinementProposal(
             content,
             ...(edit.title === undefined ? {} : { title: edit.title }),
             ...(edit.protection === undefined ? {} : { protection: edit.protection }),
+            ...radiusFields,
             ...(options.project === undefined ? {} : { projects: [options.project] }),
             ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
             updatedAt: now,
@@ -333,6 +366,9 @@ export function applyRefinementProposal(
       content,
       ...(edit.title === undefined ? {} : { title: edit.title }),
       ...(edit.protection === undefined ? {} : { protection: edit.protection }),
+      // Set-if-present: a declared reach replaces the recorded one; omitting it
+      // keeps the current value rather than erasing a claim this edit cannot see.
+      ...radiusFields,
       // skill-only fields: set-if-present — the edit carries the new value or
       // the current one is kept, so an update can add a field but rollback
       // (which only re-sets recorded fields) cannot remove one it introduced.
@@ -396,60 +432,8 @@ export function touchedSkillIds(appliedEdits: Array<Pick<AppliedRefinementEdit, 
   return [...new Set(ids)]
 }
 
-/** Revert a committed result: reverse edit order, restoring full entries from
- * snapshots when available; legacy content-only records degrade and are marked. */
-export function rollbackProposal(target: RefinementResult): RefinementProposal {
-  const edits: RefinementEdit[] = []
-  for (const edit of [...target.appliedEdits].reverse()) {
-    if (!edit.applied) continue
-    const reason = `rollback:${target.id}`
-    if (edit.action === 'create') {
-      edits.push({ action: 'delete', kind: edit.kind, id: edit.id, reason })
-    } else if (edit.action === 'delete') {
-      const before: HarnessEntry | undefined = edit.beforeEntry
-        ?? (edit.before === undefined ? undefined : { content: edit.before } as HarnessEntry)
-      if (before === undefined) continue
-      edits.push({
-        action: 'create', kind: edit.kind, id: edit.id,
-        ...entryToEditFields(before),
-        reason,
-        ...(edit.beforeEntry === undefined ? { rollbackDegraded: true } : {}),
-      })
-    } else if (edit.beforeEntry !== undefined) {
-      edits.push({
-        action: 'update', kind: edit.kind, id: edit.id,
-        ...entryToEditFields(edit.beforeEntry),
-        reason,
-      })
-    } else if (edit.before !== undefined) {
-      edits.push({ action: 'update', kind: edit.kind, id: edit.id, content: edit.before, reason, rollbackDegraded: true })
-    }
-  }
-  return {
-    id: `rollback_${target.id}`,
-    summary: `Rollback of ${target.id}`,
-    edits,
-  }
-}
-
-/** Map a full entry snapshot onto edit fields so a rollback (or a promote)
- * restores every persisted field: content, title, metadata, protection, and
- * the skill-only description/reference/arguments. Legacy records carry only
- * content. The single source of truth for the entry→edit field mapping. */
-export function entryToEditFields(before: HarnessEntry): Record<string, unknown> {
-  const fields: Record<string, unknown> = { content: before.content }
-  if (before.title !== undefined) fields.title = before.title
-  if (before.metadata !== undefined) fields.metadata = before.metadata
-  if (before.protection !== undefined) fields.protection = before.protection
-  if (before.kind === 'skill') {
-    const skill = before as SkillEntry
-    if (skill.description !== undefined) fields.description = skill.description
-    if (skill.reference !== undefined) fields.reference = skill.reference
-    if (skill.arguments !== undefined) fields.arguments = skill.arguments
-    fields.files = skill.files ?? {}
-  }
-  return fields
-}
+/** Existing importers may continue importing the rollback surface from refine. */
+export { entryToEditFields, rollbackProposal } from './rollback.ts'
 
 /**
  * An entry's project tags after being touched from `project`: the union, so a

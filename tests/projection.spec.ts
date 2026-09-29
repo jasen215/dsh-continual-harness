@@ -50,7 +50,7 @@ describe('projection telemetry', () => {
     const agent = stubAgent('p1')
     store.applyRefinement(agent, {
       id: 'r1', summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'pin versions' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'pin versions' }],
     }, {})
     registerHarnessProjection(ctx, store)
 
@@ -88,7 +88,7 @@ describe('projection telemetry', () => {
     const agent = stubAgent('p3')
     store.applyRefinement(agent, {
       id: 'r1', summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'pin versions' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'pin versions' }],
     }, {})
     expect(store.render(agent).state).toEqual(store.state(agent))
   })
@@ -100,7 +100,7 @@ describe('projection telemetry', () => {
     const agent = stubAgent('p4')
     store.applyRefinement(agent, {
       id: 'r1', summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'fact', content: 'pin versions' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'fact', blastRadius: 'project', content: 'pin versions' }],
     }, {})
     registerHarnessProjection(ctx, store)
     const localSpy = vi.spyOn(store as unknown as { localState: (a: Agent) => unknown }, 'localState')

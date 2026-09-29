@@ -187,7 +187,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -245,7 +245,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -305,8 +305,8 @@ describe('registerHarnessDriver', () => {
         summary: 'auto',
         edits: [
           // create of an entry the store already holds: rejected per-edit
-          { action: 'create', kind: 'memory', id: 'm1', content: 'rewritten' },
-          { action: 'create', kind: 'memory', id: 'm2', content: 'learned' },
+          { action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'rewritten' },
+          { action: 'create', kind: 'memory', id: 'm2', blastRadius: 'project', content: 'learned' },
         ],
       },
     ])
@@ -322,7 +322,7 @@ describe('registerHarnessDriver', () => {
     store.applyRefinement(agent, {
       id: 'seed',
       summary: 'seed',
-      edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'existing' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'existing' }],
     }, { global: false })
     registerDriver(ctx, store, {
       enabled: true,
@@ -454,7 +454,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -485,7 +485,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -518,9 +518,9 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'first interval' },
-      { id: 'auto_a', summary: 'a', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_a', summary: 'a', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
       { approved: true, rationale: 'second interval' },
-      { id: 'auto_b', summary: 'b', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'more' }] },
+      { id: 'auto_b', summary: 'b', edits: [{ action: 'create', kind: 'memory', id: 'm2', blastRadius: 'project', content: 'more' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -559,7 +559,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ], 30)
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -617,7 +617,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ], 30)
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -707,9 +707,9 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'first interval' },
-      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
       { approved: true, rationale: 'final drain' },
-      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', blastRadius: 'project', content: 'drained' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -750,9 +750,9 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'first interval' },
-      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
       { approved: true, rationale: 'cooldown elapsed' },
-      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'recovered' }] },
+      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', blastRadius: 'project', content: 'recovered' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -795,9 +795,9 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'first interval' },
-      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'one', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
       { approved: true, rationale: 'final drain' },
-      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', content: 'drained' }] },
+      { id: 'auto_2', summary: 'two', edits: [{ action: 'create', kind: 'memory', id: 'm2', blastRadius: 'project', content: 'drained' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)
@@ -984,7 +984,7 @@ describe('registerHarnessDriver', () => {
     ctx = new Context()
     const llm = makeLlm([
       { approved: true, rationale: 'interval reached' },
-      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', content: 'learned' }] },
+      { id: 'auto_1', summary: 'auto', edits: [{ action: 'create', kind: 'memory', id: 'm1', blastRadius: 'project', content: 'learned' }] },
     ])
     const agents = makeAgents()
     ctx.provide('llm', llm as never)

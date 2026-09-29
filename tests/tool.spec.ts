@@ -188,7 +188,7 @@ async function seedReferenceAndRefinement(store: HarnessStore, agent: Agent, hom
   store.applyRefinement(agent, {
     id: refinementId,
     summary: 'add a durable memory',
-    edits: [{ action: 'create', kind: 'memory', id: 'mem-1', content: 'learned' }],
+    edits: [{ action: 'create', kind: 'memory', id: 'mem-1', blastRadius: 'project', content: 'learned' }],
   }, { global: true })
   return { referenceId, refinementId }
 }
@@ -340,7 +340,7 @@ describe('harness_benchmark capture-reference', () => {
     store.applyRefinement(agent, {
       id: 'refine-later',
       summary: 'applied after capture',
-      edits: [{ action: 'create', kind: 'memory', id: 'mem-1', content: 'later' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'mem-1', blastRadius: 'project', content: 'later' }],
     }, { global: true })
     const loaded = loadReferenceSnapshot(home, 'ref-1')
     expect(loaded?.state.refinements).toHaveLength(0)
@@ -415,7 +415,7 @@ describe('harness_benchmark run', () => {
     store.applyRefinement(agent, {
       id: 'refine-1',
       summary: 'add a durable memory',
-      edits: [{ action: 'create', kind: 'memory', id: 'mem-1', content: 'learned' }],
+      edits: [{ action: 'create', kind: 'memory', id: 'mem-1', blastRadius: 'project', content: 'learned' }],
     }, { global: true })
     const snapshot = store.captureSnapshot(agent, 'ref-1')
     captureReferenceSnapshot(home, snapshot)

@@ -12,6 +12,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { appendReview } from './audit.ts'
+import { BLAST_RADIUS_VALUES } from './domain.ts'
 import { executionSummary } from './coordinator.ts'
 import type { RefineCoordinator, RefineExecutionResult } from './coordinator-types.ts'
 import type { HarnessStore } from './store.ts'
@@ -119,7 +120,7 @@ const OUTPUT_SCHEMA = {
           applied: { type: 'boolean', required: true },
           error: { type: 'string' },
           reason: { type: 'string' },
-          blastRadius: { type: 'string', enum: ['general', 'project', 'session'] },
+          blastRadius: { type: 'string', enum: [...BLAST_RADIUS_VALUES] },
           files: { type: 'object', additionalProperties: true },
         },
       },

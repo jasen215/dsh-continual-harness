@@ -9,6 +9,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readF
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
+  isBlastRadius,
   HARNESS_DIR_NAME,
   HARNESS_SCHEMA_VERSION,
   HARNESS_STATE_FILE_NAME,
@@ -18,7 +19,7 @@ import {
   USAGE_EVENTS_FILE_NAME,
 } from './domain.ts'
 import { uniqueTmpPath } from './fs-safe.ts'
-import type { HarnessEntry, HarnessState, RefinementResult } from './types.ts'
+import type { BlastRadius, HarnessEntry, HarnessState, RefinementResult } from './types.ts'
 
 const EMPTY_ENTRIES: HarnessState['entries'] = {
   prompt: {},
@@ -69,7 +70,78 @@ export function migrateHarnessState(parsed: unknown): { state: HarnessState; dia
   const refinements = Array.isArray(source.refinements)
     ? (source.refinements as HarnessState['refinements'])
     : []
-  return { state: { schemaVersion: HARNESS_SCHEMA_VERSION, entries, refinements }, diagnostics }
+  const state: HarnessState = { schemaVersion: HARNESS_SCHEMA_VERSION, entries, refinements }
+  // Normalize before backfilling: a stale value must be cleared so history can
+  // supply the real declaration in its place.
+  const dropped = normalizeBlastRadius(state)
+  if (dropped > 0) diagnostics.push(`cleared an out-of-domain blastRadius on ${dropped} entries, keeping them`)
+  const { filled } = backfillBlastRadius(state)
+  // Only a fill is a state change worth reporting. An entry that stays
+  // undeclared is the normal legacy path (3.1: never inferred, always allowed),
+  // so it must not surface as a diagnostic.
+  if (filled > 0) diagnostics.push(`backfilled blastRadius on ${filled} entries from refinement history`)
+  return { state, diagnostics }
+}
+
+/**
+ * Drop an out-of-domain `blastRadius` instead of dropping its entry. The load
+ * guard discards a whole malformed entry, and losing a memory because one field
+ * holds a stale or hand-edited value would break the backwards-compatibility
+ * hard constraint. A cleared entry is refilled from history when a legal
+ * declaration exists, so this normalizes rather than invents.
+ */
+export function normalizeBlastRadius(state: HarnessState): number {
+  let dropped = 0
+  for (const kind of Object.keys(state.entries) as Array<keyof HarnessState['entries']>) {
+    for (const entry of Object.values(state.entries[kind])) {
+      if (entry.blastRadius === undefined || isBlastRadius(entry.blastRadius)) continue
+      delete entry.blastRadius
+      dropped += 1
+    }
+  }
+  return dropped
+}
+
+/**
+ * Backfill `blastRadius` onto entries from the refinement history.
+ *
+ * Groups applied edits by `(kind, id)` and takes the radius declared by the
+ * group's **last successful** edit; a group whose last successful edit declared
+ * nothing — or that has no successful edit — leaves the entry **undeclared**
+ * rather than inferring a value. Rejected edits are skipped, because their
+ * recorded radius can be a `general` fallback rather than a declaration
+ * (`AppliedRefinementEdit.blastRadius`).
+ *
+ * Idempotent: only entries that lack the field are touched, so a second run
+ * over an already-backfilled state fills nothing.
+ */
+export function backfillBlastRadius(state: HarnessState): { filled: number; undeclared: number } {
+  const declared = new Map<string, BlastRadius | null>()
+  for (const refinement of state.refinements) {
+    for (const edit of refinement.appliedEdits) {
+      if (edit.applied !== true) continue
+      const radius = (edit as { blastRadius?: unknown }).blastRadius
+      declared.set(
+        `${edit.kind}:${edit.id}`,
+        isBlastRadius(radius) ? radius : null,
+      )
+    }
+  }
+  let filled = 0
+  let undeclared = 0
+  for (const kind of Object.keys(state.entries) as Array<keyof HarnessState['entries']>) {
+    for (const [id, entry] of Object.entries(state.entries[kind])) {
+      if (entry.blastRadius !== undefined) continue
+      const radius = declared.get(`${kind}:${id}`)
+      if (radius === undefined || radius === null) {
+        undeclared += 1
+        continue
+      }
+      entry.blastRadius = radius
+      filled += 1
+    }
+  }
+  return { filled, undeclared }
 }
 
 /**
