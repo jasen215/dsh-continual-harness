@@ -118,6 +118,8 @@ Manual overlay (before publish, or to pin a local checkout): apply
         defaultGlobal: true
 ```
 
+An id-targeted row **replaces** the target's whole `config` instead of merging it, so a one-key override must restate the keys it relies on; anything omitted falls back to the defaults below. Overriding one unrelated key never disables the plugin.
+
 Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capability plugins must load before this plugin (its `inject` declaration enforces that; mounting is deferred until they load).
 
 ### dsh version compatibility
@@ -130,7 +132,7 @@ Verified against dsh `0.1.2-alpha.3`; peer floors stay `>=0.1.0-rc.6`, so older 
 | --- | --- | --- |
 | `harnessRoot` | dsh data dir `harness/` | State root directory (temporary dir in tests) |
 | `skillsDir` | `$DSH_HOME/skills` | Directory where skill entries materialize as dsh SKILL.md bundles (dsh's user skill root) |
-| `defaultGlobal` | required | Target scope when the tool call omits `global` |
+| `defaultGlobal` | `true` | Target scope when the tool call omits `global` |
 | `maxTrajectoryChars` | 12000 | Max characters of the planning trajectory (two-layer signal + digest summary; `plannerPrefixCache`-route dependent) |
 | `plannerMaxTokens` | 32000 | Max tokens for the planner LLM call |
 | `plannerPrefixCache` | `auto` | Planning input route: `auto` (Route A warm session prefix when the session shows `cacheReadTokens > 0`, falling back to Route B on a truncated reply), `session` (always Route A), `off` (always Route B summary) |
@@ -139,6 +141,7 @@ Verified against dsh `0.1.2-alpha.3`; peer floors stay `>=0.1.0-rc.6`, so older 
 | `autoRefine` | `{turnInterval: 25, compact: true, cooldownMs: 1200000}` | Auto-refine: turn-interval gate, compaction-end gate, cooldown, disable switch |
 | `requireGlobalApproval` | `false` | Require explicit human approval before a global write commits (conservative mode) |
 | `maxInjectedEntriesPerKind` | `6` | Positive-integer cap (step 1, minimum 1) for ranked injected entries per kind |
+| `injectionAnchor` | `stable` | What the injected block is selected by: `stable` (session opening request + project cwd — same entries all session, so the provider's cached prefix survives a topic change) or `query` (re-selected from the live question) |
 | `wrapupEnabled` | `true` | Register the optional `harness_wrapup` session wrap-up tool |
 | `diagnosticsEnabled` | `true` | Run post-apply structural diagnostics after each committed refinement |
 | `securityEnabled` | `false` | Enable the local security (credential-pattern) diagnostic provider |

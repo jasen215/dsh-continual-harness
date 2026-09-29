@@ -29,6 +29,8 @@ import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import { HARNESS_REFINEMENT_EVENT, registerSessionEventType } from './domain.ts'
 import { attachFileLog, PLUGIN_LOG_FILE_NAME } from './logfile.ts'
 import { DEFAULT_TRAJECTORY_MAX_CHARS, DEFAULT_TRAJECTORY_SIGNAL_RATIO } from './store.ts'
+import type { InjectionAnchor } from './render.ts'
+import { workspacePathFor, type WorkspaceRegistryLike } from './project.ts'
 import { registerHarnessDriver } from './driver.ts'
 import { registerHarnessProjection } from './projection.ts'
 import { registerSessionProjectionObserver } from './session-state.ts'
@@ -111,6 +113,8 @@ export interface Config {
   requireGlobalApproval: boolean
   /** Per-kind cap for ranked injection into the model-visible overview. */
   maxInjectedEntriesPerKind: number
+  /** What the injected block is ranked against: the live question or a session-stable anchor. */
+  injectionAnchor: InjectionAnchor
   /** Register the harness_wrapup tool. */
   wrapupEnabled: boolean
   /** Audit automatic review verdicts into the session log. */
@@ -165,7 +169,11 @@ export const DEFAULT_BENCHMARK_CONFIG: BenchmarkConfig = {
 export const Config: z<Config> = z.object({
   harnessRoot: z.string(),
   skillsDir: z.string(),
-  defaultGlobal: z.boolean().required(),
+  // Defaulted rather than required: an id-targeted profile override *replaces*
+  // the whole config, so a required key deactivates the plugin for anyone who
+  // overrides one unrelated key (`invalid config: $.defaultGlobal missing
+  // required value`, reported only as `1 entry did not activate`).
+  defaultGlobal: z.boolean().default(true),
   maxTrajectoryChars: z.number().step(1).min(1).default(DEFAULT_TRAJECTORY_MAX_CHARS),
   plannerMaxTokens: z.number().step(1).min(1).default(DEFAULT_PLANNER_MAX_TOKENS),
   // schemastery v3 has no `enum`; the union-of-literals idiom matches
@@ -187,6 +195,14 @@ export const Config: z<Config> = z.object({
   }).default({ enabled: true, turnInterval: DEFAULT_TURN_INTERVAL, cooldownMs: DEFAULT_COOLDOWN_MS, compact: true }),
   requireGlobalApproval: z.boolean().default(false),
   maxInjectedEntriesPerKind: z.number().step(1).min(1).default(6),
+  // Stable by default: a live-question anchor re-publishes the block whenever
+  // the topic moves, and every re-publication invalidates the provider's cached
+  // prefix. Measured over one six-message session (same corpus, same model, the
+  // anchor the only difference): 95.4% vs 81.2% cache-read hit rate, 23.3k vs
+  // 358k uncached input tokens, 0 vs 5 full prefix re-reads. State changes still
+  // re-publish under `stable` (the gate keys on the refinement stamp, not the
+  // anchor), so this trades per-turn topical selection for a surviving prefix.
+  injectionAnchor: z.union(['query', 'stable']).default('stable'),
   wrapupEnabled: z.boolean().default(true),
   auditReviews: z.boolean().default(true),
   benchmark: z.object({
@@ -221,6 +237,12 @@ export function apply(ctx: Context, config: Config): void {
   // so those historical logs stay readable (removable once they age out).
   registerSessionEventType(HARNESS_REFINEMENT_EVENT)
 
+  // DSH accounts sessions to Workspaces by canonical cwd, and a Workspace is the
+  // user's own project unit — a better tag than anything a walk-up can infer. The
+  // service is optional: a deployment without Workspaces simply leaves project
+  // tagging to the repository walk-up.
+  const workspaces = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+
   const store = new HarnessStore(ctx, {
     ...(config.harnessRoot === undefined ? {} : { harnessRoot: config.harnessRoot }),
     ...(config.skillsDir === undefined ? {} : { skillsDir: config.skillsDir }),
@@ -232,6 +254,8 @@ export function apply(ctx: Context, config: Config): void {
       maxSkillBundleBytes: config.maxSkillBundleBytes,
     },
     maxInjectedEntriesPerKind: config.maxInjectedEntriesPerKind,
+    injectionAnchor: config.injectionAnchor,
+    ...(workspaces === undefined ? {} : { workspacePathFor: (sessionId: string) => workspacePathFor(workspaces, sessionId) }),
   })
   // One protocol-independent coordinator owns request validation, planner
   // context capture, approval gating, commit serialization, and result

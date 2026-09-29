@@ -119,6 +119,35 @@ describe('harness state storage', () => {
     expect(diagnostics).toContain('skipping invalid memory entry bad')
   })
 
+  it('rejects a malformed projects tag rather than loading a file that breaks ranking', () => {
+    const { state, diagnostics } = migrateHarnessState({
+      schemaVersion: 2,
+      entries: {
+        memory: {
+          wrong: { id: 'wrong', kind: 'memory', version: 1, content: 'x', updatedAt: 't', projects: 'not-an-array' },
+          mixed: { id: 'mixed', kind: 'memory', version: 1, content: 'x', updatedAt: 't', projects: ['ok', 7] },
+        },
+        prompt: {}, skill: {}, subagent: {},
+      },
+      refinements: [],
+    })
+    // Ranking calls `projects.includes`; a non-string member would throw mid-render.
+    expect(state.entries.memory['wrong']).toBeUndefined()
+    expect(state.entries.memory['mixed']).toBeUndefined()
+    expect(diagnostics).toContain('skipping invalid memory entry wrong')
+    expect(diagnostics).toContain('skipping invalid memory entry mixed')
+  })
+
+  it('loads an entry written before the projects field existed, untagged', () => {
+    const { state, diagnostics } = migrateHarnessState({
+      schemaVersion: 2,
+      entries: { memory: { old: { id: 'old', kind: 'memory', version: 1, content: 'x', updatedAt: 't' } }, prompt: {}, skill: {}, subagent: {} },
+      refinements: [],
+    })
+    expect(diagnostics).toEqual([])
+    expect(state.entries.memory['old']?.projects).toBeUndefined()
+  })
+
   it('skips stale lifecycle metadata but preserves archived entries', () => {
     const { state, diagnostics } = migrateHarnessState({
       schemaVersion: 1,

@@ -452,6 +452,42 @@ describe('validateEdit with bundle files', () => {
   })
 })
 
+describe('applyRefinementProposal project stamping', () => {
+  const create: RefinementProposal = {
+    id: 'refine_p1',
+    summary: 'learn something here',
+    edits: [{ action: 'create', kind: 'memory', id: 'local-trick', content: 'the trick' }],
+  }
+
+  it('tags a created entry with the project the commit came from', () => {
+    const state = freshState()
+    const { state: next } = applyRefinementProposal(state, create, {
+      id: create.id,
+      scope: 'global',
+      baselineState: state,
+      project: 'dsh-continual-harness',
+    })
+    expect(next.entries.memory['local-trick']?.projects).toEqual(['dsh-continual-harness'])
+  })
+
+  it('leaves entries untagged when the caller has no project, so replays stay machine-independent', () => {
+    const state = freshState()
+    const { state: next } = applyRefinementProposal(state, create, { id: create.id, scope: 'global', baselineState: state })
+    expect(next.entries.memory['local-trick']?.projects).toBeUndefined()
+  })
+
+  it('unions a second project instead of replacing the first, so the lesson serves both', () => {
+    const state = freshState()
+    const once = applyRefinementProposal(state, create, { id: create.id, scope: 'global', baselineState: state, project: 'repo-a' }).state
+    const twice = applyRefinementProposal(once, {
+      id: 'refine_p2',
+      summary: 'same lesson, other repo',
+      edits: [{ action: 'update', kind: 'memory', id: 'local-trick', reason: 'sharpened here', content: 'the trick, sharpened' }],
+    }, { id: 'refine_p2', scope: 'global', baselineState: once, project: 'repo-b' }).state
+    expect(twice.entries.memory['local-trick']?.projects).toEqual(['repo-a', 'repo-b'])
+  })
+})
+
 describe('applyRefinementProposal with files', () => {
   it('persists files on create and replaces them on update', () => {
     const state = freshState()

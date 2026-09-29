@@ -33,6 +33,7 @@
   "files": [
     "cordis.patch.yml",
     "lib/types/**/*",
+    "scripts/backfill-project-tags.mjs",
     "scripts/repair-harness-state-logs.mjs"
   ],
   "license": "MIT",

@@ -336,5 +336,8 @@ export function isHarnessEntry(value: unknown): value is HarnessEntry {
     if (metadata.pinned !== undefined && typeof metadata.pinned !== 'boolean') return false
     if (metadata.lastInjectedAt !== undefined && typeof metadata.lastInjectedAt !== 'string') return false
   }
+  if (entry.projects !== undefined) {
+    if (!Array.isArray(entry.projects) || entry.projects.some(project => typeof project !== 'string')) return false
+  }
   return true
 }

@@ -32,6 +32,13 @@ export interface HarnessEntry {
   protection?: Protection
   /** Optional single-line title for listing/ranking. */
   title?: string
+  /**
+   * Repository names this entry was learned in, stamped from the applying
+   * session's cwd. Absent means the entry is project-agnostic and stays visible
+   * everywhere: a tag only moves an entry up when its project is the one being
+   * worked in, and never hides an entry because of another project's tag.
+   */
+  projects?: string[]
   /** Provenance and lifecycle metadata (v2). */
   metadata?: {
     /** Trajectory provenance: source session id. */

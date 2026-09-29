@@ -15,7 +15,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { buildSnapshot } from './benchmark.ts'
 import type { HarnessSnapshot } from './benchmark.ts'
 import { applyRefinementProposal, entryToEditFields, rollbackProposal, touchedSkillIds } from './refine.ts'
-import { buildQueryFromSession, DEFAULT_ENTRIES_PER_KIND, formatHarnessStateForPromptStructured } from './render.ts'
+import { buildQueryFromSession, buildStableAnchor, DEFAULT_ENTRIES_PER_KIND, DEFAULT_INDEX_LINES, formatHarnessStateForPromptStructured, STABLE_ANCHOR_NOTE, type InjectionAnchor } from './render.ts'
+import { projectTagFor } from './project.ts'
 import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills.ts'
 import type { SkillBundleLimits } from './skills.ts'
 import {
@@ -76,6 +77,9 @@ export class HarnessStore {
   private readonly skillBundleLimits: SkillBundleLimits
   /** Per-kind cap for ranked prompt injection. */
   private readonly maxInjectedEntriesPerKind: number
+  /** What the injected block is ranked against: the live question or a session-stable anchor. */
+  private readonly injectionAnchor: InjectionAnchor
+  private readonly workspacePathFor: ((sessionId: string) => string | undefined) | undefined
   /** In-memory injection telemetry, loaded once from usage.events.jsonl. */
   private usage: Record<string, { injectionCount: number; lastInjectedAt?: string }> | undefined
   /** Per-session projection facts observed while the plugin runs; nothing is persisted. */
@@ -90,6 +94,9 @@ export class HarnessStore {
       protectedKinds?: readonly RefinementKind[]
       skillBundleLimits?: SkillBundleLimits
       maxInjectedEntriesPerKind?: number
+      injectionAnchor?: InjectionAnchor
+      /** Canonical directory of the Workspace accounting a session, when the deployment has Workspaces. */
+      workspacePathFor?: (sessionId: string) => string | undefined
     } = {},
   ) {
     this.home = options.harnessRoot ?? defaultHarnessHome()
@@ -98,6 +105,10 @@ export class HarnessStore {
     this.protectedKinds = options.protectedKinds
     this.skillBundleLimits = options.skillBundleLimits ?? DEFAULT_SKILL_BUNDLE_LIMITS
     this.maxInjectedEntriesPerKind = options.maxInjectedEntriesPerKind ?? DEFAULT_ENTRIES_PER_KIND
+    // Keep this in step with the config schema's default: a store built outside
+    // the plugin must render the mode the plugin itself would have used.
+    this.injectionAnchor = options.injectionAnchor ?? 'stable'
+    this.workspacePathFor = options.workspacePathFor
   }
 
   /** The session-local state for an agent; migration diagnostics are logged. */
@@ -179,13 +190,24 @@ export class HarnessStore {
   }
 
   /** Structured overview + injected keys + the merged state behind them, so one read serves both. */
-  render(agent: Agent): { overview: string; injectedKeys: string[]; state: HarnessState } {
+  render(agent: Agent): { overview: string; injectedKeys: string[]; matchedKeys: string[]; state: HarnessState } {
     const local = this.localState(agent)
     const state = mergeHarnessStates(this.globalState(), local)
-    const rendered = formatHarnessStateForPromptStructured(state, buildQueryFromSession(agent.session), {
+    const stable = this.injectionAnchor === 'stable'
+    // The stable anchor (session opening request + creation cwd) does not move
+    // as the conversation advances, so the rendered block stays byte-identical
+    // between turns and only a state change republishes it — the prefix the
+    // provider caches survives. Detail then moves to on-demand reads.
+    const anchor = stable ? buildStableAnchor(agent.session) : buildQueryFromSession(agent.session)
+    // Ownership only orders the index, so only the stable render may pay for the
+    // workspace lookup and the filesystem walk that names the project.
+    const project = stable ? this.projectTagOf(agent) : undefined
+    const rendered = formatHarnessStateForPromptStructured(state, anchor, {
       maxPerKind: this.maxInjectedEntriesPerKind,
       sessionId: String(agent.session.id),
       isLocal: (kind, id) => local.entries[kind][id] !== undefined,
+      ...(stable ? { indexLines: DEFAULT_INDEX_LINES, anchorNote: STABLE_ANCHOR_NOTE } : {}),
+      ...(stable && project !== undefined ? { project } : {}),
     })
     return { ...rendered, state }
   }
@@ -233,6 +255,17 @@ export class HarnessStore {
     return serializeTrajectory(agent.session, maxChars, signalRatio)
   }
 
+  /** Project name of the session: DSH's Workspace when it accounts the session, else the repo at cwd. */
+  private projectTagOf(agent: Agent): string | undefined {
+    return projectTagFor(agent.session.header.cwd, this.workspacePathFor?.(String(agent.session.id)))
+  }
+
+  /** The tag as a compact spread, so callers never pass `project: undefined`. */
+  private stampFor(agent: Agent): { project?: string } {
+    const project = this.projectTagOf(agent)
+    return project === undefined ? {} : { project }
+  }
+
   /**
    * Commit a planned refinement: apply to the target store with baseline
    * conflict detection, persist, append the global history when global, and
@@ -262,6 +295,9 @@ export class HarnessStore {
       ...(options.automatic === undefined ? {} : { automatic: options.automatic }),
       ...(options.rollbackOf === undefined ? {} : { rollbackOf: options.rollbackOf }),
       sourceSession: String(agent.session.id),
+      // Rollback replays historical edits and must not re-stamp them with
+      // today's project; a live commit records where it was learned.
+      ...(options.rollbackOf === undefined ? this.stampFor(agent) : {}),
     })
     if (global) {
       saveHarnessState(getGlobalHarnessStateDir(this.home), state)
