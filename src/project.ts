@@ -2,10 +2,11 @@
  * Project tagging: the repository a refinement was applied in.
  *
  * The tag is derived from the session's creation cwd rather than asked of the
- * model — a project name is a fact, not a judgement, and a field the model has
- * to fill is a field that stays empty (`title` is populated on 0 of 73 live
- * entries). Derivation is also why this module is separate: it is the only part
- * of ranking that touches the filesystem, so it stays unit-testable alone.
+ * model — a project name is a *fact*, determined by where the session ran, so
+ * deriving it cannot drift and needs no judgement (the model's 0-of-73 fill
+ * rate for the comparable `title` field is corroborating evidence, not the
+ * argument). Derivation is also why this module is separate: it is the only
+ * part of ranking that touches the filesystem, so it stays unit-testable alone.
  *
  * DSH already knows a better answer than any walk-up can produce: Workspaces are
  * the user's own project units, and the registry associates a session with one

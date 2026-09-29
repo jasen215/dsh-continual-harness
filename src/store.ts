@@ -17,7 +17,8 @@ import type { HarnessSnapshot } from './benchmark.ts'
 import { applyRefinementProposal, entryToEditFields, rollbackProposal, touchedSkillIds } from './refine.ts'
 import { buildQueryFromSession, buildStableAnchor, DEFAULT_ENTRIES_PER_KIND, DEFAULT_INDEX_LINES, formatHarnessStateForPromptStructured, STABLE_ANCHOR_NOTE, type InjectionAnchor } from './render.ts'
 import { projectTagFor } from './project.ts'
-import { DEFAULT_SKILL_BUNDLE_LIMITS, defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills.ts'
+import { defaultSkillFsOps, inspectSkillBundle, reconcileSkillFiles } from './skills-fs.ts'
+import { DEFAULT_SKILL_BUNDLE_LIMITS } from './skills.ts'
 import type { SkillBundleLimits } from './skills.ts'
 import {
   appendGlobalRefinement,

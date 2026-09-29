@@ -26,7 +26,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { executionSummary } from './coordinator.ts'
-import type { RefineCoordinator, RefineExecutionResult, RefineRequest } from './coordinator.ts'
+import type { RefineCoordinator, RefineExecutionResult, RefineRequest } from './coordinator-types.ts'
 import { HARNESS_STATE_KIND } from './domain.ts'
 import type { HarnessScope } from './types.ts'
 

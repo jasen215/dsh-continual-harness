@@ -2,12 +2,11 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { defaultSkillFsOps, reconcileSkillFiles } from '../src/skills-fs.ts'
+import type { SkillFsOps } from '../src/skills-fs.ts'
 import {
   parseFrontmatterName,
-  reconcileSkillFiles,
-  defaultSkillFsOps,
   referencedFilePaths,
-  type SkillFsOps,
   renderSkillMarkdown,
   validateBundleFiles,
   validateSkillBundle,
