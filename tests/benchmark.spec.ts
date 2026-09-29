@@ -3,19 +3,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
-  appendBenchmarkRun,
   buildSnapshot,
-  captureReferenceSnapshot,
   createBenchmarkCase,
   freezeBenchmarkCase,
   hashBenchmarkCase,
-  loadBenchmark,
-  loadReferenceSnapshot,
   MAX_CASE_FIELD_CHARS,
-  saveBenchmarkCases,
   validateCandidateDelta,
   validateCellScore,
 } from '../src/benchmark.ts'
+import {
+  appendBenchmarkRun,
+  captureReferenceSnapshot,
+  loadBenchmark,
+  loadReferenceSnapshot,
+  saveBenchmarkCases,
+} from '../src/benchmark-store.ts'
 import type { BenchmarkCase, BenchmarkDecision, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import { mergeHarnessStates } from '../src/storage.ts'

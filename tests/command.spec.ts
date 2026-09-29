@@ -9,7 +9,7 @@ import {
   reportRefineOutcome,
 } from '../src/command.ts'
 import type { CommandDefinition, CommandsCapability } from '../src/command.ts'
-import type { RefineCoordinator, RefineExecutionResult } from '../src/coordinator.ts'
+import type { RefineCoordinator, RefineExecutionResult } from '../src/coordinator-types.ts'
 
 function agent(id = 'command-agent'): Agent {
   const session = Session.create(SessionId(id))

@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import * as audit from '../src/audit.ts'
-import * as benchmark from '../src/benchmark.ts'
+import * as benchmarkStore from '../src/benchmark-store.ts'
 import { buildSnapshot, createBenchmarkCase, freezeBenchmarkCase } from '../src/benchmark.ts'
 import type { BenchmarkCase, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
 import { runCellEvaluation } from '../src/evaluate.ts'
 import type { CellEvaluationInput } from '../src/evaluate.ts'
 import * as projection from '../src/projection.ts'
-import * as skills from '../src/skills.ts'
+import * as skillsFs from '../src/skills-fs.ts'
 import * as storage from '../src/storage.ts'
 import { HarnessStore } from '../src/store.ts'
 import type { HarnessState } from '../src/types.ts'
@@ -72,10 +72,10 @@ describe('benchmark evaluator isolation', () => {
     const saveSpy = vi.spyOn(storage, 'saveHarnessState')
     const usageSpy = vi.spyOn(storage, 'appendUsageEvents')
     const projectionSpy = vi.spyOn(projection, 'registerHarnessProjection')
-    const skillSpy = vi.spyOn(skills, 'reconcileSkillFiles')
+    const skillSpy = vi.spyOn(skillsFs, 'reconcileSkillFiles')
     const auditSpy = vi.spyOn(audit, 'appendReview')
     // the benchmark-specific audit write; the evaluator must not touch it
-    const benchmarkAuditSpy = vi.spyOn(benchmark, 'appendBenchmarkRun')
+    const benchmarkAuditSpy = vi.spyOn(benchmarkStore, 'appendBenchmarkRun')
 
     const result = await runCellEvaluation(fakeContext(), input())
 

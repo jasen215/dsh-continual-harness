@@ -308,11 +308,6 @@ export function formatHarnessStateForPromptStructured(state: HarnessState, query
   return { overview: lines.join('\n'), injectedKeys, matchedKeys }
 }
 
-/** Render the full overview using structured rendering for compatibility. */
-export function formatHarnessStateForPrompt(state: HarnessState): string {
-  return formatHarnessStateForPromptStructured(state, '', { sessionId: '', isLocal: () => false }).overview
-}
-
 /** Render a shorter routing overview (more entries, truncated content). */
 export function overviewForPrompt(state: HarnessState): string {
   const lines = ['# Continual Harness State', '']

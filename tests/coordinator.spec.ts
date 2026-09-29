@@ -11,7 +11,7 @@ import { isCacheEvidenceEvent } from '../src/cache-detect.ts'
 import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
 import { createRefineCoordinator } from '../src/coordinator.ts'
-import type { PlanRequest } from '../src/coordinator.ts'
+import type { PlanRequest } from '../src/coordinator-types.ts'
 import type { DiagnosticRunner } from '../src/diagnostics.ts'
 import type {
   DiagnosticReport,
