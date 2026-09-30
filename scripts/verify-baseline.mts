@@ -196,6 +196,10 @@ const DECISION_TABLE: Array<{ name: string; cells: CellScore[] }> = [
   { name: 'partial-reference', cells: [cell('reference', 80, 1), cell('reference', null, 2), cell('candidate', 90, 1), cell('candidate', 90, 2)] },
   { name: 'per-case-regression', cells: [cell('reference', 90, 1), cell('reference', 90, 2), cell('candidate', 70, 1), cell('candidate', 70, 2)] },
   { name: 'candidate-failed', cells: [cell('reference', 80, 1), cell('reference', 80, 2), cell('candidate', null, 1), cell('candidate', 80, 2)] },
+  // 一整侧 0 个可用 cell ＝ 没测到，必须判 INCONCLUSIVE(empty-measurement-side)，
+  // 不能被当成退化否决（这条语义见 src/score.ts 的 decideBenchmark JSDoc）；
+  // 这一行把该语义钉进 digest。
+  { name: 'candidate-all-failed', cells: [cell('reference', 80, 1), cell('candidate', null, 1)] },
   // 失败是"没测到"而非"测出差"：候选侧有失败 cell 不得被当成退化否决，
   // 但真实测出的退化仍须压过失败带来的不完整（下一行）。
   { name: 'candidate-failed-but-improved', cells: [...pairs(6, 15, 80), cell('candidate', null, 7)] },
