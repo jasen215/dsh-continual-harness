@@ -288,7 +288,8 @@ describe('parseReviewerScore', () => {
 describe('failure conversion', () => {
   it('fails the cell on malformed executor JSON and keeps a diagnostic', async () => {
     const reply = 'the model replied with prose'
-    const result = await runCellEvaluation(fakeContext([], [reply]), input())
+    const requests: Array<{ provider: string; model: string }> = []
+    const result = await runCellEvaluation(fakeContext([], [reply], requests), input())
     expect(result.status).toBe('failed')
     expect(result.score).toBeNull()
     expect(result.failureReason).toBe('malformed-executor-json')
@@ -297,6 +298,33 @@ describe('failure conversion', () => {
     // be told apart from a truncated one after the fact.
     expect(result.failureDetail).toContain(`reply ${reply.length} chars`)
     expect(result.failureDetail).toContain(reply)
+    // Only an empty reply earns the retry: a malformed one is a parser verdict,
+    // so this test would still pass if the retry were unconditional.
+    expect(requests).toHaveLength(1)
+  })
+
+  it('retries a once-empty executor reply instead of spending the pair', async () => {
+    const requests: Array<{ provider: string; model: string }> = []
+    const result = await runCellEvaluation(fakeContext([], ['', VALID_EVIDENCE, VALID_SCORE], requests), input())
+    // An empty reply is a lost observation, not a verdict: with an acceptance
+    // bar that needs consistent pairs, spending the pair on a provider hiccup
+    // is the one cost this retry exists to avoid.
+    expect(result.status).toBe('ok')
+    expect(result.score).toBe(82)
+    expect(requests).toHaveLength(3)
+  })
+
+  it('keeps the failure when the executor replies empty twice', async () => {
+    const requests: Array<{ provider: string; model: string }> = []
+    const result = await runCellEvaluation(fakeContext([], [''], requests), input())
+    expect(result.status).toBe('failed')
+    expect(result.score).toBeNull()
+    expect(result.evidence).toBeNull()
+    expect(result.failureReason).toBe('malformed-executor-json')
+    expect(result.failureDetail).toContain('reply 0 chars')
+    // Exactly one retry: a second empty reply is the recorded outcome, not a
+    // reason to keep calling the provider.
+    expect(requests).toHaveLength(2)
   })
 
   it('records which field made the executor evidence malformed', async () => {

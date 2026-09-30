@@ -294,6 +294,11 @@ export function parseExecutorEvidence(text: string): ExecutorEvidence {
  * Provider errors, aborts, malformed JSON, and timeouts all convert into
  * `status: 'failed'`, `score: null` cells with stable failure reasons.
  *
+ * An empty executor reply is retried once before it is recorded as a failure:
+ * it is a lost observation rather than a judgement about the refinement, and
+ * the acceptance-side sign test (n≥6 consistent pairs) pays for every lost
+ * pair. A reply that is merely malformed is never retried.
+ *
  * Precondition: `input.benchmarkCase` must be frozen — its material hash is
  * stamped into the cell via `hashBenchmarkCase`, which rejects drafts. Callers
  * validate frozen state before evaluation (the `run` action in `src/tool.ts`).
@@ -333,12 +338,18 @@ export async function runCellEvaluation(
   try {
     let executorText: string
     try {
-      executorText = await raceWithTimeout(
+      const runExecutor = () => raceWithTimeout(
         complete(EXECUTOR_SYSTEM_PROMPT, buildExecutorPrompt(input.benchmarkCase, input.snapshot), callSignal),
         timeoutMs,
         callerSignal,
         () => controller.abort(),
       )
+      executorText = await runExecutor()
+      // A provider can finish successfully yet yield nothing. Retry that once:
+      // an empty reply is a lost observation, not evidence about the candidate,
+      // and a lost pair is exactly the power the sign test cannot spare. Only
+      // emptiness is retried — a malformed reply is a real parser verdict.
+      if (executorText.trim() === '') executorText = await runExecutor()
     } catch (error) {
       return failedCell(base, null, failureReasonFor(error, callerSignal), startedAt)
     }
