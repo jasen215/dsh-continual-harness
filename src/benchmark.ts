@@ -160,7 +160,7 @@ export type CellScoreFailureReason = 'score-non-finite' | 'score-out-of-range' |
 /** Structured result of {@link validateCellScore}. */
 export type CellScoreValidationResult = { ok: true } | { ok: false; reason: CellScoreFailureReason }
 
-/** Hard caps guarding model-driven benchmark growth (spec 项 7). */
+/** Hard caps guarding model-driven benchmark growth (spec item 7). */
 export const MAX_BENCH_CASES = 50
 export const MAX_CASE_FIELD_CHARS = 20_000
 
