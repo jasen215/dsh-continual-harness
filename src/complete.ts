@@ -16,7 +16,7 @@ import type { Complete } from './planner.ts'
 /** Default planning output budget for the refiner. */
 export const DEFAULT_PLANNER_MAX_TOKENS = 32_000
 
-/** Default deadline for one planning/review completion call (spec 项 3). */
+/** Default deadline for one planning/review completion call (spec item 3). */
 export const DEFAULT_COMPLETE_DEADLINE_MS = 120_000
 
 /** One `ctx.llm.stream` call collected to text, non-reasoning, raced against

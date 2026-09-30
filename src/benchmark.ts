@@ -112,6 +112,7 @@ export interface CellScore {
  * INCONCLUSIVE verdict says what to change instead of being a dead end.
  */
 export type InconclusiveReason =
+  | 'empty-measurement-side'
   | 'insufficient-paired-observations'
   | 'no-noise-estimate'
   | 'difference-not-beyond-noise'
@@ -123,8 +124,11 @@ export interface BenchmarkDecision {
   refinementId: string
   /**
    * ACCEPTED requires an improvement that exceeds the observed run-to-run
-   * noise; REJECTED means a regression (or unusable evidence); INCONCLUSIVE
-   * means the comparison cannot distinguish the candidate from the reference.
+   * noise; INCONCLUSIVE means the comparison cannot distinguish the candidate
+   * from the reference — including when a side produced no usable cells at all,
+   * which is a missing measurement rather than evidence against the candidate.
+   * REJECTED therefore covers two measured outcomes: a regression, or a
+   * comparison with nothing left to pair.
    */
   status: 'ACCEPTED' | 'REJECTED' | 'INCONCLUSIVE'
   /** Present only when `status` is INCONCLUSIVE: why the run could not decide. */
@@ -156,7 +160,7 @@ export type CellScoreFailureReason = 'score-non-finite' | 'score-out-of-range' |
 /** Structured result of {@link validateCellScore}. */
 export type CellScoreValidationResult = { ok: true } | { ok: false; reason: CellScoreFailureReason }
 
-/** Hard caps guarding model-driven benchmark growth (spec 项 7). */
+/** Hard caps guarding model-driven benchmark growth (spec item 7). */
 export const MAX_BENCH_CASES = 50
 export const MAX_CASE_FIELD_CHARS = 20_000
 

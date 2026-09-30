@@ -31,7 +31,7 @@ export const DEFAULT_EVALUATION_TIMEOUT_MS = 60_000
 /** The documented executor evidence fields; anything else is rejected. */
 const EXECUTOR_EVIDENCE_FIELDS: readonly string[] = ['completed', 'summary', 'actions', 'observations', 'artifacts']
 
-/** Hard caps on executor evidence size (spec 项 7): bounds run memory and runs.jsonl growth. */
+/** Hard caps on executor evidence size (spec item 7): bounds run memory and runs.jsonl growth. */
 export const MAX_EVIDENCE_ARTIFACTS = 20
 export const MAX_EVIDENCE_TOTAL_BYTES = 256 * 1024
 /** Cap on the retained executor-reply tail kept for failure diagnosis. */

@@ -386,23 +386,53 @@ describe('decideBenchmark', () => {
     expect(decision.regressionCases).toEqual(['case-a'])
   })
 
-  it('rejects when a side has no usable cells (insufficient evidence)', () => {
+  it('is inconclusive when a side has no usable cells (missing measurement, not evidence)', () => {
+    // Every candidate cell failed. That is a measurement the run never made, so it
+    // must not veto the refinement as if the candidate had regressed: the reason
+    // names the empty side — here the candidate — which the operator has to fix
+    // before anything can be concluded.
     const decision = decide([
       cell({ side: 'reference', score: 80, status: 'ok' }),
       cell({ side: 'candidate', score: null, status: 'failed' }),
     ])
-    expect(decision.status).toBe('REJECTED')
+    expect(decision.status).toBe('INCONCLUSIVE')
+    expect(decision.inconclusiveReason).toBe('empty-measurement-side')
     expect(decision.referenceOverall).toBe(80)
     expect(decision.candidateOverall).toBeNull()
     expect(decision.regressionCases).toEqual([])
   })
 
-  it('rejects empty input with no usable cells on either side', () => {
+  it('is inconclusive with the same reason when the reference side is empty', () => {
+    // Symmetric: an unmeasured baseline is no more evidence than an unmeasured
+    // candidate side.
+    const decision = decide([
+      cell({ side: 'reference', score: null, status: 'failed' }),
+      cell({ side: 'candidate', score: 80, status: 'ok' }),
+    ])
+    expect(decision.status).toBe('INCONCLUSIVE')
+    expect(decision.inconclusiveReason).toBe('empty-measurement-side')
+  })
+
+  it('is inconclusive with the same reason for a run with no cells at all', () => {
     const decision = decide([])
-    expect(decision.status).toBe('REJECTED')
+    expect(decision.status).toBe('INCONCLUSIVE')
+    expect(decision.inconclusiveReason).toBe('empty-measurement-side')
     expect(decision.referenceOverall).toBeNull()
     expect(decision.candidateOverall).toBeNull()
     expect(decision.failedCells).toBe(0)
+  })
+
+  it('still rejects a run that measured both sides yet shares no iteration', () => {
+    // Both sides produced cells, but no iteration scored on both. Unlike an empty
+    // side, this is a measured outcome with nothing to pair, so rule (b) keeps its
+    // own verdict rather than inheriting the empty-side reason.
+    const decision = decide([
+      cell({ side: 'reference', score: 80, status: 'ok', iteration: 1 }),
+      cell({ side: 'candidate', score: 90, status: 'ok', iteration: 2 }),
+    ])
+    expect(decision.status).toBe('REJECTED')
+    expect(decision.inconclusiveReason).toBeUndefined()
+    expect(decision.pairs).toBe(0)
   })
 
   it('accepts only when every rule passes', () => {

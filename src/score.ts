@@ -132,22 +132,25 @@ export function aggregateCells(cells: CellScore[], options: AggregateOptions = D
  * for the same case, so case difficulty cancels and a cell that failed drops one
  * pair instead of unbalancing a mean toward either side.
  *
- * REJECTED when the run measured something bad: (a) either side has no usable
- * cells, (b) no iteration scored on both sides, or (c) some case's paired mean
- * difference falls below both `regressionTolerance` and that case's observed
+ * REJECTED when the run measured something bad: zero paired iterations across
+ * every case even though both sides produced usable cells, or some case's paired
+ * mean difference falls below both `regressionTolerance` and that case's observed
  * noise (a drop inside the noise is no more evidence than a gain inside it).
  *
- * INCONCLUSIVE when the evidence cannot separate the two sides: fewer than two
- * paired iterations in some case (the noise is unestimable — `no-noise-estimate`
- * with no dropouts, `insufficient-paired-observations` with them), a difference
- * that does not exceed the observed noise, or an improvement that clears the
- * noise but is not consistent across iterations (`improvement-not-consistent`).
+ * INCONCLUSIVE when the evidence cannot separate the two sides: a side produced
+ * no usable cells at all (`empty-measurement-side`), fewer than two paired
+ * iterations in some case (the noise is unestimable — `no-noise-estimate` with
+ * no dropouts, `insufficient-paired-observations` with them), a difference that
+ * does not exceed the observed noise, or an improvement that clears the noise
+ * but is not consistent across iterations (`improvement-not-consistent`).
  *
  * ACCEPTED only when the paired improvement exceeds the observed spread *and*
  * survives the sign test — "no regression" alone is never an accept.
  *
  * A failed cell is an absence of measurement, never evidence against: an
- * unparseable executor reply must not veto a refinement as if it had regressed.
+ * unparseable executor reply must not veto a refinement as if it had regressed —
+ * not even when every cell on one side fails, which is why that run is
+ * INCONCLUSIVE with `empty-measurement-side` rather than REJECTED.
  * Collects non-empty cell feedback in input order and always records
  * `autoRollback: false` — the rollback engine is never invoked.
  */
@@ -345,9 +348,17 @@ function decideStatus(
   aggregated: AggregateResult,
   regressionCases: string[],
 ): { status: BenchmarkDecision['status']; inconclusiveReason?: InconclusiveReason } {
-  // (a) fail closed when a side measured nothing at all.
-  if (aggregated.usableReference === 0 || aggregated.usableCandidate === 0) return { status: 'REJECTED' }
-  // (b) no iteration scored on both sides: there is nothing to compare.
+  // (a) a side that produced no usable cell is a missing measurement, not evidence
+  // against the candidate: nothing was measured, so nothing is refuted. Checked
+  // before (b) because an empty side makes (b) condition true as well, and this
+  // reason is the one that names what actually went wrong.
+  if (aggregated.usableReference === 0 || aggregated.usableCandidate === 0) {
+    return { status: 'INCONCLUSIVE', inconclusiveReason: 'empty-measurement-side' }
+  }
+  // (b) both sides measured, but no iteration scored on both: there is nothing to
+  // compare. `pairedDelta` is null exactly when `pairs` is 0, so the two conditions
+  // are equivalent; both stay because the narrow on `delta` is what the tests below
+  // rely on.
   const delta = aggregated.pairedDelta
   if (aggregated.pairs === 0 || delta === null) return { status: 'REJECTED' }
   // (c) any per-case regression beyond tolerance *and* beyond that case's
