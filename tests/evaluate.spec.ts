@@ -3,8 +3,9 @@ import { Context } from '@deepseek-ai/cordis'
 import { buildSnapshot, createBenchmarkCase, freezeBenchmarkCase } from '../src/benchmark.ts'
 import type { BenchmarkCase, HarnessSnapshot } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { MAX_EVIDENCE_ARTIFACTS, MAX_EVIDENCE_TOTAL_BYTES, parseExecutorEvidence, parseReviewerScore, runCellEvaluation } from '../src/evaluate.ts'
+import { MAX_EVIDENCE_ARTIFACTS, MAX_EVIDENCE_TOTAL_BYTES, buildReviewerPrompt, parseExecutorEvidence, parseReviewerScore, parseReviewerVerdicts, runCellEvaluation, scoreFromVerdicts } from '../src/evaluate.ts'
 import type { CellEvaluationInput } from '../src/evaluate.ts'
+import type { BenchmarkCriterion } from '../src/benchmark.ts'
 import type { HarnessState } from '../src/types.ts'
 
 const EMPTY_ENTRIES = { prompt: {}, memory: {}, skill: {}, subagent: {} }
@@ -156,6 +157,111 @@ describe('parseExecutorEvidence', () => {
   })
 })
 
+const CRITERIA: BenchmarkCriterion[] = [
+  { id: 'routing', weight: 40, check: 'routed to the harness-managed skill path' },
+  { id: 'persistence', weight: 25, check: 'persisted through the harness with an advanced version' },
+  { id: 'auditability', weight: 25, check: 'named the exact call and read back the result' },
+  { id: 'reusability', weight: 10, check: 'named where the skill materialized' },
+]
+
+const CRITERIA_CASE: BenchmarkCase = freezeBenchmarkCase(createBenchmarkCase({
+  id: 'case-criteria',
+  title: 'Criteria case',
+  statement: 'Persist the workflow as a reusable skill.',
+  rubric: 'Human-readable summary of the four dimensions.',
+  criteria: CRITERIA,
+}))
+
+const REVIEW_EVIDENCE = { completed: true, summary: 's', actions: [], observations: [], artifacts: [] }
+
+describe('criteria-scored reviewer', () => {
+  it('computes the score in code from the per-dimension verdicts', () => {
+    expect(scoreFromVerdicts(CRITERIA, CRITERIA.map(c => ({ id: c.id, met: true })))).toBe(100)
+    expect(scoreFromVerdicts(CRITERIA, CRITERIA.map(c => ({ id: c.id, met: false })))).toBe(0)
+    // 40 + 25 = 65 of 100: the arithmetic belongs to the harness, not the model.
+    expect(scoreFromVerdicts(CRITERIA, [
+      { id: 'routing', met: true },
+      { id: 'persistence', met: true },
+      { id: 'auditability', met: false },
+      { id: 'reusability', met: false },
+    ])).toBe(65)
+  })
+
+  it('ignores a total the reviewer supplies anyway', () => {
+    // The failure mode this guards: a model that still emits a number must not
+    // be able to set the score, because then the variance is back.
+    const verdict = parseReviewerVerdicts(JSON.stringify({
+      verdicts: [
+        { id: 'routing', met: true },
+        { id: 'persistence', met: false },
+        { id: 'auditability', met: false },
+        { id: 'reusability', met: false },
+      ],
+      feedback: 'name the exact call',
+      score: 3,
+    }), CRITERIA)
+    expect(verdict.score).toBe(40)
+    expect(verdict.feedback).toBe('name the exact call')
+  })
+
+  it('fails loudly when a criterion is unanswered instead of scoring it as unmet', () => {
+    // Silently defaulting an unanswered dimension would depress the score with
+    // no trace in the record.
+    expect(() => parseReviewerVerdicts(JSON.stringify({
+      verdicts: [{ id: 'routing', met: true }],
+      feedback: 'ok',
+    }), CRITERIA)).toThrow(/missing verdict for criterion: persistence/)
+  })
+
+  it('rejects unknown, malformed, or duplicated verdicts', () => {
+    const all = CRITERIA.map(c => ({ id: c.id, met: true }))
+    const call = (verdicts: unknown) => () => parseReviewerVerdicts(JSON.stringify({ verdicts, feedback: 'ok' }), CRITERIA)
+    expect(call([...all, { id: 'invented', met: true }])).toThrow(/unknown criterion id/)
+    expect(call(CRITERIA.map(c => ({ id: c.id, met: 'yes' })))).toThrow(/boolean met/)
+    expect(call([...all, { id: 'routing', met: false }])).toThrow(/duplicate verdict id/)
+    expect(() => parseReviewerVerdicts(JSON.stringify({ verdicts: 'nope', feedback: 'ok' }), CRITERIA))
+      .toThrow(/verdicts must be an array/)
+    expect(call(['nope'])).toThrow(/each verdict must be an object/)
+    expect(() => parseReviewerVerdicts(JSON.stringify({ verdicts: all, feedback: '  ' }), CRITERIA))
+      .toThrow(/feedback must be a non-empty string/)
+  })
+
+  it('asks a criteria case for verdicts and never for a total', () => {
+    const prompt = buildReviewerPrompt(CRITERIA_CASE, REVIEW_EVIDENCE)
+    for (const criterion of CRITERIA) expect(prompt).toContain(criterion.check)
+    expect(prompt).toContain('"verdicts"')
+    expect(prompt).not.toContain('"score"')
+  })
+
+  it('keeps the legacy single-score reply for a case without criteria', () => {
+    const prompt = buildReviewerPrompt(FROZEN_CASE, REVIEW_EVIDENCE)
+    expect(prompt).toContain(FROZEN_CASE.rubric)
+    expect(prompt).toContain('"score"')
+  })
+
+  it('scores a criteria cell with the code-computed total', async () => {
+    const calls: string[] = []
+    const result = await runCellEvaluation(fakeContext(calls, [VALID_EVIDENCE, {
+      verdicts: CRITERIA.map(c => ({ id: c.id, met: c.id === 'routing' || c.id === 'persistence' })),
+      feedback: 'add the readback',
+    }]), input({ benchmarkCase: CRITERIA_CASE }))
+    expect(result.status).toBe('ok')
+    expect(result.score).toBe(65)
+    expect(result.feedback).toBe('add the readback')
+  })
+
+  it('fails the cell when a criteria reply omits a dimension', async () => {
+    const calls: string[] = []
+    const result = await runCellEvaluation(fakeContext(calls, [VALID_EVIDENCE, {
+      verdicts: [{ id: 'routing', met: true }],
+      feedback: 'partial',
+    }]), input({ benchmarkCase: CRITERIA_CASE }))
+    expect(result.status).toBe('failed')
+    expect(result.score).toBeNull()
+    expect(result.failureReason).toBe('invalid-reviewer-verdicts')
+  })
+})
+
 describe('parseReviewerScore', () => {
   it('parses a finite score in 0..100 with non-empty feedback', () => {
     expect(parseReviewerScore('{"score":82,"feedback":"specific improvement"}')).toEqual({ score: 82, feedback: 'specific improvement' })
@@ -180,19 +286,36 @@ describe('parseReviewerScore', () => {
 })
 
 describe('failure conversion', () => {
-  it('fails the cell on malformed executor JSON', async () => {
-    const result = await runCellEvaluation(fakeContext([], ['the model replied with prose']), input())
+  it('fails the cell on malformed executor JSON and keeps a diagnostic', async () => {
+    const reply = 'the model replied with prose'
+    const result = await runCellEvaluation(fakeContext([], [reply]), input())
     expect(result.status).toBe('failed')
     expect(result.score).toBeNull()
     expect(result.failureReason).toBe('malformed-executor-json')
     expect(result.evidence).toBeNull()
+    // The diagnosis must survive the run, otherwise a malformed reply can never
+    // be told apart from a truncated one after the fact.
+    expect(result.failureDetail).toContain(`reply ${reply.length} chars`)
+    expect(result.failureDetail).toContain(reply)
   })
 
-  it('fails the cell on executor evidence with unknown fields', async () => {
+  it('records which field made the executor evidence malformed', async () => {
     const result = await runCellEvaluation(fakeContext([], [{ completed: true, summary: 's', actions: [], observations: [], extra: 1 }]), input())
     expect(result.status).toBe('failed')
     expect(result.score).toBeNull()
     expect(result.failureReason).toBe('malformed-executor-json')
+    // The parser's own message is the difference between a wrong shape and a
+    // truncated reply; discarding it left every failure indistinguishable.
+    expect(result.failureDetail).toContain('unexpected executor evidence field: extra')
+  })
+
+  it('diagnoses a truncated executor reply as truncation, with a bounded tail', async () => {
+    const truncated = `{"completed":true,"summary":"${'x'.repeat(400)}`
+    const result = await runCellEvaluation(fakeContext([], [truncated]), input())
+    expect(result.failureReason).toBe('malformed-executor-json')
+    expect(result.failureDetail).toContain('the reply was truncated or empty')
+    expect(result.failureDetail).toContain(`reply ${truncated.length} chars`)
+    expect(result.failureDetail!.length).toBeLessThanOrEqual(600)
   })
 
   it('marks evidence beyond the artifact cap as a failed cell with evidence-overflow', async () => {

@@ -15,7 +15,7 @@ import { MAX_BENCH_CASES } from '../src/benchmark.ts'
 import { captureReferenceSnapshot, loadBenchmark, loadReferenceSnapshot } from '../src/benchmark-store.ts'
 import type { BenchmarkDecision, ExecutorEvidence } from '../src/benchmark.ts'
 import type { RefineCoordinator } from '../src/coordinator-types.ts'
-import { errorMessage, makeFakeLlm, SCORE_70, SCORE_90, VALID_EVIDENCE } from './fake-llm.ts'
+import { errorMessage, makeFakeLlm, pairedFeedback, pairedReplies, SCORE_70, VALID_EVIDENCE } from './fake-llm.ts'
 import { HarnessStore } from '../src/store.ts'
 import { registerBenchmarkTool } from '../src/tool-benchmark.ts'
 import type { BenchmarkToolOptions } from '../src/tool-benchmark.ts'
@@ -124,7 +124,9 @@ async function executeTool(ctx: Context, name: string, args: unknown, liveAgent:
 /** Default benchmark tool options mirroring the spec §5 defaults. */
 const OPTIONS: BenchmarkToolOptions = {
   defaultRuns: 1,
-  maxRuns: 3,
+  // Six agreeing pairs is the smallest sample the acceptance-side sign test
+  // can call significant, so a run fixture that expects ACCEPTED needs six.
+  maxRuns: 6,
   passThreshold: 60,
   regressionTolerance: 0,
   maxFailedCells: 0,
@@ -264,6 +266,67 @@ describe('harness_benchmark add-case and freeze', () => {
       expect(errorMessage(result)).toMatch(/benchmark:add-case:missing-argument/)
       expect(loadBenchmark(home)).toEqual([])
     }
+  })
+
+  it('stores declared criteria with the case', async () => {
+    const home = tempHome()
+    const { ctx } = await mount(home)
+    const result = await execute(ctx, {
+      action: 'add-case',
+      case_id: 'case-criteria',
+      title: 'Task',
+      statement: 'Do X',
+      rubric: 'Human-readable summary.',
+      criteria: [
+        { id: 'routing', weight: 40, check: 'routed correctly' },
+        { id: 'persistence', weight: 25, check: 'persisted with a version' },
+      ],
+    })
+    expect(result.isError).toBe(false)
+    expect(loadBenchmark(home)[0]?.criteria).toEqual([
+      { id: 'routing', weight: 40, check: 'routed correctly' },
+      { id: 'persistence', weight: 25, check: 'persisted with a version' },
+    ])
+  })
+
+  it('refuses a malformed criterion instead of silently dropping it', async () => {
+    const home = tempHome()
+    const { ctx } = await mount(home)
+    // Shapes the parameter schema accepts are still refused by the action
+    // itself, so a wrong ruler can never be stored.
+    for (const criteria of [
+      [],
+      [{ id: 'a', weight: 0, check: 'c' }],
+      [{ id: '', weight: 1, check: 'c' }],
+      [{ id: 'a', weight: 1, check: '' }],
+      [{ id: 'a', weight: 1, check: 'c' }, { id: 'a', weight: 2, check: 'c' }],
+    ]) {
+      const result = await execute(ctx, {
+        action: 'add-case',
+        case_id: 'case-bad',
+        title: 'Task',
+        statement: 'Do X',
+        rubric: 'Human-readable summary.',
+        criteria,
+      })
+      expect(result.isError).toBe(true)
+      expect(errorMessage(result)).toMatch(/benchmark:add-case:invalid-criteria/)
+    }
+    // Shapes the schema itself rejects never reach the action at all.
+    for (const criteria of ['nope', [null]]) {
+      const result = await execute(ctx, {
+        action: 'add-case',
+        case_id: 'case-bad',
+        title: 'Task',
+        statement: 'Do X',
+        rubric: 'Human-readable summary.',
+        criteria,
+      })
+      expect(result.isError).toBe(true)
+      expect(errorMessage(result)).toMatch(/invalid arguments/)
+    }
+    // A refused criterion must not leave a half-made case behind.
+    expect(loadBenchmark(home)).toEqual([])
   })
 
   it('rejects a duplicate case id as a structured error without overwriting the store', async () => {
@@ -433,7 +496,7 @@ describe('harness_benchmark run', () => {
     const home = tempHome()
     const { ctx, store } = await mount(home)
     const { agent } = stubAgent('run-ok')
-    ctx.provide('llm', makeFakeLlm([VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90]) as never)
+    ctx.provide('llm', makeFakeLlm(pairedReplies(6)) as never)
     await seedFrozenCase(ctx)
     const { referenceId, refinementId } = await seedReferenceAndRefinement(store, agent, home)
 
@@ -441,6 +504,7 @@ describe('harness_benchmark run', () => {
       action: 'run',
       reference_snapshot_id: referenceId,
       refinement_id: refinementId,
+      runs: 6,
     }, agent)
     const json = resultJson(result)
     expect(json.action).toBe('run')
@@ -453,9 +517,11 @@ describe('harness_benchmark run', () => {
     expect(json.regression_cases).toEqual([])
     expect(json.failed_cells).toBe(0)
     expect(json.auto_rollback).toBe(false)
-    expect(json.feedback).toEqual(['reference ok', 'candidate better'])
-    expect(json.runs).toBe(1)
-    expect(json.cells).toBe(2)
+    expect(json.inconclusive_reason).toBeNull()
+    expect(json.noise_floor).toBe(0)
+    expect(json.feedback).toEqual(pairedFeedback(6))
+    expect(json.runs).toBe(6)
+    expect(json.cells).toBe(12)
 
     // the durable run record lands in benchmark/runs.jsonl with cells + decision
     const lines = readFileSync(join(home, 'benchmark', 'runs.jsonl'), 'utf8').trim().split('\n')
@@ -471,7 +537,7 @@ describe('harness_benchmark run', () => {
     expect(record.decision.autoRollback).toBe(false)
     expect(record.decision.referenceOverall).toBe(70)
     expect(record.decision.candidateOverall).toBe(90)
-    expect(record.cells).toHaveLength(2)
+    expect(record.cells).toHaveLength(12)
     const referenceCell = record.cells.find(cell => cell.side === 'reference')
     const candidateCell = record.cells.find(cell => cell.side === 'candidate')
     expect(referenceCell).toMatchObject({ status: 'ok', score: 70, snapshotId: referenceId })
@@ -490,11 +556,8 @@ describe('harness_benchmark run', () => {
     const { ctx, store } = await mount(home)
     const { agent } = stubAgent('run-options')
     const requests: Array<{ provider: string; model: string }> = []
-    // 1 case x 2 iterations x 2 sides = 4 cells -> 8 completions
-    const replies = [
-      VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90,
-      VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90,
-    ]
+    // 1 case x 6 iterations x 2 sides = 12 cells -> 24 completions
+    const replies = pairedReplies(6)
     ctx.provide('llm', makeFakeLlm(replies, requests) as never)
     await seedFrozenCase(ctx)
     const { referenceId, refinementId } = await seedReferenceAndRefinement(store, agent, home)
@@ -503,16 +566,16 @@ describe('harness_benchmark run', () => {
       action: 'run',
       reference_snapshot_id: referenceId,
       refinement_id: refinementId,
-      runs: 2,
+      runs: 6,
       provider: 'alt-provider',
       model: 'alt-model',
     }, agent)
     const json = resultJson(result)
     expect(json.status).toBe('ACCEPTED')
-    expect(json.runs).toBe(2)
-    expect(json.cells).toBe(4)
+    expect(json.runs).toBe(6)
+    expect(json.cells).toBe(12)
     // every completion — both sides, both iterations — routed through the same options
-    expect(requests).toHaveLength(8)
+    expect(requests).toHaveLength(24)
     expect(requests.every(request => request.provider === 'alt-provider' && request.model === 'alt-model')).toBe(true)
   })
 
@@ -611,13 +674,14 @@ describe('harness_benchmark status', () => {
     const home = tempHome()
     const { ctx, store } = await mount(home)
     const { agent } = stubAgent('status')
-    ctx.provide('llm', makeFakeLlm([VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90]) as never)
+    ctx.provide('llm', makeFakeLlm(pairedReplies(6)) as never)
     await seedFrozenCase(ctx, 'case-1')
     const { referenceId, refinementId } = await seedReferenceAndRefinement(store, agent, home)
     await execute(ctx, {
       action: 'run',
       reference_snapshot_id: referenceId,
       refinement_id: refinementId,
+      runs: 6,
     }, agent)
 
     const result = await execute(ctx, { action: 'status' })

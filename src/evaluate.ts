@@ -16,7 +16,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
-import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
+import type { BenchmarkCase, BenchmarkCriterion, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
 import { hashBenchmarkCase } from './benchmark.ts'
 import { completeViaModel } from './complete.ts'
 import type { Complete } from './planner.ts'
@@ -34,6 +34,10 @@ const EXECUTOR_EVIDENCE_FIELDS: readonly string[] = ['completed', 'summary', 'ac
 /** Hard caps on executor evidence size (spec 项 7): bounds run memory and runs.jsonl growth. */
 export const MAX_EVIDENCE_ARTIFACTS = 20
 export const MAX_EVIDENCE_TOTAL_BYTES = 256 * 1024
+/** Cap on the retained executor-reply tail kept for failure diagnosis. */
+export const MAX_FAILURE_DETAIL_TAIL = 300
+/** Cap on the whole failure diagnostic, so a record can never grow unbounded. */
+export const MAX_FAILURE_DETAIL = 600
 
 /** Marker error: executor evidence exceeded the hard caps. */
 export class EvidenceOverflowError extends Error {
@@ -54,6 +58,7 @@ export type EvaluationFailureReason =
   | 'malformed-executor-json'
   | 'malformed-reviewer-json'
   | 'invalid-reviewer-score'
+  | 'invalid-reviewer-verdicts'
   | 'empty-reviewer-feedback'
   | 'evidence-overflow'
 
@@ -87,6 +92,33 @@ export interface ReviewerScore {
 }
 
 /**
+ * A criteria-based reviewer reply: one boolean per declared dimension plus
+ * prose. The reviewer never produces the number — `scoreFromVerdicts` does.
+ */
+export interface ReviewerVerdicts extends ReviewerScore {
+  verdicts: Array<{ id: string; met: boolean }>
+}
+
+/**
+ * Weighted total of per-dimension verdicts, rounded to an integer:
+ * `Σ weight·met / Σ weight · 100`. The store boundary validates the criteria as
+ * non-empty with positive weights, so the divisor cannot be zero.
+ */
+export function scoreFromVerdicts(
+  criteria: BenchmarkCriterion[],
+  verdicts: Array<{ id: string; met: boolean }>,
+): number {
+  const met = new Set(verdicts.filter(verdict => verdict.met).map(verdict => verdict.id))
+  let earned = 0
+  let total = 0
+  for (const criterion of criteria) {
+    total += criterion.weight
+    if (met.has(criterion.id)) earned += criterion.weight
+  }
+  return Math.round((earned / total) * 100)
+}
+
+/**
  * The evaluation-stage outcome of one cell: the persisted `CellScore` fields
  * (see `src/benchmark.ts`) plus the executor evidence the run record must
  * store. A failed cell carries `score: null` (never 0) and a stable
@@ -107,10 +139,11 @@ Respond with ONLY a JSON object:
 {"completed":true|false,"summary":"one line","actions":["..."],"observations":["..."],"artifacts":[{"name":"...","content":"..."}]}`
 
 /** System prompt for the reviewer phase. */
-export const REVIEWER_SYSTEM_PROMPT = `You are the reviewer of one benchmark cell. Given the statement, the rubric, and the executor's evidence, score the executor's completion on a 0..100 scale and give one concrete piece of actionable feedback.
+export const REVIEWER_SYSTEM_PROMPT = `You are the reviewer of one benchmark cell. Judge the executor's evidence against the case's declared criteria and give one concrete piece of actionable feedback.
 
-Respond with ONLY a JSON object:
-{"score":82,"feedback":"specific improvement"}`
+Never award a dimension the evidence does not show: require the evidence itself to prove it, not the executor's claim that it happened.
+
+Respond with ONLY the JSON object described under "Required reply" — no prose and no code fences.`
 
 /** Build the executor prompt: the case statement plus a snapshot-derived overview ONLY. */
 export function buildExecutorPrompt(benchmarkCase: BenchmarkCase, snapshot: HarnessSnapshot): string {
@@ -123,18 +156,86 @@ export function buildExecutorPrompt(benchmarkCase: BenchmarkCase, snapshot: Harn
   ].join('\n')
 }
 
-/** Build the reviewer prompt: the statement, the rubric, and this cell's executor evidence ONLY. */
+/**
+ * Build the reviewer prompt: the statement, then either the case's declared
+ * criteria (authoritative, binary-scored) or its legacy free-form rubric, and
+ * this cell's executor evidence ONLY. The required reply shape travels with the
+ * criteria so the two cannot drift apart.
+ */
 export function buildReviewerPrompt(benchmarkCase: BenchmarkCase, evidence: ExecutorEvidence): string {
-  return [
-    '# Benchmark case',
-    benchmarkCase.statement,
-    '',
-    '# Rubric',
-    benchmarkCase.rubric,
-    '',
-    '# Executor evidence',
-    JSON.stringify(evidence, null, 2),
-  ].join('\n')
+  const lines = ['# Benchmark case', benchmarkCase.statement, '']
+  if (benchmarkCase.criteria === undefined) {
+    lines.push(
+      '# Rubric',
+      benchmarkCase.rubric,
+      '',
+      '# Required reply',
+      '{"score":82,"feedback":"specific improvement"}',
+    )
+  } else {
+    lines.push(
+      '# Criteria',
+      'Answer every criterion with a boolean; the score is computed from your verdicts, so never produce a total yourself.',
+      '',
+    )
+    for (const criterion of benchmarkCase.criteria) {
+      lines.push(`## ${criterion.id} (weight ${criterion.weight})`, criterion.check, '')
+    }
+    lines.push(
+      '# Required reply',
+      '{"verdicts":[{"id":"<criterion id>","met":true|false}],"feedback":"specific improvement"}',
+    )
+  }
+  lines.push('', '# Executor evidence', JSON.stringify(evidence, null, 2))
+  return lines.join('\n')
+}
+
+/**
+ * Parse a criteria-based reviewer reply. Every declared criterion must be
+ * answered exactly once with a boolean: an unanswered dimension would otherwise
+ * read as "not met" and depress the score invisibly, so it fails loudly instead
+ * (never a silent default).
+ */
+export function parseReviewerVerdicts(text: string, criteria: BenchmarkCriterion[]): ReviewerVerdicts {
+  const object = parseJsonObject(text)
+  const raw = object.verdicts
+  if (!Array.isArray(raw)) {
+    throw new ReviewerParseError('invalid-reviewer-verdicts', 'reviewer verdicts must be an array')
+  }
+  const verdicts: Array<{ id: string; met: boolean }> = []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new ReviewerParseError('invalid-reviewer-verdicts', 'each verdict must be an object')
+    }
+    const { id, met } = entry as Record<string, unknown>
+    if (typeof id !== 'string' || typeof met !== 'boolean') {
+      throw new ReviewerParseError('invalid-reviewer-verdicts', 'each verdict needs a string id and a boolean met')
+    }
+    if (seen.has(id)) {
+      throw new ReviewerParseError('invalid-reviewer-verdicts', `duplicate verdict id: ${id}`)
+    }
+    seen.add(id)
+    verdicts.push({ id, met })
+  }
+  for (const criterion of criteria) {
+    if (!seen.has(criterion.id)) {
+      throw new ReviewerParseError('invalid-reviewer-verdicts', `missing verdict for criterion: ${criterion.id}`)
+    }
+  }
+  for (const verdict of verdicts) {
+    if (!criteria.some(criterion => criterion.id === verdict.id)) {
+      throw new ReviewerParseError('invalid-reviewer-verdicts', `unknown criterion id: ${verdict.id}`)
+    }
+  }
+  if (typeof object.feedback !== 'string' || object.feedback.trim() === '') {
+    throw new ReviewerParseError('empty-reviewer-feedback', 'reviewer feedback must be a non-empty string')
+  }
+  return {
+    score: scoreFromVerdicts(criteria, verdicts),
+    feedback: object.feedback.trim(),
+    verdicts,
+  }
 }
 
 /** Parse the reviewer verdict: a finite score in 0..100 and non-empty feedback. */
@@ -247,8 +348,11 @@ export async function runCellEvaluation(
       evidence = parseExecutorEvidence(executorText)
     } catch (error) {
       // EvidenceOverflowError carries its own structured reason; every other
-      // parser throw is malformed executor output.
-      return failedCell(base, null, error instanceof EvidenceOverflowError ? 'evidence-overflow' : 'malformed-executor-json', startedAt)
+      // parser throw is malformed executor output. The detail below is what
+      // makes the failure diagnosable after the run.
+      return error instanceof EvidenceOverflowError
+        ? failedCell(base, null, 'evidence-overflow', startedAt)
+        : failedCell(base, null, 'malformed-executor-json', startedAt, describeMalformedReply(executorText, error))
     }
 
     let reviewerText: string
@@ -265,7 +369,11 @@ export async function runCellEvaluation(
 
     let verdict: ReviewerScore
     try {
-      verdict = parseReviewerScore(reviewerText)
+      // Criteria-scored cases get their number from code, not from the
+      // reviewer; cases without criteria keep the legacy single-score reply.
+      verdict = input.benchmarkCase.criteria === undefined
+        ? parseReviewerScore(reviewerText)
+        : parseReviewerVerdicts(reviewerText, input.benchmarkCase.criteria)
     } catch (error) {
       const reason = error instanceof ReviewerParseError ? error.reason : 'malformed-reviewer-json'
       return failedCell(base, evidence, reason, startedAt)
@@ -288,7 +396,7 @@ export async function runCellEvaluation(
 /** Reviewer output problem carrying its stable failure reason. */
 class ReviewerParseError extends Error {
   constructor(
-    readonly reason: 'invalid-reviewer-score' | 'empty-reviewer-feedback',
+    readonly reason: 'invalid-reviewer-score' | 'invalid-reviewer-verdicts' | 'empty-reviewer-feedback',
     message: string,
   ) {
     super(message)
@@ -309,19 +417,33 @@ function failureReasonFor(error: unknown, signal: AbortSignal | undefined): Eval
 
 /** Build a failed cell: score null, stable reason, timing stamped. */
 function failedCell(
-  base: Omit<CellEvaluation, 'status' | 'score' | 'evidence' | 'failureReason' | 'feedback' | 'durationMs'>,
+  base: Omit<CellEvaluation, 'status' | 'score' | 'evidence' | 'failureReason' | 'failureDetail' | 'feedback' | 'durationMs'>,
   evidence: ExecutorEvidence | null,
   failureReason: EvaluationFailureReason,
   startedAt: number,
+  failureDetail?: string,
 ): CellEvaluation {
   return {
     ...base,
     status: 'failed',
     score: null,
     failureReason,
+    ...(failureDetail === undefined ? {} : { failureDetail }),
     evidence,
     durationMs: Date.now() - startedAt,
   }
+}
+
+/**
+ * Describe an unparseable executor reply for later diagnosis. The parser's own
+ * message separates a wrong shape (`unexpected executor evidence field: x`)
+ * from a truncated reply, and the length plus tail preserves the evidence that
+ * the reply was cut off mid-JSON — without which the two are indistinguishable.
+ */
+function describeMalformedReply(text: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const tail = text.slice(-MAX_FAILURE_DETAIL_TAIL)
+  return `${message} | reply ${text.length} chars | tail: ${tail}`.slice(0, MAX_FAILURE_DETAIL)
 }
 
 /** Parse a JSON object reply, tolerating prose and code fences via the shared span extractor. */

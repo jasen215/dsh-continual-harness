@@ -76,9 +76,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "lint": "oxlint src tests",
+    "lint": "oxlint src tests scripts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify": "tsx scripts/verify-baseline.mts",
+    "verify:accept": "tsx scripts/verify-baseline.mts --accept"
   }
 }

@@ -21,6 +21,7 @@
     "noEmit": true
   },
   "include": [
-    "src"
+    "src",
+    "scripts"
   ]
 }

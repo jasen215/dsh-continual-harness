@@ -14,6 +14,21 @@ export const VALID_EVIDENCE = { completed: true, summary: 'did the task', action
 export const SCORE_70 = { score: 70, feedback: 'reference ok' }
 export const SCORE_90 = { score: 90, feedback: 'candidate better' }
 
+/**
+ * The canned reply sequence for `n` paired iterations: an executor-evidence
+ * reply and a reviewer-score reply per cell, reference side first. Six is the
+ * smallest `n` the acceptance-side sign test can call significant, so a fixture
+ * that expects ACCEPTED needs at least six.
+ */
+export function pairedReplies(n: number): Array<Record<string, unknown>> {
+  return Array.from({ length: n }, () => [VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90]).flat()
+}
+
+/** The reviewer feedback a `pairedReplies(n)` sequence produces, in cell order. */
+export function pairedFeedback(n: number): string[] {
+  return Array.from({ length: n }, () => [SCORE_70.feedback, SCORE_90.feedback]).flat()
+}
+
 /** The structured failure message of a tool call. */
 export function errorMessage(result: ToolExecutionResult): string {
   expect(result.isError).toBe(true)

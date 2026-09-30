@@ -24,7 +24,7 @@ import {
   loadReferenceSnapshot,
   saveBenchmarkCases,
 } from './benchmark-store.ts'
-import type { BenchmarkCase, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
+import type { BenchmarkCase, BenchmarkCriterion, CellScore, ExecutorEvidence, HarnessSnapshot } from './benchmark.ts'
 import { BENCHMARK_DIR_NAME, BENCHMARK_RUNS_FILE_NAME, BENCHMARK_SNAPSHOTS_DIR_NAME } from './domain.ts'
 import { runCellEvaluation } from './evaluate.ts'
 import type { CellEvaluation } from './evaluate.ts'
@@ -48,6 +48,7 @@ export function actionAddCase(store: HarnessStore, args: Record<string, unknown>
   const statement = stringArg(args.statement)
   const rubric = stringArg(args.rubric)
   const capability = stringArg(args.capability)
+  const criteria = criteriaArg(args.criteria)
   if (caseId === undefined || title === undefined || statement === undefined || rubric === undefined) {
     throw benchmarkError('add-case:missing-argument', 'add-case requires case_id, title, statement, and rubric')
   }
@@ -64,6 +65,7 @@ export function actionAddCase(store: HarnessStore, args: Record<string, unknown>
     statement,
     rubric,
     ...(capability === undefined ? {} : { capability }),
+    ...(criteria === undefined ? {} : { criteria }),
   }, new Set(existing.map(benchmarkCase => benchmarkCase.id)))
   saveBenchmarkCases(store.home, [...existing, draft])
   return { action: 'add-case', ok: true, case: caseToOutput(draft) }
@@ -152,7 +154,15 @@ export async function actionRun(
   ok: boolean
   run_id: string
   refinement_id: string
-  status: 'ACCEPTED' | 'REJECTED'
+  status: 'ACCEPTED' | 'REJECTED' | 'INCONCLUSIVE'
+  /** Why the run could not decide; `null` unless `status` is INCONCLUSIVE. */
+  inconclusive_reason: string | null
+  /** Largest per-case spread of the paired differences; `null` when unestimable. */
+  noise_floor: number | null
+  /** Mean paired difference (candidate − reference); the decision's statistic. */
+  paired_delta: number | null
+  /** Iterations scored on both sides — the decision's real sample size. */
+  pairs: number
   reference_overall: number | null
   candidate_overall: number | null
   regression_cases: string[]
@@ -254,6 +264,10 @@ export async function actionRun(
     run_id: runId,
     refinement_id: refinementId,
     status: decision.status,
+    inconclusive_reason: decision.inconclusiveReason ?? null,
+    noise_floor: decision.noiseFloor,
+    paired_delta: decision.pairedDelta,
+    pairs: decision.pairs,
     reference_overall: decision.referenceOverall,
     candidate_overall: decision.candidateOverall,
     regression_cases: decision.regressionCases,
@@ -341,7 +355,7 @@ interface SnapshotSummary {
 interface RunSummary {
   run_id: string
   refinement_id: string
-  status: 'ACCEPTED' | 'REJECTED'
+  status: 'ACCEPTED' | 'REJECTED' | 'INCONCLUSIVE'
   reference_overall: number | null
   candidate_overall: number | null
   created_at: string
@@ -390,7 +404,7 @@ function listRecentRuns(home: string): RunSummary[] {
     try {
       const record = JSON.parse(line) as {
         runId: string
-        decision: { refinementId: string; status: 'ACCEPTED' | 'REJECTED'; referenceOverall: number | null; candidateOverall: number | null; createdAt: string }
+        decision: { refinementId: string; status: 'ACCEPTED' | 'REJECTED' | 'INCONCLUSIVE'; referenceOverall: number | null; candidateOverall: number | null; createdAt: string }
       }
       runs.push({
         run_id: record.runId,
@@ -415,6 +429,7 @@ interface CaseOutput {
   statement: string
   rubric: string
   capability?: string
+  criteria?: BenchmarkCriterion[]
   state: 'draft' | 'frozen'
   created_at: string
   frozen_at?: string
@@ -426,6 +441,7 @@ function caseToOutput(benchmarkCase: BenchmarkCase): CaseOutput {
     title: benchmarkCase.title,
     statement: benchmarkCase.statement,
     rubric: benchmarkCase.rubric,
+    ...(benchmarkCase.criteria === undefined ? {} : { criteria: benchmarkCase.criteria }),
     ...(benchmarkCase.capability === undefined ? {} : { capability: benchmarkCase.capability }),
     state: benchmarkCase.state,
     created_at: benchmarkCase.createdAt,
@@ -436,6 +452,41 @@ function caseToOutput(benchmarkCase: BenchmarkCase): CaseOutput {
 /** A non-empty string argument, or undefined when absent or blank. */
 function stringArg(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
+
+/**
+ * Validate the optional `criteria` argument. A malformed dimension is refused
+ * loudly instead of being silently dropped: criteria decide the score, so a
+ * typo in a weight must not quietly become a different ruler.
+ */
+function criteriaArg(value: unknown): BenchmarkCriterion[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length === 0) {
+    throw benchmarkError('add-case:invalid-criteria', 'criteria must be a non-empty array')
+  }
+  const criteria: BenchmarkCriterion[] = []
+  const seen = new Set<string>()
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw benchmarkError('add-case:invalid-criteria', 'each criterion must be an object')
+    }
+    const { id, weight, check } = entry as Record<string, unknown>
+    if (typeof id !== 'string' || id === '') {
+      throw benchmarkError('add-case:invalid-criteria', 'each criterion needs a non-empty id')
+    }
+    if (seen.has(id)) {
+      throw benchmarkError('add-case:invalid-criteria', `duplicate criterion id: ${id}`)
+    }
+    seen.add(id)
+    if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
+      throw benchmarkError('add-case:invalid-criteria', `criterion ${id} needs a positive finite weight`)
+    }
+    if (typeof check !== 'string' || check === '') {
+      throw benchmarkError('add-case:invalid-criteria', `criterion ${id} needs a non-empty check`)
+    }
+    criteria.push({ id, weight, check })
+  }
+  return criteria
 }
 
 /** Structured tool error: `benchmark:<action>:<code>: <message>`. */

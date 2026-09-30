@@ -30,7 +30,7 @@ import * as plugin from '../src/index.ts'
 import { appendReview } from '../src/audit.ts'
 import type { ExecutorEvidence } from '../src/benchmark.ts'
 import { HARNESS_SCHEMA_VERSION } from '../src/domain.ts'
-import { errorMessage, makeFakeLlm, SCORE_70, SCORE_90, VALID_EVIDENCE } from './fake-llm.ts'
+import { errorMessage, makeFakeLlm, pairedFeedback, pairedReplies, SCORE_70, SCORE_90, VALID_EVIDENCE } from './fake-llm.ts'
 import { getGlobalHarnessStateDir, getLocalHarnessStateDir, saveHarnessState } from '../src/storage.ts'
 import { HarnessStore } from '../src/store.ts'
 import type { HarnessState } from '../src/types.ts'
@@ -169,7 +169,7 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
     const ctx = await mount(home)
     const { agent } = stubAgent('int-accepted')
     const requests: Array<{ provider: string; model: string }> = []
-    ctx.provide('llm', makeFakeLlm([VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90], requests) as never)
+    ctx.provide('llm', makeFakeLlm(pairedReplies(6), requests) as never)
 
     await seedBenchmark(ctx, agent)
     // reference capture (inside seedBenchmark) precedes the refinement
@@ -181,6 +181,7 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
       action: 'run',
       reference_snapshot_id: 'ref-1',
       refinement_id: 'refine-1',
+      runs: 6,
     }, agent)
     const json = resultJson(run)
     expect(json.action).toBe('run')
@@ -192,10 +193,10 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
     expect(json.regression_cases).toEqual([])
     expect(json.failed_cells).toBe(0)
     expect(json.auto_rollback).toBe(false)
-    expect(json.runs).toBe(1)
-    expect(json.cells).toBe(2)
+    expect(json.runs).toBe(6)
+    expect(json.cells).toBe(12)
     // both sides evaluated through the same provider/model
-    expect(requests).toHaveLength(4)
+    expect(requests).toHaveLength(24) // 12 cells x (evidence + score)
     expect(requests.every(request => request.provider === 'test-provider' && request.model === 'test-model')).toBe(true)
 
     // the durable run record lands in benchmark/runs.jsonl with decision + cells + evidence
@@ -238,9 +239,10 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
       failedCells: 0,
       autoRollback: false,
     })
-    expect(record.decision.feedback).toEqual(['reference ok', 'candidate better'])
+    expect(record.decision.feedback).toEqual(
+      pairedFeedback(6))
     expect(record.createdAt).toBe(record.decision.createdAt)
-    expect(record.cells).toHaveLength(2)
+    expect(record.cells).toHaveLength(12)
     const referenceCell = record.cells.find(cell => cell.side === 'reference')
     const candidateCell = record.cells.find(cell => cell.side === 'candidate')
     expect(referenceCell).toMatchObject({
@@ -278,7 +280,10 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
     const ctx = await mount(home)
     const { agent } = stubAgent('int-rejected')
     // candidate scores below the reference on the same case -> regression
-    ctx.provide('llm', makeFakeLlm([VALID_EVIDENCE, SCORE_90, VALID_EVIDENCE, SCORE_70]) as never)
+    ctx.provide('llm', makeFakeLlm([
+      VALID_EVIDENCE, SCORE_90, VALID_EVIDENCE, SCORE_70,
+      VALID_EVIDENCE, SCORE_90, VALID_EVIDENCE, SCORE_70,
+    ]) as never)
 
     await seedBenchmark(ctx, agent)
     applyKnownRefinement(home, agent, 'refine-1')
@@ -289,6 +294,7 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
       action: 'run',
       reference_snapshot_id: 'ref-1',
       refinement_id: 'refine-1',
+      runs: 2,
     }, agent)
     const json = resultJson(run)
     expect(json.status).toBe('REJECTED')
@@ -343,7 +349,7 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
     const home = tempHome()
     const ctx = await mount(home)
     const { agent } = stubAgent('int-shadow')
-    ctx.provide('llm', makeFakeLlm([VALID_EVIDENCE, SCORE_70, VALID_EVIDENCE, SCORE_90]) as never)
+    ctx.provide('llm', makeFakeLlm(pairedReplies(6)) as never)
 
     // a global skill "foo" shadowed by a same-id local "foo": the merged view
     // keeps the local winner at "foo" and the shadowed global at "local:foo"
@@ -376,13 +382,14 @@ describe('harness_benchmark end-to-end workflow (real plugin wiring)', () => {
       action: 'run',
       reference_snapshot_id: 'ref-1',
       refinement_id: 'refine-shadow',
+      runs: 6,
     }, agent)
     const json = resultJson(run)
     // before the layered derivation fix this run refused with
     // benchmark:run:candidate-delta (the local winner was overwritten)
     expect(json.ok).toBe(true)
     expect(json.status).toBe('ACCEPTED')
-    expect(json.runs).toBe(1)
-    expect(json.cells).toBe(2)
+    expect(json.runs).toBe(6)
+    expect(json.cells).toBe(12)
   })
 })

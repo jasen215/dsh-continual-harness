@@ -9,7 +9,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { canonicalJson, hashBenchmarkCase, layersMergeToState, sha256 } from './benchmark.ts'
-import type { BenchmarkCase, HarnessSnapshot } from './benchmark.ts'
+import type { BenchmarkCase, BenchmarkCriterion, HarnessSnapshot } from './benchmark.ts'
 import {
   BENCHMARK_CASES_FILE_NAME,
   BENCHMARK_CASES_SCHEMA_VERSION,
@@ -146,6 +146,32 @@ function isBenchmarkCase(value: unknown): value is BenchmarkCase {
     && typeof candidate.createdAt === 'string'
     && (candidate.frozenAt === undefined || typeof candidate.frozenAt === 'string')
     && (candidate.capability === undefined || typeof candidate.capability === 'string')
+    && (candidate.criteria === undefined || isBenchmarkCriteria(candidate.criteria))
+}
+
+/**
+ * Whether a value is a usable criteria list: non-empty, with unique ids.
+ * Emptiness matters because `scoreFromVerdicts` divides by the weight total (an
+ * empty list scored `NaN` and only surfaced later as a non-finite cell score),
+ * and a duplicate id would count one dimension twice.
+ */
+function isBenchmarkCriteria(value: unknown): value is BenchmarkCriterion[] {
+  if (!Array.isArray(value) || value.length === 0) return false
+  const ids = new Set<string>()
+  for (const entry of value) {
+    if (!isBenchmarkCriterion(entry) || ids.has(entry.id)) return false
+    ids.add(entry.id)
+  }
+  return true
+}
+
+/** Whether a value is a criterion with a non-empty id/check and a positive weight. */
+function isBenchmarkCriterion(value: unknown): value is BenchmarkCriterion {
+  if (!isPlainObject(value)) return false
+  const criterion = value as Record<string, unknown>
+  return typeof criterion.id === 'string' && criterion.id !== ''
+    && typeof criterion.check === 'string' && criterion.check !== ''
+    && typeof criterion.weight === 'number' && Number.isFinite(criterion.weight) && criterion.weight > 0
 }
 
 function isBenchmarkCasesEnvelope(value: unknown): value is BenchmarkCasesEnvelope {

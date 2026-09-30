@@ -526,3 +526,64 @@ describe('benchmark persistence', () => {
     expect(() => captureReferenceSnapshot(home, snapshot)).toThrow()
   })
 })
+
+describe('benchmark case criteria in the store', () => {
+  function criteriaCase(id: string, weight: number): BenchmarkCase {
+    return freezeBenchmarkCase(createBenchmarkCase({
+      id,
+      title: 'Task',
+      statement: 'Do X',
+      rubric: 'Human-readable summary.',
+      criteria: [{ id: 'routing', weight, check: 'routed correctly' }],
+    }))
+  }
+
+  it('round-trips declared criteria and detects a post-freeze edit to them', () => {
+    const home = tempHome()
+    const withCriteria = criteriaCase('case-criteria', 40)
+    saveBenchmarkCases(home, [withCriteria])
+    expect(loadBenchmark(home)).toEqual([withCriteria])
+
+    // Criteria decide the score, so editing one after freezing must be caught
+    // exactly like a rubric edit — otherwise the ruler can change silently.
+    const file = join(home, 'benchmark', 'cases.json')
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { cases: Array<{ criteria: Array<{ weight: number }> }> }
+    parsed.cases[0]!.criteria[0]!.weight = 60
+    writeFileSync(file, JSON.stringify(parsed), 'utf8')
+    expect(() => loadBenchmark(home)).toThrow(/hash mismatch/)
+  })
+
+  it('refuses a malformed criterion instead of scoring with it', () => {
+    const home = tempHome()
+    saveBenchmarkCases(home, [criteriaCase('case-broken', 0)])
+    expect(() => loadBenchmark(home)).toThrow(/unsupported benchmark cases schema/)
+  })
+
+  it('refuses an empty criteria list: its weight total would be zero', () => {
+    // `scoreFromVerdicts([], [])` is NaN, which only surfaced much later as an
+    // unexplained `score-non-finite` cell failure. The store boundary is where
+    // the malformed ruler must be caught.
+    const home = tempHome()
+    saveBenchmarkCases(home, [freezeBenchmarkCase(createBenchmarkCase({
+      id: 'case-no-criteria', title: 'Task', statement: 'Do X', rubric: 'Summary.', criteria: [],
+    }))])
+    expect(() => loadBenchmark(home)).toThrow(/unsupported benchmark cases schema/)
+  })
+
+  it('refuses duplicate criterion ids: one dimension would count twice', () => {
+    // Two verdicts share an id, so the same weight is earned twice while the
+    // reviewer can only answer it once.
+    const home = tempHome()
+    saveBenchmarkCases(home, [freezeBenchmarkCase(createBenchmarkCase({
+      id: 'case-dup-criteria',
+      title: 'Task',
+      statement: 'Do X',
+      rubric: 'Summary.',
+      criteria: [
+        { id: 'routing', weight: 40, check: 'routed correctly' },
+        { id: 'routing', weight: 25, check: 'routed fast' },
+      ],
+    }))])
+    expect(() => loadBenchmark(home)).toThrow(/unsupported benchmark cases schema/)
+  })
+})
