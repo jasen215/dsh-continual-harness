@@ -227,7 +227,9 @@ run the same steps. `peerDependencies` declare the semver ranges consumers
 commit instead; it bootstraps `verify/latest.json` when that file does not exist
 yet. Hooks under `.git/` are not versioned, so enable it once per clone:
 
-    git config core.hooksPath scripts/githooks
+```
+git config core.hooksPath scripts/githooks
+```
 
 Plugin builds up to 0.3.0 logged the injected overview under a plugin-defined
 `harness-state` message source. The released Session format migrations only
