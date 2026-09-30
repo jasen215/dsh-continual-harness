@@ -20,10 +20,31 @@ export interface BenchmarkCase {
   statement: string
   /** Plaintext MVP rubric; only ever handed to the reviewer. */
   rubric: string
+  /**
+   * Binary-scored dimensions. When present they are authoritative for scoring
+   * and `rubric` is the human-readable summary; when absent the reviewer
+   * supplies a 0..100 score directly (legacy path).
+   */
+  criteria?: BenchmarkCriterion[]
   capability?: string
   state: 'draft' | 'frozen'
   createdAt: string
   frozenAt?: string
+}
+
+/**
+ * One pre-declared, binary-scored dimension of a case. Declaring the dimensions
+ * and their weights in code (rather than in the reviewer's prose) is what keeps
+ * the model to judging and the arithmetic to the harness: the reviewer answers
+ * `met` per criterion and `scoreFromVerdicts` produces the number.
+ */
+export interface BenchmarkCriterion {
+  /** Stable id the reviewer echoes back in its per-dimension verdict. */
+  id: string
+  /** Relative weight; the total is `Σ weight·met / Σ weight · 100`. */
+  weight: number
+  /** What the evidence must show for this dimension to count as met. */
+  check: string
 }
 
 /** Input fields for creating a draft case; lifecycle fields are stamped. */
@@ -68,6 +89,12 @@ export interface CellScore {
   score: number | null
   status: 'ok' | 'failed'
   failureReason?: string
+  /**
+   * Bounded diagnostic for a failed cell: the specific parser error plus the
+   * reply's length and tail. Without it a malformed executor reply is
+   * indistinguishable after the fact from an oversized or wrongly-shaped one.
+   */
+  failureDetail?: string
   feedback?: string
   snapshotId: string
   stateHash: string
@@ -80,13 +107,36 @@ export interface CellScore {
   recordedAt: string
 }
 
+/**
+ * Why a run could not be decided. Each value names one distinct blocker, so an
+ * INCONCLUSIVE verdict says what to change instead of being a dead end.
+ */
+export type InconclusiveReason =
+  | 'insufficient-paired-observations'
+  | 'no-noise-estimate'
+  | 'difference-not-beyond-noise'
+  | 'improvement-not-consistent'
+
 /** Code-owned acceptance decision; the model never decides this. */
 export interface BenchmarkDecision {
   runId: string
   refinementId: string
-  status: 'ACCEPTED' | 'REJECTED'
+  /**
+   * ACCEPTED requires an improvement that exceeds the observed run-to-run
+   * noise; REJECTED means a regression (or unusable evidence); INCONCLUSIVE
+   * means the comparison cannot distinguish the candidate from the reference.
+   */
+  status: 'ACCEPTED' | 'REJECTED' | 'INCONCLUSIVE'
+  /** Present only when `status` is INCONCLUSIVE: why the run could not decide. */
+  inconclusiveReason?: InconclusiveReason
+  /** Mean paired difference (candidate − reference); the decision's statistic. */
+  pairedDelta: number | null
+  /** Iterations scored on both sides — the decision's real sample size. */
+  pairs: number
   referenceOverall: number | null
   candidateOverall: number | null
+  /** Observed spread the candidate had to beat; `null` when unestimable. */
+  noiseFloor: number | null
   regressionCases: string[]
   failedCells: number
   feedback: string[]
@@ -164,12 +214,21 @@ export function hashBenchmarkCase(benchmarkCase: BenchmarkCase): string {
   if (benchmarkCase.state !== 'frozen') {
     throw new Error('cannot hash a benchmark case that is not frozen')
   }
-  const material: { id: string; statement: string; rubric: string; capability?: string } = {
+  const material: {
+    id: string
+    statement: string
+    rubric: string
+    capability?: string
+    criteria?: BenchmarkCriterion[]
+  } = {
     id: benchmarkCase.id,
     statement: benchmarkCase.statement,
     rubric: benchmarkCase.rubric,
   }
   if (benchmarkCase.capability !== undefined) material.capability = benchmarkCase.capability
+  // Criteria decide the score, so they are case material: a post-freeze edit to
+  // them must invalidate the hash exactly like an edit to the rubric.
+  if (benchmarkCase.criteria !== undefined) material.criteria = benchmarkCase.criteria
   return sha256(canonicalJson(material))
 }
 

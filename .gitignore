@@ -16,3 +16,7 @@ docs/superpowers/
 
 # Git worktrees (never commit)
 .worktrees/
+
+# Local verification baseline: the corpus is real cross-project work data (paths
+# and content fragments), so it stays local only (D2/C)
+verify/

@@ -204,6 +204,12 @@ tail -f ~/.dsh/harness/continual-harness.log
 
 插件自包含：`devDependencies` 锁定已发布的 `@deepseek-ai/*` 各包（rc 版本），因此 `pnpm install`、`pnpm run typecheck`、`pnpm test`、`pnpm run build`（tsc 产出 `lib/types/*.js + *.d.ts`，`exports` 的 `"."` 与 `"./invariant"` 指向产物）都能在干净检出下直接运行——CI 与 OIDC 发布 workflow 执行的是同一套步骤。`peerDependencies` 声明消费者（宿主 dsh 安装）必须满足的语义化版本范围。
 
+`scripts/githooks/pre-commit` 会在每次提交前运行本地回归闸门（`npm run verify`，约 4 秒），把 CI 本要等到推送才发现的问题提前到提交之前；`verify/latest.json` 尚不存在时它会自动建立基线。`.git/` 下的 hook 不进版本库，因此每个克隆需启用一次：
+
+```
+git config core.hooksPath scripts/githooks
+```
+
 0.3.0 及更早的插件构建把注入的总览记在插件自定义的 `harness-state` 消息源下。已发布的 Session 格式迁移只识别平台的来源种类，因此只要有一条这样的消息，整个归档在支持 v3 的 dsh 读取时就会整体不可读（`cannot safely transform unclassified message source`）。当前构建改用平台已分类的 `plugin` 来源；已存日志（任意代）可用 `node scripts/repair-harness-state-logs.mjs` 离线修复（默认 dry run；`--apply` 会先备份再原子替换，写入时间在 `--min-age-seconds` 内的日志会被跳过——详见 `--help`）。
 
 ## Known Limitations and Deferred Work

@@ -148,19 +148,29 @@ export interface BenchmarkConfig {
   defaultRuns: number
   /** Hard cap on iterations per run. */
   maxRuns: number
-  /** Report-only pass line; never gates ACCEPTED (spec §4.5). */
+  /** Validated and threaded through, but currently neither gates the verdict
+   *  nor appears in the run output (spec §4.5 intended it as a report line). */
   passThreshold: number
   /** Allowed downward drift of candidate vs reference before regression. */
   regressionTolerance: number
-  /** Candidate failed cells above this count reject the run. */
+  /**
+   * Accepted for backward compatibility only: under the paired comparison a
+   * failed cell drops its own pair (`pairs` reports the real sample size), so
+   * this no longer changes the verdict.
+   */
   maxFailedCells: number
 }
 
 /** Benchmark config defaults (spec §5); shared by the schema and the apply fallback. */
 export const DEFAULT_BENCHMARK_CONFIG: BenchmarkConfig = {
   enabled: true,
-  defaultRuns: 1,
-  maxRuns: 3,
+  defaultRuns: 3,
+  // The verdict bar is a 95% t-interval of the paired differences, so it only
+  // narrows as pairs accumulate: at the measured σ≈10 a 5-point effect needs
+  // ≈19 pairs, which is ≈24 runs once a 20% cell-failure rate is counted. A cap
+  // of 3 makes a decision arithmetically impossible, so the cap leaves room to
+  // reach that power while the default stays cheap.
+  maxRuns: 30,
   passThreshold: 60,
   regressionTolerance: 0,
   maxFailedCells: 0,
