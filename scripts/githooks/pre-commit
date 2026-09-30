@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pre-commit gate: the same local regression gate CI enforces, run locally in
+# ~3.5s so a regression is caught before the push instead of after it.
+#
+# Enable once per clone (hooks under .git/ are not versioned):
+#   git config core.hooksPath scripts/githooks
+# Deliberately bypass it, when you know why:
+#   git commit --no-verify
+set -e
+
+cd "$(dirname "$0")/../.."
+
+if [ ! -d node_modules ]; then
+  echo '[pre-commit] node_modules is missing: install dependencies first.' >&2
+  exit 1
+fi
+
+# `npm run` (not `pnpm run`) on purpose: npm ships with node and writes nothing
+# outside the project, so the hook also works in a sandboxed shell. README and CI
+# keep pnpm for *installing*; running a package.json script needs neither.
+if ! npm run verify; then
+  {
+    echo
+    echo '[pre-commit] The gate did not pass.'
+    echo '[pre-commit] Fix it, or accept a reviewed shift with: npm run verify:accept'
+    echo '[pre-commit] To skip this hook anyway: git commit --no-verify'
+  } >&2
+  exit 1
+fi

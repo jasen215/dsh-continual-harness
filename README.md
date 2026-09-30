@@ -222,6 +222,13 @@ artifacts) all work in a clean checkout — CI and the OIDC release workflow
 run the same steps. `peerDependencies` declare the semver ranges consumers
 (host dsh installations) must satisfy.
 
+`scripts/githooks/pre-commit` runs the local regression gate (`npm run verify`,
+~4s) on every commit, so a regression CI would catch on push is caught before the
+commit instead; it bootstraps `verify/latest.json` when that file does not exist
+yet. Hooks under `.git/` are not versioned, so enable it once per clone:
+
+    git config core.hooksPath scripts/githooks
+
 Plugin builds up to 0.3.0 logged the injected overview under a plugin-defined
 `harness-state` message source. The released Session format migrations only
 classify platform source kinds, so one such message makes the whole stored
