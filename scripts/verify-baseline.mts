@@ -1,19 +1,21 @@
 #!/usr/bin/env tsx
 /**
- * 本地基线闸 —— P0-a 卫生层 + P0-b 契约层。
+ * Local baseline gate — P0-a hygiene layer + P0-b contract layer.
  *
- * 用法：
- *   npm run verify          与 verify/latest.json 比较，退 0=不变/变好，1=变差
- *   npm run verify:accept   接受当前值为新基线（人工裁决后使用）
+ * Usage:
+ *   npm run verify          Compare against verify/latest.json; exit 0 = unchanged/better, 1 = worse
+ *   npm run verify:accept   Accept the current values as the new baseline (after a human verdict)
  *
- * 范围（如实声明）：
- *   - P0-a：测试通过数 / pending / 覆盖率(lines,funcs) / lint diagnostics / tsc 错误
- *   - P0-b：A 真实 refinement 的 validateEdit 判定向量 digest
- *           C 真实 harness_state 条目的 entryFingerprint digest
- *   - 不做 P1（效果层）——那必须靠配对 A/B（harness_benchmark），本脚本回答不了。
+ * Scope (declared honestly):
+ *   - P0-a: tests passed / pending / coverage (lines, funcs) / lint diagnostics / tsc errors
+ *   - P0-b: A real refinements' validateEdit verdict vector digest
+ *           C real harness_state entries' entryFingerprint digest
+ *   - P1 (the effect layer) is NOT covered — that needs a paired A/B (harness_benchmark),
+ *     which this script cannot answer.
  *
- * P0-b 的输入是 verify/corpus/ 下**冻结**的真实数据（本地，不入库，见 D2/C）。
- * 未冻结就没有基线可言，脚本会直接报错退出——不静默跳过。
+ * The P0-b inputs are the **frozen** real data under verify/corpus/ (local, never committed,
+ * see D2/C). Without that freeze there is no baseline to speak of, and the script exits with
+ * an error instead of skipping silently.
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -36,8 +38,8 @@ const sha = (s: string) => createHash('sha256').update(s).digest('hex').slice(0,
 
 function must(path: string, what: string): string {
   if (!existsSync(path)) {
-    console.error(`[verify] 缺少${what}：${path}`)
-    console.error('[verify] P0-b 需要冻结的真实数据；未冻结就没有可比较的靶子。')
+    console.error(`[verify] missing ${what}: ${path}`)
+    console.error('[verify] P0-b needs the frozen real data; without the freeze there is no target to compare against.')
     process.exit(1)
   }
   return readFileSync(path, 'utf8')
@@ -45,26 +47,27 @@ function must(path: string, what: string): string {
 
 function run(cmd: string, args: string[], timeout = 900_000) {
   const r = spawnSync(join(BIN, cmd), args, { cwd: ROOT, encoding: 'utf8', timeout })
-  if (r.error) throw new Error(`${cmd} 无法执行：${r.error.message}`)
+  if (r.error) throw new Error(`${cmd} could not be executed: ${r.error.message}`)
   return { out: r.stdout ?? '', err: r.stderr ?? '', status: r.status ?? 1 }
 }
 
-/** git 不在 node_modules/.bin，走 PATH。 */
+/** git is not in node_modules/.bin, so it comes from PATH. */
 function git(args: string[]): string {
   return (spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' }).stdout ?? '').trim()
 }
 
-// ---------- P0-a 卫生层 ----------
+// ---------- P0-a hygiene layer ----------
 type Values = Record<string, number>
 
 function hygiene(): Values {
   const v: Values = {}
 
-  // 一次 vitest 同时拿到计数与覆盖率（json reporter 写文件，覆盖率走 lcov.info）
+  // One vitest run yields both the counts and the coverage (json reporter writes the file, coverage goes to lcov.info)
   const reportPath = join(ROOT, 'verify/.vitest.json')
   mkdirSync(dirname(reportPath), { recursive: true })
   run('vitest', ['run', '--coverage', '--reporter=json', `--outputFile=${reportPath}`])
-  // vitest 用退出码表达测试失败，这里不据此退出——先记录数字，由下面的比较统一裁决
+  // vitest signals test failures through its exit code; do not exit on it here — record the
+  // numbers first and let the comparison below decide everything in one place.
   const report = JSON.parse(readFileSync(reportPath, 'utf8')) as {
     numPassedTests: number
     numFailedTests: number
@@ -76,11 +79,12 @@ function hygiene(): Values {
   v.testsPending = report.numPendingTests
   v.testsTotal = report.numTotalTests
 
-  // 覆盖率产物在测试失败时不会生成——而那时正是最需要闸门报告的时刻。
-  // 因此记为不可得（-1）并继续测后面的 lint/tsc，让 testsFailed 承担判定。
+  // The coverage artifact is not produced when tests fail — which is exactly the moment the gate
+  // most needs to report. So record it as unavailable (-1) and keep measuring lint/tsc, leaving the
+  // judgement to testsFailed.
   const lcovPath = join(ROOT, 'coverage/lcov.info')
   if (!existsSync(lcovPath)) {
-    console.warn('[verify] 覆盖率产物缺失（通常因测试失败），lines/funcs 记为 -1=不可得')
+    console.warn('[verify] coverage artifact missing (usually because tests failed); lines/funcs recorded as -1 = unavailable')
     v.linesPct = -1
     v.funcsPct = -1
   } else {
@@ -104,18 +108,19 @@ function hygiene(): Values {
   return v
 }
 
-// ---------- P0-b 契约层 ----------
+// ---------- P0-b contract layer ----------
 type AppliedEdit = { action: string; kind: string; id: string; applied?: boolean; after?: Record<string, unknown> }
 
 /**
- * `refinements.jsonl` 的 `appliedEdits[].after` 是**结果内容文本**（字符串），
- * 不是条目对象、也不是哈希；40 条为 null（delete 或 conclusion-only）。
- * 因此这里用它作为 `content` 重建 edit——它能覆盖 content 类规则，
- * 但**不含** description/files/blastRadius 等原始字段，属于近似重建。
- * digest 变化仍可靠表示"判定行为变了"，但不等于"当初那份 edit 原件通过"。
+ * `appliedEdits[].after` in `refinements.jsonl` is the **result content text** (a string),
+ * not the entry object and not a hash; 40 of them are null (delete or conclusion-only).
+ * So it is used here as the `content` to reconstruct the edit — that covers the content
+ * rules, but it **omits** the original description/files/blastRadius fields, making this an
+ * approximate reconstruction. A digest change still reliably means "the verdict behaviour
+ * changed", but it does not mean "that original edit object would pass".
  */
 function contractVerdicts(): { digest: string; n: number; rejected: number; noContent: number } {
-  const lines = must(join(CORPUS, 'refinements.jsonl'), '冻结的 refinements.jsonl').split('\n').filter((l) => l.trim())
+  const lines = must(join(CORPUS, 'refinements.jsonl'), 'the frozen refinements.jsonl').split('\n').filter((l) => l.trim())
   const verdicts: string[] = []
   let rejected = 0
   let noContent = 0
@@ -133,8 +138,8 @@ function contractVerdicts(): { digest: string; n: number; rejected: number; noCo
       }
       let verdict: string
       try {
-        // replay: true 是必需的：非 delete 的 edit 必须有 blastRadius，而回放
-        // 是"重述记录下来的历史"，不是"声明作用范围"（见 refine.ts:66-73 的注释）。
+        // replay: true is required: a non-delete edit must carry a blastRadius, and a replay
+        // restates the recorded history rather than declaring a reach (see the comment at refine.ts:66-73).
         verdict = (validateEdit(edit as never, { replay: true }) as string | undefined) ?? 'ok'
       } catch (e) {
         verdict = `throw:${(e as Error).message.slice(0, 60)}`
@@ -147,7 +152,7 @@ function contractVerdicts(): { digest: string; n: number; rejected: number; noCo
 }
 
 function contractEntries(): { digest: string; n: number } {
-  const raw = must(join(CORPUS, 'harness_state.json'), '冻结的 harness_state.json')
+  const raw = must(join(CORPUS, 'harness_state.json'), 'the frozen harness_state.json')
   const state = JSON.parse(raw) as { entries: Record<string, Record<string, HarnessEntry>> }
   const all = Object.values(state.entries).flatMap((byId) => Object.values(byId))
   const prints = all
@@ -157,9 +162,9 @@ function contractEntries(): { digest: string; n: number } {
 }
 
 /**
- * 判定层的契约：把固定的 cell 组合喂给 `decideBenchmark`，digest 其结果。
- * 没有这一层，`score.ts` 的判定规则可以被随意改写而不被发现——
- * 计数层只在测试数量变化时才报警。
+ * The decision layer's contract: feed a fixed set of cell combinations to `decideBenchmark`
+ * and digest the result. Without this layer, the rules in `score.ts` could be rewritten at will
+ * without anyone noticing — the counting layer only raises an alarm when the test count changes.
  */
 function cell(side: 'reference' | 'candidate', score: number | null, iteration = 1): CellScore {
   return {
@@ -190,7 +195,8 @@ const DECISION_TABLE: Array<{ name: string; cells: CellScore[] }> = [
   { name: 'improve-too-few-consistent-pairs', cells: pairs(2, 5, 80) },
   { name: 'single-iteration', cells: [cell('reference', 80), cell('candidate', 95)] },
   { name: 'improve-inside-noise', cells: [cell('reference', 80, 1), cell('reference', 90, 2), cell('candidate', 85, 1), cell('candidate', 90, 2)] },
-  // 同一对状态在两次 run 里给出 [12,0] 与 [0,−13]：负向落在噪声内也不算退化。
+  // The same pair states give [12,0] and [0,−13] across two runs: a negative shift inside
+  // the noise is not a regression either.
   { name: 'drop-inside-noise', cells: [cell('reference', 62, 1), cell('reference', 87, 2), cell('candidate', 62, 1), cell('candidate', 74, 2)] },
   { name: 'equal-scores', cells: [cell('reference', 80, 1), cell('reference', 80, 2), cell('candidate', 80, 1), cell('candidate', 80, 2)] },
   { name: 'partial-reference', cells: [cell('reference', 80, 1), cell('reference', null, 2), cell('candidate', 90, 1), cell('candidate', 90, 2)] },
@@ -200,12 +206,14 @@ const DECISION_TABLE: Array<{ name: string; cells: CellScore[] }> = [
   // verdict must be INCONCLUSIVE with this exact reason; this row pins the landing
   // that the whole rule exists for.
   { name: 'candidate-all-failed', cells: [cell('reference', 80, 1), cell('candidate', null, 1)] },
-  // 失败是"没测到"而非"测出差"：候选侧有失败 cell 不得被当成退化否决，
-  // 但真实测出的退化仍须压过失败带来的不完整（下一行）。
+  // A failure is "never measured", not "measured bad": a failed cell on the candidate side must
+  // not veto the run as a regression, but a regression the run did measure must still outrank the
+  // incompleteness the failures bring (next row).
   { name: 'candidate-failed-but-improved', cells: [...pairs(6, 15, 80), cell('candidate', null, 7)] },
   { name: 'failed-then-regressed', cells: [cell('reference', 90, 1), cell('reference', 90, 2), cell('candidate', 70, 1), cell('candidate', 70, 2), cell('candidate', null, 3)] },
-  // 多 case：噪声必须按 case 度量，否则 case 间的难度差（90 vs 70）会被误当噪声
-  // 而吞掉真实改进。这一行专门盯住这个语义。
+  // Multiple cases: the noise must be measured per case, otherwise the difficulty gap between
+  // cases (90 vs 70) is mistaken for noise and swallows a real improvement. This row watches that
+  // semantic specifically.
   { name: 'multi-case-gap-is-not-noise', cells: [...pairs(3, 2, 90, 'hard'), ...pairs(3, 1, 70, 'easy')] },
 ]
 
@@ -226,8 +234,8 @@ function contractDecisions(): { digest: string; n: number; statuses: string[] } 
   }
 }
 
-// ---------- 比较与裁决 ----------
-// 方向：+1 表示越大越好，-1 表示越小越好，0 表示必须相等（无方向）
+// ---------- comparison and verdict ----------
+// Direction: +1 means higher is better, -1 means lower is better, 0 means it must be equal (no direction)
 const DIRECTION: Record<string, 1 | -1 | 0> = {
   testsPassed: 1,
   testsFailed: -1,
@@ -268,10 +276,10 @@ function main() {
 
   if (ACCEPT || !existsSync(BASELINE)) {
     writeFileSync(BASELINE, JSON.stringify(snapshot, null, 2) + '\n')
-    console.log(`[verify] ${ACCEPT ? '已接受' : '首次建立'}基线：verify/latest.json`)
-    console.log(`  P0-a 测试 ${current.testsPassed}/${current.testsTotal} 通过, pending ${current.testsPending}, lines ${current.linesPct}%, funcs ${current.funcsPct}%, lint ${current.lintDiagnostics}, tsc ${current.tscErrors}`)
-    console.log(`  P0-b 判定向量 ${digests.verdictDigest} (${meta.verdictEdits} edits, ${meta.verdictRejected} 非 ok), 条目指纹 ${digests.entryDigest} (${meta.entries} 条), 决策契约 ${digests.decisionDigest} (${meta.decisionCases} 组)`)
-    console.log(`       决策样例 ${decisions.statuses.join(' ')}`)
+    console.log(`[verify] ${ACCEPT ? 'accepted' : 'established'} the baseline: verify/latest.json`)
+    console.log(`  P0-a tests ${current.testsPassed}/${current.testsTotal} passed, pending ${current.testsPending}, lines ${current.linesPct}%, funcs ${current.funcsPct}%, lint ${current.lintDiagnostics}, tsc ${current.tscErrors}`)
+    console.log(`  P0-b verdict vector ${digests.verdictDigest} (${meta.verdictEdits} edits, ${meta.verdictRejected} not ok), entry fingerprints ${digests.entryDigest} (${meta.entries} entries), decision contract ${digests.decisionDigest} (${meta.decisionCases} rows)`)
+    console.log(`       decision samples ${decisions.statuses.join(' ')}`)
     process.exit(0)
   }
 
@@ -280,7 +288,7 @@ function main() {
   const better: string[] = []
   const changed: string[] = []
 
-  console.log('指标                    基线 → 当前              判定')
+  console.log('metric                  baseline         → current            verdict')
   console.log('─'.repeat(64))
   for (const [key, dir] of Object.entries(DIRECTION)) {
     const isDigest = key.endsWith('Digest')
@@ -288,39 +296,39 @@ function main() {
     const after = isDigest ? digests[key] : current[key]
     let verdict: string
     if (before === after) {
-      verdict = '不变'
+      verdict = 'unchanged'
     } else if (isDigest) {
-      verdict = '⚠ 变了(需人工裁决)'
+      verdict = '⚠ changed (needs a human verdict)'
       changed.push(key)
     } else if (dir === 0) {
-      verdict = '⚠ 变了'
+      verdict = '⚠ changed'
       changed.push(key)
     } else {
       const improved = dir > 0 ? (after as number) > (before as number) : (after as number) < (before as number)
-      verdict = improved ? '↑ 变好' : '↓ 变差'
+      verdict = improved ? '↑ better' : '↓ worse'
       ;(improved ? better : worse).push(key)
     }
     console.log(`${key.padEnd(18)} ${String(before).padStart(10)} → ${String(after).padEnd(10)} ${verdict}`)
   }
   console.log('─'.repeat(64))
-  console.log(`P0-a 变差 ${worse.length} 项，变好 ${better.length} 项；P0-b digest 变化 ${changed.length} 项`)
-  // digest 只能证明"变了"，人工裁决必须看到每一行变成了什么状态。
+  console.log(`P0-a ${worse.length} worse, ${better.length} better; P0-b ${changed.length} digest change(s)`)
+  // A digest can only prove "something changed"; a human verdict has to see what state every row became.
   if (changed.includes('decisionDigest')) {
-    console.log(`  [verify] 决策样例（裁决依据）${decisions.statuses.join(' ')}`)
+    console.log(`  [verify] decision samples (basis for the verdict) ${decisions.statuses.join(' ')}`)
   }
 
   if (worse.length) {
-    console.error(`[verify] 结论：变差（${worse.join(', ')}）`)
-    console.error('[verify] 这是确定性量的真实退化。修回，或确认可接受后 npm run verify:accept。')
+    console.error(`[verify] verdict: worse (${worse.join(', ')})`)
+    console.error('[verify] That is a real, deterministically measured regression. Fix it, or accept it explicitly with npm run verify:accept.')
     process.exit(1)
   }
   if (changed.length) {
-    console.error(`[verify] 结论：语义/契约发生变化（${changed.join(', ')}）——digest 是中性的，`)
-    console.error('[verify] 它只能证明"变了"，不能证明"更好"。人工裁决后 npm run verify:accept。')
+    console.error(`[verify] verdict: the semantics/contract changed (${changed.join(', ')}) — a digest is neutral,`)
+    console.error('[verify] it can only prove "changed", never "better". Run npm run verify:accept after a human verdict.')
     process.exit(1)
   }
-  console.log('[verify] 结论：与基线一致（未变差）。注意：这只说明"没碰坏已知的东西"，')
-  console.log('[verify] 不等于"有收益"——效果层必须靠 harness_benchmark 的配对 A/B。')
+  console.log('[verify] verdict: consistent with the baseline (nothing got worse). Note that this only means')
+  console.log('[verify] known things were not broken — not that there is a gain. The effect layer must be shown by a paired A/B in harness_benchmark.')
   process.exit(0)
 }
 
