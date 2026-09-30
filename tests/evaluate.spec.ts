@@ -298,8 +298,9 @@ describe('failure conversion', () => {
     // be told apart from a truncated one after the fact.
     expect(result.failureDetail).toContain(`reply ${reply.length} chars`)
     expect(result.failureDetail).toContain(reply)
-    // Only an empty reply earns the retry: a malformed one is a parser verdict,
-    // so this test would still pass if the retry were unconditional.
+    // Only an empty reply earns the retry: a malformed one is a parser verdict.
+    // Were the retry unconditional, this call would ask the provider twice and
+    // the request count below would be 2, so the assertion does discriminate.
     expect(requests).toHaveLength(1)
   })
 
