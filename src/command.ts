@@ -83,10 +83,10 @@ export interface CommandAdapterOptions {
 /**
  * Optional host capability that registers slash commands. The coordinator
  * plugin never requires this service; when the host provides it, the
- * `/refine` command registers through the returned disposable handle.
+ * `/refine` command registers through the returned disposer.
  */
 export interface CommandsCapability {
-  register(definition: CommandDefinition): { dispose(): void }
+  register(definition: CommandDefinition): () => void
 }
 
 /** Parser output for one validated `/refine` invocation. */
@@ -423,7 +423,7 @@ export function registerRefineCommand(
   commands: CommandsCapability,
   coordinator: RefineCoordinator,
   options: CommandAdapterOptions,
-): { dispose(): void } {
+): () => void {
   return commands.register({
     name: 'refine',
     description: 'Run a harness refinement plan or rollback through the shared coordinator',

@@ -113,7 +113,7 @@ dsh plugin --profile <name> add dsh-continual-harness
 
 ### dsh 版本兼容
 
-已在 dsh `0.1.2-alpha.3` 上验证；peer 下限保持 `>=0.1.0-rc.6`，旧版 dsh 仍可用。dsh `0.1.2-alpha.3` 不再在 profile bundle 内提供 `@deepseek-ai/dsh-home-paths`，因此插件将其声明为硬依赖；`@deepseek-ai/dsh-invariants` 仅用于类型（开发期），运行时不需要。
+已在 dsh `0.2.0-rc.2` 上验证——typecheck、lint、build、全部 651 个测试，以及在 0.2.0-rc.2 运行时上真实启动 profile——同一套测试也在 `0.1.7-rc.1` 上通过。单一 peer 范围 `>=0.1.5-rc.1 <0.2.1` 覆盖从 `0.1.5-rc.1` 到 `0.2.0-rc.2` 的全部运行时，因为该范围正是 dsh 在挂载插件或 profile bundle 之前、由其插件/运行时兼容门评估的范围。这道兼容门由 dsh `0.1.7` 引入：当插件的 `@deepseek-ai/dsh*` peer 不满足运行版本时，其 profile bundle 会被跳过，因此放宽范围才能让同一份源码在旧版与当前运行时上都可加载。dsh `0.1.2-alpha.3` 不再在 profile bundle 内提供 `@deepseek-ai/dsh-home-paths`，因此插件将其声明为硬依赖；`@deepseek-ai/dsh-invariants` 仅用于类型（开发期），运行时不需要。
 
 ## Config
 

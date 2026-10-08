@@ -333,10 +333,9 @@ export function apply(ctx: Context, config: Config): void {
   // plugin-source session message plus a harness log line.
   const commands = ctx.get('commands') as CommandsCapability | undefined
   if (commands) {
-    ctx.effect(() => {
-      const registration = registerRefineCommand(commands, coordinator, { defaultGlobal: config.defaultGlobal })
-      return () => registration.dispose()
-    })
+    // `commands.register()` returns the effect disposer itself, so handing it
+    // straight back unregisters the command when the plugin context disposes.
+    ctx.effect(() => registerRefineCommand(commands, coordinator, { defaultGlobal: config.defaultGlobal }))
   } else {
     ctx.logger('harness').warn('commands capability not available; the /refine command is not registered')
   }
