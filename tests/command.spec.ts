@@ -292,20 +292,20 @@ describe('createRefineCommandAdapter', () => {
 })
 
 describe('registerRefineCommand', () => {
-  it('registers the refine command and disposes through the capability handle', () => {
+  it('registers the refine command and disposes through the capability disposer', () => {
     const dispose = vi.fn()
-    const register = vi.fn(() => ({ dispose }))
+    const register = vi.fn(() => dispose)
     const commands: CommandsCapability = { register }
     const coordinator = fakeCoordinator(notCommitted())
-    const registration = registerRefineCommand(commands, coordinator, { defaultGlobal: false })
+    const disposer = registerRefineCommand(commands, coordinator, { defaultGlobal: false })
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ name: 'refine', handler: expect.any(Function) }))
-    registration.dispose()
+    disposer()
     expect(dispose).toHaveBeenCalled()
   })
 
   it('passes the outcome reporter through to the registered handler', async () => {
     const report = vi.fn()
-    const register = vi.fn(() => ({ dispose: () => {} }))
+    const register = vi.fn(() => () => {})
     const commands: CommandsCapability = { register }
     const coordinator = fakeCoordinator(committedWithRejected())
     registerRefineCommand(commands, coordinator, { defaultGlobal: false, report })

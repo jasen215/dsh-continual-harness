@@ -489,7 +489,7 @@ describe('optional refine command capability', () => {
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(ToolRuntime)
     const dispose = vi.fn()
-    const register = vi.fn(() => ({ dispose }))
+    const register = vi.fn(() => dispose)
     ctx.provide('commands', { register })
     const fiber = await ctx.plugin(plugin, pluginConfig(tempHome()))
     expect(register).toHaveBeenCalledWith(expect.objectContaining({ name: 'refine', handler: expect.any(Function) }))

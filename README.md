@@ -124,7 +124,7 @@ Prerequisites: the `tools`, `agents`, `session`, `llm`, `systemPrompt` capabilit
 
 ### dsh version compatibility
 
-Verified against dsh `0.1.2-alpha.3`; peer floors stay `>=0.1.0-rc.6`, so older dsh releases keep working. Since dsh `0.1.2-alpha.3` no longer provides `@deepseek-ai/dsh-home-paths` inside the profile bundle, the plugin declares it as a hard dependency; `@deepseek-ai/dsh-invariants` is used for types only (dev-time) and is not required at runtime.
+Verified against dsh `0.2.0-rc.2` — typecheck, lint, build, the full 651-test suite, and a real profile boot on the 0.2.0-rc.2 runtime — and against `0.1.7-rc.1` with the same suite. One peer range admits every runtime from `0.1.5-rc.1` through `0.2.0-rc.2` (`>=0.1.5-rc.1 <0.2.1`), because that range is exactly what dsh evaluates in its plugin/runtime compatibility gate before mounting a plugin or a profile bundle. dsh `0.1.7` introduced that gate: when a plugin's `@deepseek-ai/dsh*` peers do not satisfy the running version, its profile bundle is skipped, so widening the range is what keeps one source loadable on both the older and the current runtime. Since dsh `0.1.2-alpha.3` no longer provides `@deepseek-ai/dsh-home-paths` inside the profile bundle, the plugin declares it as a hard dependency; `@deepseek-ai/dsh-invariants` is used for types only (dev-time) and is not required at runtime.
 
 ## Config
 
