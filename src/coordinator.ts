@@ -43,7 +43,10 @@ import type {
 
 /** One-line summary for a refinement result; shared by the tool and command renderers. */
 export function executionSummary(execution: RefineExecutionResult): string {
-  return execution.refinement?.summary ?? execution.error?.message ?? 'no refinement produced'
+  // `edits: []` is a legitimate answer, not a failure: the planner judged that
+  // nothing needed persisting. The old wording ("no refinement produced") read
+  // like a breakdown, so a refine that had already succeeded got retried.
+  return execution.refinement?.summary ?? execution.error?.message ?? 'the planner proposed no edits (nothing to persist)'
 }
 
 /**

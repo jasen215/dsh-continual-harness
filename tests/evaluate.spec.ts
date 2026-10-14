@@ -151,6 +151,16 @@ describe('parseExecutorEvidence', () => {
     expect(() => parseExecutorEvidence('{"completed":true,"summary":"s","actions":"a","observations":[]}')).toThrow()
   })
 
+  it('parses an artifact whose content carries raw control characters', () => {
+    // An artifact's content is free-form text, so a literal newline inside the
+    // JSON string is a formatting slip. Rejecting the cell over it would throw
+    // away this cell's measurement and its pair, and the malformed-reply policy
+    // never retries — the cheapest correct answer is to repair the escaping.
+    const text = '{"completed":true,"summary":"s","actions":["a"],"observations":["o"],"artifacts":[{"name":"report.md","content":"# Title\nline two\tcell"}]}'
+    const evidence = parseExecutorEvidence(text)
+    expect(evidence.artifacts?.[0]?.content).toBe('# Title\nline two\tcell')
+  })
+
   it('rejects unknown fields inside an artifact', () => {
     expect(() => parseExecutorEvidence('{"completed":true,"summary":"s","actions":[],"observations":[],"artifacts":[{"name":"n","content":"c","path":"/tmp/x"}]}')).toThrow()
     expect(() => parseExecutorEvidence('{"completed":true,"summary":"s","actions":[],"observations":[],"artifacts":[{"name":"n"}]}')).toThrow()

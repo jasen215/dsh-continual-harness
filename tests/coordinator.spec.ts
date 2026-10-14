@@ -10,7 +10,7 @@ import type { Complete } from '../src/planner.ts'
 import { isCacheEvidenceEvent } from '../src/cache-detect.ts'
 import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
-import { createRefineCoordinator, MAX_LOGGED_REPLY_CHARS } from '../src/coordinator.ts'
+import { createRefineCoordinator, executionSummary, MAX_LOGGED_REPLY_CHARS } from '../src/coordinator.ts'
 import type { PlanRequest } from '../src/coordinator-types.ts'
 import type { DiagnosticRunner } from '../src/diagnostics.ts'
 import type {
@@ -530,6 +530,19 @@ describe('createRefineCoordinator', () => {
         diagnostics: runner,
       }).execute({ mode: 'rollback', source: 'tool', scope: 'local', rollbackId: 'missing', agent: agent() })
       expect(run).not.toHaveBeenCalled()
+    })
+
+    it('reports an empty proposal as a plan that needs no edits, not as a failure', async () => {
+      // `edits: []` is a legitimate answer — the planner judged that nothing
+      // needed persisting — so the result carries no error. The old wording
+      // ("no refinement produced") read like a breakdown, and an agent that
+      // reads it that way retries a refine that already succeeded.
+      const result = await createRefineCoordinator({
+        store: fakeStore(),
+        completeFor: () => cannedComplete({ id: 'p', summary: 'none', edits: [] }),
+      }).execute(planRequest('local', 'tool'))
+      expect(result.error).toBeUndefined()
+      expect(executionSummary(result)).toBe('the planner proposed no edits (nothing to persist)')
     })
 
     it('retains the committed result when the runner throws', async () => {

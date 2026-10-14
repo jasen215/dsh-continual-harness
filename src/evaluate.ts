@@ -20,7 +20,7 @@ import type { BenchmarkCase, BenchmarkCriterion, CellScore, ExecutorEvidence, Ha
 import { hashBenchmarkCase } from './benchmark.ts'
 import { completeViaModel } from './complete.ts'
 import type { Complete } from './planner.ts'
-import { extractJsonObject } from './planner.ts'
+import { escapeRawControlChars, extractJsonObject } from './planner.ts'
 import { overviewForPrompt } from './render.ts'
 
 /** Default output budget for one evaluator call. */
@@ -457,9 +457,16 @@ function describeMalformedReply(text: string, error: unknown): string {
   return `${message} | reply ${text.length} chars | tail: ${tail}`.slice(0, MAX_FAILURE_DETAIL)
 }
 
-/** Parse a JSON object reply, tolerating prose and code fences via the shared span extractor. */
+/**
+ * Parse a JSON object reply, tolerating prose and code fences via the shared
+ * span extractor, and repairing raw control characters inside string literals.
+ * An executor artifact's `content` is free-form text, so a literal newline in
+ * there is a formatting slip rather than a judgement about the refinement; a
+ * throw would cost this cell's measurement and its pair, and the malformed-reply
+ * policy below never retries.
+ */
 function parseJsonObject(text: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(extractJsonObject(text))
+  const parsed: unknown = JSON.parse(escapeRawControlChars(extractJsonObject(text)))
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error('the model reply is not a JSON object')
   }
