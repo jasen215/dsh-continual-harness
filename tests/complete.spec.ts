@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { completeViaModel } from '../src/complete.ts'
+import { PlannerReplyError } from '../src/planner.ts'
 import type { Complete } from '../src/planner.ts'
 
 function ctxWith(llm: unknown): Context {
@@ -59,6 +60,29 @@ describe('completeViaModel finish handling', () => {
     })
     const complete = completeViaModel(ctx, 'prov', 'model')
     await expect(complete('system', 'user')).resolves.toBe('{"ok":true}')
+  })
+
+  it('fails a max-tokens finish as a typed reply error instead of returning the cut text', async () => {
+    const cut = '{"id":"r","summary":"s","edits":[{"action":"create","content":"half a doc'
+    const ctx = ctxWith({
+      async *stream() {
+        yield { type: 'text-delta', text: cut }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+      },
+    })
+    const complete = completeViaModel(ctx, 'prov', 'model')
+    let thrown: unknown
+    try {
+      await complete('system', 'user')
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(PlannerReplyError)
+    expect((thrown as PlannerReplyError).failure).toBe('output-limit')
+    // The cut reply is preserved, so truncation is never mistaken for a
+    // malformed-but-complete reply.
+    expect((thrown as PlannerReplyError).reply).toBe(cut)
+    expect((thrown as Error).message).toContain('output limit')
   })
 })
 

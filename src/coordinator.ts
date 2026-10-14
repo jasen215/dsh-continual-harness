@@ -7,7 +7,7 @@
  * @module dsh-continual-harness
  */
 
-import { isTruncatedReply, planRefinement, REFINEMENT_SYSTEM_PROMPT, scopeInstruction } from './planner.ts'
+import { isTruncatedReply, planRefinement, PlannerReplyError, REFINEMENT_SYSTEM_PROMPT, scopeInstruction } from './planner.ts'
 import type { CompleteContext } from './planner.ts'
 import {
   DEFAULT_PLANNER_SAFETY_RESERVE_TOKENS,
@@ -44,6 +44,32 @@ import type {
 /** One-line summary for a refinement result; shared by the tool and command renderers. */
 export function executionSummary(execution: RefineExecutionResult): string {
   return execution.refinement?.summary ?? execution.error?.message ?? 'no refinement produced'
+}
+
+/**
+ * Cap on the raw reply mirrored into the harness log. The tool output carries
+ * only a bounded excerpt; the log is where a rejected reply survives whole
+ * enough to tell a raw control character from an output-limit cut.
+ */
+export const MAX_LOGGED_REPLY_CHARS = 8_000
+
+/**
+ * True when a planning failure means the model's own reply was unusable (a
+ * parse, shape, or output-limit failure) rather than a transport, deadline, or
+ * budget failure. In-process replies are typed; the legacy message check keeps
+ * a custom `Complete` seam on the same retry path.
+ */
+function isUnusableReply(error: unknown): boolean {
+  return error instanceof PlannerReplyError || (error instanceof Error && isTruncatedReply(error.message))
+}
+
+/** Mirror a rejected planner reply into the harness log for forensics. */
+function logUnusableReply(options: RefineCoordinatorOptions, stage: string, error: unknown): void {
+  if (!(error instanceof PlannerReplyError) || options.logger === undefined) return
+  const reply = error.reply.length > MAX_LOGGED_REPLY_CHARS
+    ? `${error.reply.slice(0, MAX_LOGGED_REPLY_CHARS)}…[+${error.reply.length - MAX_LOGGED_REPLY_CHARS} chars]`
+    : error.reply
+  options.logger.warn(`harness refine reply unusable (${error.failure}, ${stage}): ${error.message} | reply: ${reply}`)
 }
 
 function validateRequest(request: RefineRequest): string | undefined {
@@ -351,8 +377,11 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
               proposal = await planRefinement(planInputContext, complete, request.signal, prefix, system, context)
             } catch (error) {
               // Silent fallback: an unusable Route A reply retries via Route B
-              // (trajectory summary) without logging a fallback line (spec §2.2).
-              if (!(error instanceof Error) || !isTruncatedReply(error.message)) throw error
+              // (trajectory summary) without logging a fallback line (spec
+              // §2.2). The rejected reply itself is still logged: only the
+              // route-transition line is suppressed.
+              if (!isUnusableReply(error)) throw error
+              logUnusableReply(options, 'route A', error)
               proposal = await planWithTrajectory()
             }
           } else {
@@ -363,7 +392,8 @@ export function createRefineCoordinator(options: RefineCoordinatorOptions): Refi
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        const code = isTruncatedReply(message) ? 'invalid-proposal' : 'planning-failed'
+        const code = isUnusableReply(error) ? 'invalid-proposal' : 'planning-failed'
+        if (code === 'invalid-proposal') logUnusableReply(options, 'final', error)
         return errorResult('planning', code, message)
       }
       if (!isProposal(proposal)) return errorResult('planning', 'invalid-proposal', 'malformed refinement proposal')
