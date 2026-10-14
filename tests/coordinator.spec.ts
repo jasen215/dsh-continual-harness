@@ -10,7 +10,7 @@ import type { Complete } from '../src/planner.ts'
 import { isCacheEvidenceEvent } from '../src/cache-detect.ts'
 import type { HostRequestRegistry, HostRequestSnapshot } from '../src/request-snapshot.ts'
 import { HarnessStore } from '../src/store.ts'
-import { createRefineCoordinator } from '../src/coordinator.ts'
+import { createRefineCoordinator, executionSummary, MAX_LOGGED_REPLY_CHARS } from '../src/coordinator.ts'
 import type { PlanRequest } from '../src/coordinator-types.ts'
 import type { DiagnosticRunner } from '../src/diagnostics.ts'
 import type {
@@ -532,6 +532,19 @@ describe('createRefineCoordinator', () => {
       expect(run).not.toHaveBeenCalled()
     })
 
+    it('reports an empty proposal as a plan that needs no edits, not as a failure', async () => {
+      // `edits: []` is a legitimate answer — the planner judged that nothing
+      // needed persisting — so the result carries no error. The old wording
+      // ("no refinement produced") read like a breakdown, and an agent that
+      // reads it that way retries a refine that already succeeded.
+      const result = await createRefineCoordinator({
+        store: fakeStore(),
+        completeFor: () => cannedComplete({ id: 'p', summary: 'none', edits: [] }),
+      }).execute(planRequest('local', 'tool'))
+      expect(result.error).toBeUndefined()
+      expect(executionSummary(result)).toBe('the planner proposed no edits (nothing to persist)')
+    })
+
     it('retains the committed result when the runner throws', async () => {
       const store = fakeStore()
       store.applyRefinement = vi.fn(async () => ({
@@ -786,6 +799,99 @@ describe('Route A planning input', () => {
     expect(calls[1]?.route).toBe('B')
     expect(calls[1]?.user).toContain('MALFORMED FALLBACK')
     expect(store.trajectory).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to Route B when the Route A reply is not valid JSON', async () => {
+    // The 2026-10-13 incident: the planner emitted a memory body whose
+    // unescaped quotes broke JSON.parse. The reply is retried through Route B
+    // and preserved in the log instead of failing the refinement outright.
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const badReply = '{"id":"refine_bad","summary":"s","edits":[{"action":"create","kind":"memory","id":"a","content":"score "{desc}" keeps its quotes"}]}'
+    const calls: { route: 'A' | 'B'; user: string }[] = []
+    const complete = async (_system: string, user: string, _signal?: AbortSignal, prefix?: readonly unknown[]) => {
+      calls.push({ route: prefix !== undefined ? 'A' : 'B', user })
+      return prefix !== undefined ? badReply : '{"id":"refine_recovered","summary":"recovered","edits":[]}'
+    }
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'RECOVERY TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-invalid-json')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    expect(calls.map(call => call.route)).toEqual(['A', 'B'])
+    expect(calls[1]?.user).toContain('RECOVERY TRAJECTORY')
+    // Route A's rejected reply survives in the log for forensics.
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.warn.mock.calls[0]?.[0]).toContain('harness refine reply unusable (invalid-json, route A)')
+    expect(logger.warn.mock.calls[0]?.[0]).toContain(`reply: ${badReply}`)
+  })
+
+  it('reports an unusable reply as invalid-proposal, never as a planning failure', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const badReply = '{"id":"refine_bad","summary":"s","edits":[{"action":"create","kind":"memory","id":"a","content":"score "{desc}" keeps its quotes"}]}'
+    const complete = async () => badReply
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-invalid-json-final')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    const result = await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    expect(result.commitStatus).toBe('not-committed')
+    expect(result.failedAt).toBe('planning')
+    // A model-output problem is not a harness planning failure, and the message
+    // the agent sees must show what the planner actually replied.
+    expect(result.error?.code).toBe('invalid-proposal')
+    expect(result.error?.message).toContain('reply is not valid JSON')
+    expect(result.error?.message).toContain(`reply ${badReply.length} chars`)
+    // Once for the rejected Route A reply, once for the final Route B failure.
+    expect(logger.warn).toHaveBeenCalledTimes(2)
+    expect(logger.warn.mock.calls.map(call => call[0]).join('\n')).toContain('final')
+  })
+
+  it('caps the reply mirrored into the log and reports how much was dropped', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() }
+    const longReply = `{"id":"refine_long","summary":"s "x"","edits":[{"content":"${'y'.repeat(MAX_LOGGED_REPLY_CHARS)}"}]}`
+    const complete = async () => longReply
+    const store = { ...fakeStore(), trajectory: vi.fn(() => 'TRAJECTORY') } as unknown as HarnessStore
+    const coordinator = createRefineCoordinator({
+      store,
+      completeFor: () => complete as unknown as Complete,
+      maxTrajectoryChars: 12_000,
+      logger,
+    })
+    const liveAgent = agent('route-a-long-reply')
+    liveAgent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }), { surfaceOp: 'append' })
+    liveAgent.session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createAssistantMessage({ source: { provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'ok' }] }),
+      usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 8 },
+    } as never, { surfaceOp: 'append' })
+
+    await coordinator.execute({ mode: 'plan', source: 'tool', scope: 'local', agent: liveAgent })
+    const logged = String(logger.warn.mock.calls[0]?.[0] ?? '')
+    expect(logged).toContain('reply unusable')
+    expect(logged).toContain(`+${longReply.length - MAX_LOGGED_REPLY_CHARS} chars`)
   })
 
   it('never sends an infeasible request: Route A skipped, then the Route B minimum-output gate throws', async () => {

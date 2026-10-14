@@ -50,15 +50,122 @@ export const MALFORMED_PROPOSAL_ERROR = 'malformed refinement proposal'
 /** Raised when the model reply parses but is not a valid review shape. */
 export const MALFORMED_REVIEW_ERROR = 'malformed auto-refine review'
 
+/** How a model reply failed to become the expected JSON object. */
+export type ReplyFailure =
+  /** The provider stopped at the output limit (`max-tokens`): the reply is cut. */
+  | 'output-limit'
+  /** The reply text never completes a `{...}` span. */
+  | 'truncated-json'
+  /** A complete span exists but `JSON.parse` rejects it. */
+  | 'invalid-json'
+  /** It parses, but the expected proposal/review fields are missing. */
+  | 'malformed-shape'
+
+/** Head excerpt bound for the reply diagnostic attached to a reply error. */
+export const MAX_REPLY_HEAD_CHARS = 200
+/** Tail excerpt bound; the tail is what exposes an output-limit cut. */
+export const MAX_REPLY_TAIL_CHARS = 160
+/** Cap on the whole reply diagnostic, so no message grows unbounded. */
+export const MAX_REPLY_DETAIL_CHARS = 600
+
 /**
- * True when a planner failure message means the reply was truncated or
- * malformed rather than a transport/planning failure: the same shapes the
- * coordinator classifies as `invalid-proposal` and the Route A→B fallback
- * retries as a truncated reply.
+ * Raised when the model's reply cannot be turned into a proposal/review. The
+ * reply text IS the evidence — a raw control character, an unescaped quote, or
+ * a cut-off tail — so the error carries it verbatim for logging, while the
+ * message carries a bounded head/tail excerpt for the tool output.
+ */
+export class PlannerReplyError extends Error {
+  override name = 'PlannerReplyError'
+  constructor(
+    /** Which way the reply was unusable; every value is retryable. */
+    readonly failure: ReplyFailure,
+    message: string,
+    /** The raw reply, unbounded: consumers decide how much of it to keep. */
+    readonly reply: string,
+  ) {
+    super(message)
+  }
+}
+
+/**
+ * Describe an unusable reply: the parser's own reason first, then the reply
+ * size and a bounded head/tail excerpt. The head exposes a leaked prefix or a
+ * raw control character; the tail exposes a cut-off reply. Both are needed
+ * because a parse position alone cannot tell the two apart.
+ */
+export function describeReply(reply: string, reason: string): string {
+  const head = reply.slice(0, MAX_REPLY_HEAD_CHARS)
+  const tail = reply.length > MAX_REPLY_HEAD_CHARS + MAX_REPLY_TAIL_CHARS ? reply.slice(-MAX_REPLY_TAIL_CHARS) : ''
+  return [
+    reason,
+    `reply ${reply.length} chars`,
+    `head: ${head}`,
+    ...(tail === '' ? [] : [`tail: ${tail}`]),
+  ].join(' | ').slice(0, MAX_REPLY_DETAIL_CHARS)
+}
+
+/** Explicit JSON escape sequences for the control characters JSON names. */
+const CONTROL_CHAR_ESCAPES: Record<string, string> = {
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+  '\b': '\\b',
+  '\f': '\\f',
+}
+
+/**
+ * Escape raw control characters that appear INSIDE JSON string literals.
+ *
+ * Models writing multi-line markdown bodies inside a JSON string routinely emit
+ * literal newlines/tabs, which `JSON.parse` rejects with "Bad control character
+ * in string literal ...". JSON forbids raw U+0000–U+001F inside a string, so
+ * escaping them is a pure repair: it cannot alter an already-valid document, and
+ * whitespace between tokens is left untouched.
+ */
+export function escapeRawControlChars(text: string): string {
+  let repaired = ''
+  let inString = false
+  let escaped = false
+  for (const char of text) {
+    if (!inString) {
+      if (char === '"') inString = true
+      repaired += char
+      continue
+    }
+    if (escaped) {
+      // The previous character was a backslash: this one already carries an
+      // escape's meaning (or is its payload), so it is never rewritten.
+      repaired += char
+      escaped = false
+      continue
+    }
+    if (char === '\\') {
+      repaired += char
+      escaped = true
+      continue
+    }
+    if (char === '"') {
+      inString = false
+      repaired += char
+      continue
+    }
+    const code = char.codePointAt(0) ?? 0
+    repaired += code < 0x20
+      ? (CONTROL_CHAR_ESCAPES[char] ?? `\\u${code.toString(16).padStart(4, '0')}`)
+      : char
+  }
+  return repaired
+}
+
+/**
+ * True when a failure MESSAGE means the reply was unusable rather than a
+ * transport/deadline failure. In-process parse failures are typed as
+ * {@link PlannerReplyError}; this stays for seams that raise the legacy worded
+ * errors, so a custom `Complete` keeps the same retry behavior.
  */
 export function isTruncatedReply(message: string): boolean {
-  return message === TRUNCATED_JSON_ERROR
-    || message === MALFORMED_PROPOSAL_ERROR
+  return message.startsWith(TRUNCATED_JSON_ERROR)
+    || message.startsWith(MALFORMED_PROPOSAL_ERROR)
     || message.includes('Unexpected token')
     || message.includes('Unexpected end')
 }
@@ -108,20 +215,41 @@ export function extractJsonObject(text: string): string {
 
 /** Parse a refinement proposal from model text; JSON code fences are tolerated. */
 export function parseProposal(text: string): RefinementProposal {
-  const object = JSON.parse(extractJsonObject(text)) as RefinementProposal
+  const object = parseReplyObject(text) as RefinementProposal
   if (typeof object.id !== 'string' || !Array.isArray(object.edits)) {
-    throw new Error(MALFORMED_PROPOSAL_ERROR)
+    throw new PlannerReplyError('malformed-shape', describeReply(text, MALFORMED_PROPOSAL_ERROR), text)
   }
   return object
 }
 
 /** Parse a review verdict from model text; JSON code fences are tolerated. */
 export function parseAutoRefineReview(text: string): AutoRefineReview {
-  const object = JSON.parse(extractJsonObject(text)) as AutoRefineReview
+  const object = parseReplyObject(text) as AutoRefineReview
   if (typeof object.approved !== 'boolean' || typeof object.rationale !== 'string') {
-    throw new Error(MALFORMED_REVIEW_ERROR)
+    throw new PlannerReplyError('malformed-shape', describeReply(text, MALFORMED_REVIEW_ERROR), text)
   }
   return object
+}
+
+/**
+ * Extract and parse the reply's JSON object, repairing raw control characters
+ * inside string literals first. Every failure carries `text`, so a caller can
+ * log the exact reply that was rejected instead of only a parser position.
+ */
+function parseReplyObject(text: string): unknown {
+  let span: string
+  try {
+    span = extractJsonObject(text)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new PlannerReplyError('truncated-json', describeReply(text, reason), text)
+  }
+  try {
+    return JSON.parse(escapeRawControlChars(span))
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new PlannerReplyError('invalid-json', describeReply(text, `reply is not valid JSON: ${reason}`), text)
+  }
 }
 
 /** Plan a refinement through the injected seam. */

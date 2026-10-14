@@ -3,7 +3,11 @@ import {
   AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
   REFINEMENT_SYSTEM_PROMPT,
   TRUNCATED_JSON_ERROR,
+  PlannerReplyError,
+  MAX_REPLY_DETAIL_CHARS,
   autoRefineInstructions,
+  escapeRawControlChars,
+  isTruncatedReply,
   parseAutoRefineReview,
   parseProposal,
   planRefinement,
@@ -25,6 +29,91 @@ describe('proposal parsing', () => {
 
   it('rejects malformed proposals', () => {
     expect(() => parseProposal('{"id":1,"edits":[]}')).toThrow('malformed refinement proposal')
+  })
+})
+
+describe('reply repair', () => {
+  it('parses a reply whose content carries raw newlines and tabs', () => {
+    // The literal control characters in this reply make it invalid JSON until
+    // the repair escapes them — the 2026-10-13 failure mode.
+    const reply = '{"id":"refine_1","summary":"s","edits":[{"action":"create","kind":"memory","id":"a","content":"# Title\nbody\tcell"}]}'
+    const proposal = parseProposal(reply)
+    expect(proposal.edits[0]?.content).toBe('# Title\nbody\tcell')
+  })
+
+  it('repairs a raw-newline review rationale too', () => {
+    const review = parseAutoRefineReview('{"approved":true,"rationale":"line one\nline two"}')
+    expect(review.rationale).toBe('line one\nline two')
+  })
+
+  it('escapes control characters inside strings but never between tokens', () => {
+    const text = '{"a":"x\ny"}\n{"b":"z"}'
+    expect(escapeRawControlChars(text)).toBe('{"a":"x\\ny"}\n{"b":"z"}')
+  })
+
+  it('leaves already-escaped sequences and escapes\' payloads untouched', () => {
+    const text = '{"a":"x\\ny","b":"quote: \\""}'
+    expect(escapeRawControlChars(text)).toBe(text)
+  })
+
+  it('says nothing to repair for a document without raw control characters', () => {
+    const text = '{"id":"refine_1","summary":"s","edits":[]}'
+    expect(escapeRawControlChars(text)).toBe(text)
+  })
+})
+
+describe('reply failure types', () => {
+  /** Run a parser and return what it threw, so the typed failure can be asserted. */
+  function thrownBy(parse: () => unknown): unknown {
+    try {
+      parse()
+    } catch (error) {
+      return error
+    }
+    return undefined
+  }
+
+  it('types an unparseable reply and carries the rejected reply verbatim', () => {
+    const reply = '{"id":"refine_1","summary":"s "oops"","edits":[]}'
+    const thrown = thrownBy(() => parseProposal(reply))
+    expect(thrown).toBeInstanceOf(PlannerReplyError)
+    const failure = thrown as PlannerReplyError
+    expect(failure.failure).toBe('invalid-json')
+    expect(failure.reply).toBe(reply)
+    // The message must name the failure and show the reply, so the tool output
+    // stays diagnosable without reading the log.
+    expect(failure.message).toContain('reply is not valid JSON')
+    expect(failure.message).toContain(`reply ${reply.length} chars`)
+    expect(failure.message).toContain('head: {"id":"refine_1"')
+  })
+
+  it('types a reply with no complete JSON object as truncated-json', () => {
+    const thrown = thrownBy(() => parseProposal('{"id":"refine_1","summary":"s"'))
+    expect((thrown as PlannerReplyError).failure).toBe('truncated-json')
+    expect((thrown as Error).message).toContain(TRUNCATED_JSON_ERROR)
+  })
+
+  it('types a right-shaped-but-wrong-fields reply as malformed-shape', () => {
+    const thrown = thrownBy(() => parseProposal('{"id":1,"edits":[]}'))
+    expect((thrown as PlannerReplyError).failure).toBe('malformed-shape')
+    expect((thrown as Error).message).toContain('malformed refinement proposal')
+  })
+
+  it('keeps the legacy message check for seams that raise worded errors', () => {
+    expect(isTruncatedReply(TRUNCATED_JSON_ERROR)).toBe(true)
+    expect(isTruncatedReply('malformed refinement proposal | reply 20 chars')).toBe(true)
+    expect(isTruncatedReply('Unexpected end of JSON input')).toBe(true)
+    expect(isTruncatedReply('harness refinement planning failed: model request failed')).toBe(false)
+  })
+
+  it('bounds the reply diagnostic so a runaway reply cannot inflate the tool output', () => {
+    const reply = `{"id":"refine_1","summary":"s","edits":[{"content":"${'x'.repeat(4_000)}`
+    const failure = thrownBy(() => parseProposal(reply)) as PlannerReplyError
+    // The error keeps the whole reply for the log; only the message is capped.
+    expect(failure.reply).toBe(reply)
+    expect(failure.message.length).toBeLessThanOrEqual(MAX_REPLY_DETAIL_CHARS)
+    expect(failure.message).toContain('head: ')
+    expect(failure.message).toContain('tail: ')
   })
 })
 

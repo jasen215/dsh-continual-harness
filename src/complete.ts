@@ -11,6 +11,7 @@ import { createUserMessage, type RequestMessage, type ToolSchema } from '@deepse
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { bridgeAbortSignal, PhaseAbortError, PhaseTimeoutError, raceWithTimeout } from './async-safe.ts'
 import { HARNESS_STATE_KIND } from './domain.ts'
+import { describeReply, PlannerReplyError } from './planner.ts'
 import type { Complete } from './planner.ts'
 
 /** Default planning output budget for the refiner. */
@@ -20,8 +21,9 @@ export const DEFAULT_PLANNER_MAX_TOKENS = 32_000
 export const DEFAULT_COMPLETE_DEADLINE_MS = 120_000
 
 /** One `ctx.llm.stream` call collected to text, non-reasoning, raced against
- * the caller's abort signal and a per-call deadline: a timeout or an
- * `aborted` finish both fail instead of returning a partial reply. */
+ * the caller's abort signal and a per-call deadline: a timeout, an `aborted`
+ * finish, an `error` finish, or a `max-tokens` (output-limit) finish all fail
+ * instead of returning a partial reply. */
 async function streamToText(
   ctx: Context,
   params: {
@@ -53,6 +55,7 @@ async function streamToText(
   const work = (async (): Promise<string> => {
     let text = ''
     let failure: 'error' | 'aborted' | undefined
+    let hitOutputLimit = false
     for await (const chunk of llm.stream({
       provider: params.provider,
       model: params.model,
@@ -70,12 +73,24 @@ async function streamToText(
       signal: controller.signal,
     })) {
       if (chunk.type === 'text-delta') text += chunk.text
-      else if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-        failure = chunk.reason.kind
+      else if (chunk.type === 'finish') {
+        if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') failure = chunk.reason.kind
+        // `max-tokens` means the provider cut the reply at the output limit:
+        // what was collected is a truncated document, never a valid reply, so
+        // it must fail as a reply error instead of reaching the parser as if
+        // the model had finished.
+        else if (chunk.reason.kind === 'max-tokens') hitOutputLimit = true
       }
     }
     if (failure === 'aborted') throw new Error(`${params.errorPrefix} aborted: model request aborted`)
     if (failure === 'error') throw new Error(`${params.errorPrefix} failed: model request failed`)
+    if (hitOutputLimit) {
+      throw new PlannerReplyError(
+        'output-limit',
+        describeReply(text, `${params.errorPrefix} reply hit the output limit (finish reason max-tokens)`),
+        text,
+      )
+    }
     return text
   })()
   try {
